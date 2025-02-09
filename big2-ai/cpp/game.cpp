@@ -4,45 +4,488 @@
 #include <random>
 #include <numeric>
 
-Game::Game(int seed) {
-    // Create a deck of 48 card indices (0 to 47)
-    std::vector<int> deck(48);
-    std::iota(deck.begin(), deck.end(), 0);  // Fill deck with 0, 1, ..., 47
-
-    // Initialize a random engine with the provided seed
-    std::mt19937 rng(seed);
-
-    // Randomly choose who goes first
-    player_turn = rng() % 2 == 0;
-
-    // Shuffle the deck using std::shuffle (Fisher-Yates algorithm)
-    std::shuffle(deck.begin(), deck.end(), rng);
-
-    // Clear any pre-existing bits (just to be safe)
-    player_cards.reset();
-    opponent_cards.reset();
-    played_cards.reset();
-
-    // Deal 16 cards to the player
+Game::Game(bool player_turn, int player_cards[13]): player_turn(player_turn) {
+    for (int i = 0; i < 13; ++i) {
+        this->player_cards[i] = player_cards[i];
+    }
     for (int i = 0; i < 16; ++i) {
-        player_cards.set(deck[i]);
-    }
-
-    // Deal 16 cards to the opponent
-    for (int i = 16; i < 32; ++i) {
-        opponent_cards.set(deck[i]);
-    }
-    // The remaining 16 cards (indices 32 to 47) remain unused.
-}
-
-void Game::do_move(int move) {
-    // Check if the move is valid
-    if (!player_cards.test(move)) {
-        throw std::invalid_argument("Invalid move: card not in player's hand");
+        this->table_cards[i] = 0;
     }
 }
 
-vector<int> Game::get_legal_moves() const {
+void Game::doMove(Move move) {
+
+    // Single
+    if (move.combination == Move::Combination::kSingle) {
+        if (player_turn) {
+            player_cards[move.rank - 3]--;
+        } else {
+            opponent_card_num--;
+        }
+        table_cards[move.rank - 3]++;
+    }
+
+    // Double
+    if (move.combination == Move::Combination::kDouble) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 2;
+        } else {
+            opponent_card_num -= 2;
+        }
+        table_cards[move.rank - 3] += 2;
+    }
+
+    // Triple
+    if (move.combination == Move::Combination::kTriple) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 3;
+        } else {
+            opponent_card_num -= 3;
+        }
+        table_cards[move.rank - 3] += 3;
+    }
+
+    // Full house
+    if (move.combination == Move::Combination::kFullHouse) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 3;
+            player_cards[move.auxiliary - 3] -= 2;
+        } else {
+            opponent_card_num -= 3;
+            opponent_card_num -= 2;
+        }
+        table_cards[move.rank - 3] += 3;
+        table_cards[move.auxiliary - 3] += 2;
+    }
+
+    // Bomb
+    if (move.combination == Move::Combination::kBomb) {
+        if (player_turn) {
+            player_cards[move.rank - 3] = 0;
+        } else {
+            // Ace bomb has 3 cards
+            if (move.rank == 14) {
+                opponent_card_num -= 3;
+            } else {
+                opponent_card_num -= 4;
+            }
+        }
+        if (move.rank == 14) {
+            table_cards[move.rank - 3] = 3;
+        } else {
+            table_cards[move.rank - 3] = 4;
+        }
+        if (move.auxiliary != 0) {
+            if (player_turn) {
+                player_cards[move.auxiliary - 3] -= 1;
+            } else {
+                opponent_card_num -= 1;
+            }
+            table_cards[move.auxiliary - 3] += 1;
+        }
+    }
+
+    // Straight of length 5
+    if (move.combination == Move::Combination::kStraight5) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 1;
+            player_cards[move.rank - 4] -= 1;
+            player_cards[move.rank - 5] -= 1;
+            player_cards[move.rank - 6] -= 1;
+            player_cards[(move.rank + 8) % 15] -= 1;
+        } else {
+            opponent_card_num -= 5;
+        }
+        table_cards[move.rank - 3] += 1;
+        table_cards[move.rank - 4] += 1;
+        table_cards[move.rank - 5] += 1;
+        table_cards[move.rank - 6] += 1;
+        table_cards[(move.rank + 8) % 15] += 1;
+    }
+
+    // Straight of length 6
+    if (move.combination == Move::Combination::kStraight6) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 1;
+            player_cards[move.rank - 4] -= 1;
+            player_cards[move.rank - 5] -= 1;
+            player_cards[move.rank - 6] -= 1;
+            player_cards[move.rank - 7] -= 1;
+            player_cards[(move.rank + 7) % 15] -= 1;
+        } else {
+            opponent_card_num -= 6;
+        }
+        table_cards[move.rank - 3] += 1;
+        table_cards[move.rank - 4] += 1;
+        table_cards[move.rank - 5] += 1;
+        table_cards[move.rank - 6] += 1;
+        table_cards[move.rank - 7] += 1;
+        table_cards[(move.rank + 7) % 15] += 1;
+    }
+
+    // Straight of length 7
+    if (move.combination == Move::Combination::kStraight7) {
+        if (player_turn) {  
+            player_cards[move.rank - 3] -= 1;
+            player_cards[move.rank - 4] -= 1;
+            player_cards[move.rank - 5] -= 1;
+            player_cards[move.rank - 6] -= 1;
+            player_cards[move.rank - 7] -= 1;
+            player_cards[move.rank - 8] -= 1;
+            player_cards[(move.rank + 6) % 15] -= 1;
+        } else {
+            opponent_card_num -= 7;
+        }
+        table_cards[move.rank - 3] += 1;
+        table_cards[move.rank - 4] += 1;
+        table_cards[move.rank - 5] += 1;
+        table_cards[move.rank - 6] += 1;
+        table_cards[move.rank - 7] += 1;
+        table_cards[move.rank - 8] += 1;
+        table_cards[(move.rank + 6) % 15] += 1;
+    }
+
+    // Straight of length 8
+    if (move.combination == Move::Combination::kStraight8) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 1;
+            player_cards[move.rank - 4] -= 1;
+            player_cards[move.rank - 5] -= 1;
+            player_cards[move.rank - 6] -= 1;
+            player_cards[move.rank - 7] -= 1;
+            player_cards[move.rank - 8] -= 1;
+            player_cards[move.rank - 9] -= 1;
+            player_cards[(move.rank + 5) % 15] -= 1;
+        } else {
+            opponent_card_num -= 8;
+        }
+        table_cards[move.rank - 3] += 1;
+        table_cards[move.rank - 4] += 1;
+        table_cards[move.rank - 5] += 1;
+        table_cards[move.rank - 6] += 1;
+        table_cards[move.rank - 7] += 1;
+        table_cards[move.rank - 8] += 1;
+        table_cards[move.rank - 9] += 1;
+        table_cards[(move.rank + 5) % 15] += 1;
+    }
+
+    // Straight of length 9
+    if (move.combination == Move::Combination::kStraight9) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 1;
+            player_cards[move.rank - 4] -= 1;
+            player_cards[move.rank - 5] -= 1;
+            player_cards[move.rank - 6] -= 1;
+            player_cards[move.rank - 7] -= 1;
+            player_cards[move.rank - 8] -= 1;
+            player_cards[move.rank - 9] -= 1;
+            player_cards[move.rank - 10] -= 1;
+            player_cards[(move.rank + 4) % 15] -= 1;
+        } else {
+            opponent_card_num -= 9;
+        }
+        table_cards[move.rank - 3] += 1;
+        table_cards[move.rank - 4] += 1;
+        table_cards[move.rank - 5] += 1;
+        table_cards[move.rank - 6] += 1;
+        table_cards[move.rank - 7] += 1;
+        table_cards[move.rank - 8] += 1;
+        table_cards[move.rank - 9] += 1;
+        table_cards[move.rank - 10] += 1;
+        table_cards[(move.rank + 4) % 15] += 1;
+    }
+
+    // Straight of length 10
+    if (move.combination == Move::Combination::kStraight10) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 1;
+            player_cards[move.rank - 4] -= 1;
+            player_cards[move.rank - 5] -= 1;
+            player_cards[move.rank - 6] -= 1;
+            player_cards[move.rank - 7] -= 1;
+            player_cards[move.rank - 8] -= 1;
+            player_cards[move.rank - 9] -= 1;
+            player_cards[move.rank - 10] -= 1;
+            player_cards[move.rank - 11] -= 1;
+            player_cards[move.rank - 12] -= 1;
+            player_cards[(move.rank + 3) % 15] -= 1;
+        } else {
+            opponent_card_num -= 10;
+        }
+        table_cards[move.rank - 3] += 1;
+        table_cards[move.rank - 4] += 1;
+        table_cards[move.rank - 5] += 1;
+        table_cards[move.rank - 6] += 1;
+        table_cards[move.rank - 7] += 1;
+        table_cards[move.rank - 8] += 1;
+        table_cards[move.rank - 9] += 1;
+        table_cards[move.rank - 10] += 1;
+        table_cards[move.rank - 11] += 1;
+        table_cards[move.rank - 12] += 1;
+        table_cards[(move.rank + 3) % 15] += 1;
+    }
+
+    // Straight of length 11
+    if (move.combination == Move::Combination::kStraight11) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 1;
+            player_cards[move.rank - 4] -= 1;
+            player_cards[move.rank - 5] -= 1;
+            player_cards[move.rank - 6] -= 1;
+            player_cards[move.rank - 7] -= 1;
+            player_cards[move.rank - 8] -= 1;
+            player_cards[move.rank - 9] -= 1;
+            player_cards[move.rank - 10] -= 1;
+            player_cards[move.rank - 11] -= 1;
+            player_cards[move.rank - 12] -= 1;
+            player_cards[move.rank - 13] -= 1;
+            player_cards[(move.rank + 2) % 15] -= 1;
+        } else {
+            opponent_card_num -= 11;
+        }
+        table_cards[move.rank - 3] += 1;
+        table_cards[move.rank - 4] += 1;
+        table_cards[move.rank - 5] += 1;
+        table_cards[move.rank - 6] += 1;
+        table_cards[move.rank - 7] += 1;
+        table_cards[move.rank - 8] += 1;
+        table_cards[move.rank - 9] += 1;
+        table_cards[move.rank - 10] += 1;
+        table_cards[move.rank - 11] += 1;
+        table_cards[move.rank - 12] += 1;
+        table_cards[move.rank - 13] += 1;
+        table_cards[(move.rank + 2) % 15] += 1;
+    }
+
+    // Straight of length 12
+    if (move.combination == Move::Combination::kStraight12) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 1;
+            player_cards[move.rank - 4] -= 1;
+            player_cards[move.rank - 5] -= 1;
+            player_cards[move.rank - 6] -= 1;
+            player_cards[move.rank - 7] -= 1;
+            player_cards[move.rank - 8] -= 1;
+            player_cards[move.rank - 9] -= 1;
+            player_cards[move.rank - 10] -= 1;
+            player_cards[move.rank - 11] -= 1;
+            player_cards[move.rank - 12] -= 1;
+            player_cards[move.rank - 13] -= 1;
+            player_cards[(move.rank + 1) % 15] -= 1;
+        } else {
+            opponent_card_num -= 12;
+        }
+        table_cards[move.rank - 3] += 1;
+        table_cards[move.rank - 4] += 1;
+        table_cards[move.rank - 5] += 1;
+        table_cards[move.rank - 6] += 1;
+        table_cards[move.rank - 7] += 1;
+        table_cards[move.rank - 8] += 1;
+        table_cards[move.rank - 9] += 1;
+        table_cards[move.rank - 10] += 1;
+        table_cards[move.rank - 11] += 1;
+        table_cards[move.rank - 12] += 1;
+        table_cards[move.rank - 13] += 1;
+        table_cards[(move.rank + 1) % 15] += 1;
+    }
+
+    // Straight of length 13
+    if (move.combination == Move::Combination::kStraight13) {
+        if (player_turn) {
+            for (int i = 0; i < 13; ++i) {
+                player_cards[i] -= 1;
+                table_cards[i] += 1;
+            }
+        } else {
+            opponent_card_num -= 13;
+            for (int i = 0; i < 13; ++i) {
+                table_cards[i] += 1;
+            }
+        }
+    }
+        
+    // Sisters of length 2
+    if (move.combination == Move::Combination::kDoubleStraight2) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 2;
+            player_cards[move.rank - 4] -= 2;
+        } else {
+            opponent_card_num -= 4;
+        }
+        table_cards[move.rank - 3] += 2;
+        table_cards[move.rank - 4] += 2;
+    }
+
+    // Sisters of length 3
+    if (move.combination == Move::Combination::kDoubleStraight3) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 2;
+            player_cards[move.rank - 4] -= 2;
+            player_cards[move.rank - 5] -= 2;
+        } else {
+            opponent_card_num -= 6;
+        }
+        table_cards[move.rank - 3] += 2;
+        table_cards[move.rank - 4] += 2;
+        table_cards[move.rank - 5] += 2;
+    }
+
+    // Sisters of length 4
+    if (move.combination == Move::Combination::kDoubleStraight4) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 2;
+            player_cards[move.rank - 4] -= 2;
+            player_cards[move.rank - 5] -= 2;
+            player_cards[move.rank - 6] -= 2;
+        } else {
+            opponent_card_num -= 8;
+        }
+        table_cards[move.rank - 3] += 2;
+        table_cards[move.rank - 4] += 2;
+        table_cards[move.rank - 5] += 2;
+        table_cards[move.rank - 6] += 2;
+    }
+
+    // Sisters of length 5
+    if (move.combination == Move::Combination::kDoubleStraight5) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 2;
+            player_cards[move.rank - 4] -= 2;
+            player_cards[move.rank - 5] -= 2;
+            player_cards[move.rank - 6] -= 2;
+            player_cards[move.rank - 7] -= 2;
+        } else {
+            opponent_card_num -= 10;
+        }
+        table_cards[move.rank - 3] += 2;
+        table_cards[move.rank - 4] += 2;
+        table_cards[move.rank - 5] += 2;
+        table_cards[move.rank - 6] += 2;
+        table_cards[move.rank - 7] += 2;
+    }
+
+    // Sisters of length 6
+    if (move.combination == Move::Combination::kDoubleStraight6) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 2;
+            player_cards[move.rank - 4] -= 2;
+            player_cards[move.rank - 5] -= 2;
+            player_cards[move.rank - 6] -= 2;
+            player_cards[move.rank - 7] -= 2;
+        } else {
+            opponent_card_num -= 12;
+        }
+        table_cards[move.rank - 3] += 2;
+        table_cards[move.rank - 4] += 2;
+        table_cards[move.rank - 5] += 2;
+        table_cards[move.rank - 6] += 2;
+        table_cards[move.rank - 7] += 2;
+    }
+
+    // Sisters of length 7
+    if (move.combination == Move::Combination::kDoubleStraight7) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 2;
+            player_cards[move.rank - 4] -= 2;
+            player_cards[move.rank - 5] -= 2;
+            player_cards[move.rank - 6] -= 2;
+            player_cards[move.rank - 7] -= 2;
+        } else {
+            opponent_card_num -= 14;
+        }
+        table_cards[move.rank - 3] += 2;
+        table_cards[move.rank - 4] += 2;
+        table_cards[move.rank - 5] += 2;
+        table_cards[move.rank - 6] += 2;
+        table_cards[move.rank - 7] += 2;
+    }
+
+    // Sisters of length 8
+    if (move.combination == Move::Combination::kDoubleStraight8) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 2;
+            player_cards[move.rank - 4] -= 2;
+            player_cards[move.rank - 5] -= 2;
+            player_cards[move.rank - 6] -= 2;
+            player_cards[move.rank - 7] -= 2;
+        } else {
+            opponent_card_num = 0;
+        }
+        table_cards[move.rank - 3] += 2;
+        table_cards[move.rank - 4] += 2;
+        table_cards[move.rank - 5] += 2;
+        table_cards[move.rank - 6] += 2;
+        table_cards[move.rank - 7] += 2;
+    }
+
+    // Triple straights of length 2
+    if (move.combination == Move::Combination::kTripleStraight2) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 3;
+            player_cards[move.rank - 4] -= 3;
+        } else {
+            opponent_card_num -= 6;
+        }
+        table_cards[move.rank - 3] += 3;
+        table_cards[move.rank - 4] += 3;
+    }
+
+    // Triple straights of length 3
+    if (move.combination == Move::Combination::kTripleStraight3) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 3;
+            player_cards[move.rank - 4] -= 3;
+            player_cards[move.rank - 5] -= 3;
+        } else {
+            opponent_card_num -= 9;
+        }
+        table_cards[move.rank - 3] += 3;
+        table_cards[move.rank - 4] += 3;
+        table_cards[move.rank - 5] += 3;
+    }
+
+    // Triple straights of length 4
+    if (move.combination == Move::Combination::kTripleStraight4) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 3;
+            player_cards[move.rank - 4] -= 3;
+            player_cards[move.rank - 5] -= 3;
+            player_cards[move.rank - 6] -= 3;
+        } else {
+            opponent_card_num -= 12;
+        }
+        table_cards[move.rank - 3] += 3;
+        table_cards[move.rank - 4] += 3;
+        table_cards[move.rank - 5] += 3;
+        table_cards[move.rank - 6] += 3;
+        table_cards[move.rank - 7] += 3;
+    }
+
+    // Triple straights of length 5
+    if (move.combination == Move::Combination::kTripleStraight5) {
+        if (player_turn) {
+            player_cards[move.rank - 3] -= 3;
+            player_cards[move.rank - 4] -= 3;
+            player_cards[move.rank - 5] -= 3;
+            player_cards[move.rank - 6] -= 3;
+            player_cards[move.rank - 7] -= 3;
+        } else {
+            opponent_card_num -= 15;
+        }
+        table_cards[move.rank - 3] += 3;
+        table_cards[move.rank - 4] += 3;
+        table_cards[move.rank - 5] += 3;
+        table_cards[move.rank - 6] += 3;
+        table_cards[move.rank - 7] += 3;
+    }
+
+    // Switch turn
+    player_turn = !player_turn;
+    last_move = move;
+    
+}
+
+vector<int> Game::getLegalMoves() const {
     vector<int> legal_moves;
 
     // Pass as last move means new trick

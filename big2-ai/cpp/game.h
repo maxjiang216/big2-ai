@@ -12,12 +12,16 @@ class Game {
     // A game state for Big 2
 
     public:
-        Game(int seed = 0);
+        Game() = default;
+        Game(const Game& other) = default;
         ~Game() = default;
 
-        void do_move(int move);
+        // Initialize the deal
+        Game(bool player_turn, int player_cards[13]);
 
-        vector<int> get_legal_moves() const;
+        void doMove(Move move);
+
+        vector<int> getLegalMoves() const;
         
 
     private:
@@ -26,11 +30,11 @@ class Game {
         // The player's cards
         int player_cards[13];
         // The opponent's cards
-        int opponent_cards[13];
+        int opponent_card_num{16};
         // Cards played so far
-        int played_cards[13];
+        int table_cards[13];
         // The last move
-        Move last_move;
+        Move last_move{Move::Combination::kPass};
         
 };
 
