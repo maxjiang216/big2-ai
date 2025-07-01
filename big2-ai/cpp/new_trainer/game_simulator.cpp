@@ -15,7 +15,6 @@ GameSimulator::GameSimulator(
 {}
 
 GameRecord GameSimulator::run() {
-    GameRecord record;
     // Initialize game state and inform players
     initialize_game();
 
@@ -25,8 +24,6 @@ GameRecord GameSimulator::run() {
     // Main play loop
     play_loop();
 
-    // Finalize record with outcome
-    _record.set_result(_game.get_winner(), _game.get_cards_remaining());
     return _record;
 }
 
@@ -60,7 +57,7 @@ void GameSimulator::play_turn() {
     _game.apply_move(move);
 
     // Record the move
-    _record.add_move(current, move);
+    _record.add_move(move);
 
     // Notify opponent of the move
     other_player->accept_opponent_move(move);

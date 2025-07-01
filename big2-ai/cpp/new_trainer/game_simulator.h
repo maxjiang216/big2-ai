@@ -35,7 +35,7 @@ private:
     std::unique_ptr<Player> _player1;
     std::mt19937 &_rng;
     Game _game;  // Internal game state, handles deck, hands, tricks, scoring
-    Record _record;
+    GameRecord _record;
 
     /**
      * @brief Initialize the game: shuffle, deal, determine initiative.
