@@ -58,7 +58,7 @@ private:
     std::array<std::array<int,13>,2> hands_;
     std::array<int,13>                discard_pile_;
     int                             current_player_;
-    Move last_move{Move::Combination::kPass};
+    Move last_move_{Move::Combination::kPass};
 
     friend std::ostream& operator<<(std::ostream& os, const Game& game);
 };

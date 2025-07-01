@@ -43,11 +43,350 @@ bool Game::is_over() const {
 }
 
 void Game::apply_move(const Move &move) {
-    // TODO: implement full move application logic (remove cards, update trick, handle pass)
-    // Example for single:
-    if(move.combination == Move::Combination::kSingle) {
-        hands_[current_player_][move.rank] -= 1;
+    
+       // Single
+    if (move.combination == Move::Combination::kSingle) {
+        --hands_[current_player_][move.rank - 3];
+        ++discard_pile_[move.rank - 3];
     }
+    // Double
+    else if (move.combination == Move::Combination::kDouble) {
+        hands_[current_player_][move.rank - 3] -= 2;
+        discard_pile_[move.rank - 3] += 2;
+    }
+    // Triple
+    else if (move.combination == Move::Combination::kTriple) {
+        hands_[current_player_][move.rank - 3] -= 3;
+        discard_pile_[move.rank - 3] += 3;
+    }
+    // Full house
+    if (move.combination == Move::Combination::kFullHouse) {
+        hands_[current_player_][move.rank - 3] -= 3;
+        hands_[current_player_][move.auxiliary - 3] -= 2;
+        discard_pile_[move.rank - 3] += 3;
+        discard_pile_[move.auxiliary - 3] += 2;
+    }
+    // Bomb
+    if (move.combination == Move::Combination::kBomb) {
+        // Always uses all the cards
+        hands_[current_player_][move.rank - 3] = 0;
+        if (move.rank == 14) {
+            discard_pile_[11] = 3;
+        }
+        else {
+            discard_pile_[move.rank - 3] = 4;
+        }
+        // Optional add-on card
+        if (move.auxiliary != 0) {
+            --hands_[current_player_][move.auxiliary - 3];
+            ++discard_pile_[move.auxiliary - 3];
+        }
+    }
+    // Straight of length 5
+    if (move.combination == Move::Combination::kStraight5) {
+        --hands_[current_player_][move.rank - 3];
+        --hands_[current_player_][move.rank - 4];
+        --hands_[current_player_][move.rank - 5];
+        --hands_[current_player_][move.rank - 6];
+        --hands_[current_player_][(move.rank + 6) % 13];
+        ++discard_pile_[move.rank - 3];
+        ++discard_pile_[move.rank - 4];
+        ++discard_pile_[move.rank - 5];
+        ++discard_pile_[move.rank - 6];
+        ++discard_pile_[(move.rank + 6) % 13];
+    }
+    // Straight of length 6
+    if (move.combination == Move::Combination::kStraight6) {
+        --hands_[current_player_][move.rank - 3];
+        --hands_[current_player_][move.rank - 4];
+        --hands_[current_player_][move.rank - 5];
+        --hands_[current_player_][move.rank - 6];
+        --hands_[current_player_][move.rank - 7];
+        --hands_[current_player_][(move.rank + 5) % 13];
+        ++discard_pile_[move.rank - 3];
+        ++discard_pile_[move.rank - 4];
+        ++discard_pile_[move.rank - 5];
+        ++discard_pile_[move.rank - 6];
+        ++discard_pile_[move.rank - 7];
+        ++discard_pile_[(move.rank + 5) % 13];
+    }
+    // Straight of length 7
+    if (move.combination == Move::Combination::kStraight7) {
+        --hands_[current_player_][move.rank - 3];
+        --hands_[current_player_][move.rank - 4];
+        --hands_[current_player_][move.rank - 5];
+        --hands_[current_player_][move.rank - 6];
+        --hands_[current_player_][move.rank - 7];
+        --hands_[current_player_][move.rank - 8];
+        --hands_[current_player_][(move.rank + 4) % 13];
+        ++discard_pile_[move.rank - 3];
+        ++discard_pile_[move.rank - 4];
+        ++discard_pile_[move.rank - 5];
+        ++discard_pile_[move.rank - 6];
+        ++discard_pile_[move.rank - 7];
+        ++discard_pile_[move.rank - 8];
+        ++discard_pile_[(move.rank + 4) % 13];
+    }
+    // Straight of length 8
+    if (move.combination == Move::Combination::kStraight8) {
+        --hands_[current_player_][move.rank - 3];
+        --hands_[current_player_][move.rank - 4];
+        --hands_[current_player_][move.rank - 5];
+        --hands_[current_player_][move.rank - 6];
+        --hands_[current_player_][move.rank - 7];
+        --hands_[current_player_][move.rank - 8];
+        --hands_[current_player_][move.rank - 9];
+        --hands_[current_player_][(move.rank + 3) % 13];
+        ++discard_pile_[move.rank - 3];
+        ++discard_pile_[move.rank - 4];
+        ++discard_pile_[move.rank - 5];
+        ++discard_pile_[move.rank - 6];
+        ++discard_pile_[move.rank - 7];
+        ++discard_pile_[move.rank - 8];
+        ++discard_pile_[move.rank - 9];
+        ++discard_pile_[(move.rank + 3) % 13];
+    }
+
+    // Straight of length 9
+    if (move.combination == Move::Combination::kStraight9) {
+        --hands_[current_player_][move.rank - 3];
+        --hands_[current_player_][move.rank - 4];
+        --hands_[current_player_][move.rank - 5];
+        --hands_[current_player_][move.rank - 6];
+        --hands_[current_player_][move.rank - 7];
+        --hands_[current_player_][move.rank - 8];
+        --hands_[current_player_][move.rank - 9];
+        --hands_[current_player_][move.rank - 10];
+        --hands_[current_player_][(move.rank + 2) % 13];
+        ++discard_pile_[move.rank - 3];
+        ++discard_pile_[move.rank - 4];
+        ++discard_pile_[move.rank - 5];
+        ++discard_pile_[move.rank - 6];
+        ++discard_pile_[move.rank - 7];
+        ++discard_pile_[move.rank - 8];
+        ++discard_pile_[move.rank - 9];
+        ++discard_pile_[move.rank - 10];
+        ++discard_pile_[(move.rank + 2) % 13];
+    }
+
+    // Straight of length 10
+    if (move.combination == Move::Combination::kStraight10) {
+        --hands_[current_player_][move.rank - 3];
+        --hands_[current_player_][move.rank - 4];
+        --hands_[current_player_][move.rank - 5];
+        --hands_[current_player_][move.rank - 6];
+        --hands_[current_player_][move.rank - 7];
+        --hands_[current_player_][move.rank - 8];
+        --hands_[current_player_][move.rank - 9];
+        --hands_[current_player_][move.rank - 10];
+        --hands_[current_player_][move.rank - 11];
+        --hands_[current_player_][(move.rank + 1) % 13];
+        ++discard_pile_[move.rank - 3];
+        ++discard_pile_[move.rank - 4];
+        ++discard_pile_[move.rank - 5];
+        ++discard_pile_[move.rank - 6];
+        ++discard_pile_[move.rank - 7];
+        ++discard_pile_[move.rank - 8];
+        ++discard_pile_[move.rank - 9];
+        ++discard_pile_[move.rank - 10];
+        ++discard_pile_[move.rank - 11];
+        ++discard_pile_[(move.rank + 1) % 13];
+    }
+
+    // Straight of length 11
+    if (move.combination == Move::Combination::kStraight11) {
+        --hands_[current_player_][move.rank - 3];
+        --hands_[current_player_][move.rank - 4];
+        --hands_[current_player_][move.rank - 5];
+        --hands_[current_player_][move.rank - 6];
+        --hands_[current_player_][move.rank - 7];
+        --hands_[current_player_][move.rank - 8];
+        --hands_[current_player_][move.rank - 9];
+        --hands_[current_player_][move.rank - 10];
+        --hands_[current_player_][move.rank - 11];
+        --hands_[current_player_][move.rank - 12];
+        --hands_[current_player_][move.rank % 13];
+        ++discard_pile_[move.rank - 3];
+        ++discard_pile_[move.rank - 4];
+        ++discard_pile_[move.rank - 5];
+        ++discard_pile_[move.rank - 6];
+        ++discard_pile_[move.rank - 7];
+        ++discard_pile_[move.rank - 8];
+        ++discard_pile_[move.rank - 9];
+        ++discard_pile_[move.rank - 10];
+        ++discard_pile_[move.rank - 11];
+        ++discard_pile_[move.rank - 12];
+        ++discard_pile_[move.rank % 13];
+    }
+
+    // Straight of length 12
+    if (move.combination == Move::Combination::kStraight12) {
+        --hands_[current_player_][move.rank - 3];
+        --hands_[current_player_][move.rank - 4];
+        --hands_[current_player_][move.rank - 5];
+        --hands_[current_player_][move.rank - 6];
+        --hands_[current_player_][move.rank - 7];
+        --hands_[current_player_][move.rank - 8];
+        --hands_[current_player_][move.rank - 9];
+        --hands_[current_player_][move.rank - 10];
+        --hands_[current_player_][move.rank - 11];
+        --hands_[current_player_][move.rank - 12];
+        --hands_[current_player_][move.rank - 13];
+        --hands_[current_player_][(move.rank - 1) % 13];
+        ++discard_pile_[move.rank - 3];
+        ++discard_pile_[move.rank - 4];
+        ++discard_pile_[move.rank - 5];
+        ++discard_pile_[move.rank - 6];
+        ++discard_pile_[move.rank - 7];
+        ++discard_pile_[move.rank - 8];
+        ++discard_pile_[move.rank - 9];
+        ++discard_pile_[move.rank - 10];
+        ++discard_pile_[move.rank - 11];
+        ++discard_pile_[move.rank - 12];
+        ++discard_pile_[move.rank - 13];
+        ++discard_pile_[(move.rank - 1) % 13];
+    }
+    // Straight of length 13
+    if (move.combination == Move::Combination::kStraight13) {
+        for (int i = 0; i < 13; ++i) {
+            --hands_[current_player_][i];
+            ++discard_pile_[i];
+        }
+    }
+    // Sisters of length 2
+    if (move.combination == Move::Combination::kDoubleStraight2) {
+        hands_[current_player_][move.rank - 3] -= 2;
+        hands_[current_player_][move.rank - 4] -= 2;
+        discard_pile_[move.rank - 3] += 2;
+        discard_pile_[move.rank - 4] += 2;
+    }
+    // Sisters of length 3
+    if (move.combination == Move::Combination::kDoubleStraight3) {
+        hands_[current_player_][move.rank - 3] -= 2;
+        hands_[current_player_][move.rank - 4] -= 2;
+        hands_[current_player_][move.rank - 5] -= 2;
+        discard_pile_[move.rank - 3] += 2;
+        discard_pile_[move.rank - 4] += 2;
+        discard_pile_[move.rank - 5] += 2;
+    }
+    // Sisters of length 4
+    if (move.combination == Move::Combination::kDoubleStraight4) {
+        hands_[current_player_][move.rank - 3] -= 2;
+        hands_[current_player_][move.rank - 4] -= 2;
+        hands_[current_player_][move.rank - 5] -= 2;
+        hands_[current_player_][move.rank - 6] -= 2;
+        discard_pile_[move.rank - 3] += 2;
+        discard_pile_[move.rank - 4] += 2;
+        discard_pile_[move.rank - 5] += 2;
+        discard_pile_[move.rank - 6] += 2;
+    }
+    // Sisters of length 5
+    if (move.combination == Move::Combination::kDoubleStraight5) {
+        hands_[current_player_][move.rank - 3] -= 2;
+        hands_[current_player_][move.rank - 4] -= 2;
+        hands_[current_player_][move.rank - 5] -= 2;
+        hands_[current_player_][move.rank - 6] -= 2;
+        hands_[current_player_][move.rank - 7] -= 2;
+        discard_pile_[move.rank - 3] += 2;
+        discard_pile_[move.rank - 4] += 2;
+        discard_pile_[move.rank - 5] += 2;
+        discard_pile_[move.rank - 6] += 2;
+        discard_pile_[move.rank - 7] += 2;
+    }
+    // Sisters of length 6
+    if (move.combination == Move::Combination::kDoubleStraight6) {
+        hands_[current_player_][move.rank - 3] -= 2;
+        hands_[current_player_][move.rank - 4] -= 2;
+        hands_[current_player_][move.rank - 5] -= 2;
+        hands_[current_player_][move.rank - 6] -= 2;
+        hands_[current_player_][move.rank - 7] -= 2;
+        hands_[current_player_][move.rank - 8] -= 2;
+        discard_pile_[move.rank - 3] += 2;
+        discard_pile_[move.rank - 4] += 2;
+        discard_pile_[move.rank - 5] += 2;
+        discard_pile_[move.rank - 6] += 2;
+        discard_pile_[move.rank - 7] += 2;
+        discard_pile_[move.rank - 8] += 2;
+    }
+    // Sisters of length 7
+    if (move.combination == Move::Combination::kDoubleStraight7) {
+        hands_[current_player_][move.rank - 3] -= 2;
+        hands_[current_player_][move.rank - 4] -= 2;
+        hands_[current_player_][move.rank - 5] -= 2;
+        hands_[current_player_][move.rank - 6] -= 2;
+        hands_[current_player_][move.rank - 7] -= 2;
+        hands_[current_player_][move.rank - 8] -= 2;
+        hands_[current_player_][move.rank - 9] -= 2;
+        discard_pile_[move.rank - 3] += 2;
+        discard_pile_[move.rank - 4] += 2;
+        discard_pile_[move.rank - 5] += 2;
+        discard_pile_[move.rank - 6] += 2;
+        discard_pile_[move.rank - 7] += 2;
+        discard_pile_[move.rank - 8] += 2;
+        discard_pile_[move.rank - 9] += 2;
+    }
+    // Sisters of length 8
+    if (move.combination == Move::Combination::kDoubleStraight8) {
+        hands_[current_player_][move.rank - 3] -= 2;
+        hands_[current_player_][move.rank - 4] -= 2;
+        hands_[current_player_][move.rank - 5] -= 2;
+        hands_[current_player_][move.rank - 6] -= 2;
+        hands_[current_player_][move.rank - 7] -= 2;
+        hands_[current_player_][move.rank - 8] -= 2;
+        hands_[current_player_][move.rank - 9] -= 2;
+        hands_[current_player_][move.rank - 10] -= 2;
+        discard_pile_[move.rank - 3] += 2;
+        discard_pile_[move.rank - 4] += 2;
+        discard_pile_[move.rank - 5] += 2;
+        discard_pile_[move.rank - 6] += 2;
+        discard_pile_[move.rank - 7] += 2;
+        discard_pile_[move.rank - 8] += 2;
+        discard_pile_[move.rank - 9] += 2;
+        discard_pile_[move.rank - 10] += 2;
+    }
+    // Triple straights of length 2
+    if (move.combination == Move::Combination::kTripleStraight2) {
+        hands_[current_player_][move.rank - 3] -= 3;
+        hands_[current_player_][move.rank - 4] -= 3;
+        discard_pile_[move.rank - 3] += 3;
+        discard_pile_[move.rank - 4] += 3;
+    }
+    // Triple straights of length 3
+    if (move.combination == Move::Combination::kTripleStraight3) {
+        hands_[current_player_][move.rank - 3] -= 3;
+        hands_[current_player_][move.rank - 4] -= 3;
+        hands_[current_player_][move.rank - 5] -= 3;
+        discard_pile_[move.rank - 3] += 3;
+        discard_pile_[move.rank - 4] += 3;
+        discard_pile_[move.rank - 5] += 3;
+    }
+
+    // Triple straights of length 4
+    if (move.combination == Move::Combination::kTripleStraight4) {
+        hands_[current_player_][move.rank - 3] -= 3;
+        hands_[current_player_][move.rank - 4] -= 3;
+        hands_[current_player_][move.rank - 5] -= 3;
+        hands_[current_player_][move.rank - 6] -= 3;
+        discard_pile_[move.rank - 3] += 3;
+        discard_pile_[move.rank - 4] += 3;
+        discard_pile_[move.rank - 5] += 3;
+        discard_pile_[move.rank - 6] += 3;
+    }
+
+    // Triple straights of length 5
+    if (move.combination == Move::Combination::kTripleStraight5) {
+        hands_[current_player_][move.rank - 3] -= 3;
+        hands_[current_player_][move.rank - 4] -= 3;
+        hands_[current_player_][move.rank - 5] -= 3;
+        hands_[current_player_][move.rank - 6] -= 3;
+        hands_[current_player_][move.rank - 7] -= 3;
+        discard_pile_[move.rank - 3] += 3;
+        discard_pile_[move.rank - 4] += 3;
+        discard_pile_[move.rank - 5] += 3;
+        discard_pile_[move.rank - 6] += 3;
+        discard_pile_[move.rank - 7] += 3;
+    }
+    last_move_ = move;
     // Advance turn (simplest: alternate)
     current_player_ = 1 - current_player_;
 }
