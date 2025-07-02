@@ -54,6 +54,8 @@ public:
      */
     std::vector<int> get_player_hand(int player) const;
 
+    std::vector<int> get_legal_moves() const;
+
 private:
     std::array<std::array<int,13>,2> hands_;
     std::array<int,13>                discard_pile_;

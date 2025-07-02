@@ -122,7 +122,7 @@ Move::Move(int encoded_move) {
         rank = r;
     }
     else if (encoded_move < kTRIPLESTRAIGHT2_START) {
-        int r = encoded_move - kDOUBLESTRAIGHT7_START + 10;
+        int r = encoded_move - kDOUBLESTRAIGHT7_START + 9;
         combination = Combination::kDoubleStraight7;
         rank = r;
     }
@@ -147,7 +147,7 @@ Move::Move(int encoded_move) {
         rank = r;
     }
     else {
-        int r = encoded_move - kDOUBLESTRAIGHT8_START + 9;
+        int r = encoded_move - kDOUBLESTRAIGHT8_START + 10;
         combination = Combination::kDoubleStraight8;
         rank = r;
     }
@@ -328,7 +328,7 @@ std::ostream& operator<<(std::ostream& os, const Move& move) {
     }
     else if (move.combination == Move::Combination::kBomb) {
         if (move.rank == 14) {
-            os << "AAAA";
+            os << "AAA";
         }
         else {
             os << rank_char << rank_char << rank_char << rank_char;
