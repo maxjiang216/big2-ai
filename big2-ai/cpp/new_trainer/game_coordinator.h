@@ -26,6 +26,7 @@ public:
                   std::shared_ptr<PlayerFactory> player_factory_p1,
                   int num_games, const std::string &output_path,
                   int num_threads,
+                  const std::string& log_path = "",
                   unsigned int random_seed = std::random_device{}());
 
   /**
@@ -45,6 +46,7 @@ private:
   int _num_games;
   std::string _output_path;
   int _num_threads;
+  std::string _log_path;
   unsigned int _rng_seed;
 
   /**

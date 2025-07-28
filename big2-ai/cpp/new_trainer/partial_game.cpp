@@ -1,12 +1,19 @@
+#include <iostream>
+#include <iomanip>  // For std::setw
 #include "partial_game.h"
 #include "util.h" // for encodeMove and MOVE_TO_CARDS
+using namespace std;
 
 // Initialize with a given player hand; other state defaults
 // Only used at the beginning of a game
 PartialGame::PartialGame(const std::array<int, 13> &player_hand, int turn)
     : turn(turn), // Indicates if it is currently the player's turn
       player_hand_(player_hand), opponent_card_count_(16), discard_pile_{},
-      last_move_(Move::Combination::kPass) {}
+      last_move_(Move::Combination::kPass) {
+  for (int i = 0; i < 13; ++i) {
+    discard_pile_[i] = 0;
+  }
+      }
 
 PartialGame::PartialGame(const Game &game, int player_num)
     : turn(game.current_player() == player_num
@@ -58,16 +65,19 @@ std::vector<int> PartialGame::get_legal_moves() const {
   }
   for (int move_id = kSINGLE_START; move_id < LEGAL_MOVES_SIZE; ++move_id) {
     Move move(move_id);
-    if (move.combination != Move::Combination::kBomb) {
-      // If not bomb, needs to be same type and larger rank
-      if (move.combination != last_move_.combination ||
-          move.rank <= last_move_.rank)
-        continue;
-    } else {
-      // If bomb, just needs to be larger than possible last bomb
-      if (last_move_.combination == Move::Combination::kBomb &&
-          move.rank <= last_move_.rank)
-        continue;
+    // If it is a new trick, any trick can be played
+    if (last_move_.combination != Move::Combination::kPass) {
+      if (move.combination != Move::Combination::kBomb) {
+        // If not bomb, needs to be same type and larger rank
+        if (move.combination != last_move_.combination ||
+            move.rank <= last_move_.rank)
+          continue;
+      } else {
+        // If bomb, just needs to be larger than possible last bomb
+        if (last_move_.combination == Move::Combination::kBomb &&
+            move.rank <= last_move_.rank)
+          continue;
+      }
     }
     bool is_legal = true;
     for (int rank = 0; rank < 13; ++rank) {
@@ -91,16 +101,19 @@ std::vector<int> PartialGame::get_possible_moves() const {
   }
   for (int move_id = kSINGLE_START; move_id < LEGAL_MOVES_SIZE; ++move_id) {
     Move move(move_id);
-    if (move.combination != Move::Combination::kBomb) {
-      // If not bomb, needs to be same type and larger rank
-      if (move.combination != last_move_.combination ||
-          move.rank <= last_move_.rank)
-        continue;
-    } else {
-      // If bomb, just needs to be larger than possible last bomb
-      if (last_move_.combination == Move::Combination::kBomb &&
-          move.rank <= last_move_.rank)
-        continue;
+    // If it is a new trick, any trick can be played
+    if (last_move_.combination != Move::Combination::kPass) {
+      if (move.combination != Move::Combination::kBomb) {
+        // If not bomb, needs to be same type and larger rank
+        if (move.combination != last_move_.combination ||
+            move.rank <= last_move_.rank)
+          continue;
+      } else {
+        // If bomb, just needs to be larger than possible last bomb
+        if (last_move_.combination == Move::Combination::kBomb &&
+            move.rank <= last_move_.rank)
+          continue;
+      }
     }
     // Check total cards
     bool is_legal = opponent_card_count_ >= MOVE_TO_CARDS.at(move_id)[13];
@@ -121,4 +134,28 @@ std::vector<int> PartialGame::get_possible_moves() const {
       possible_moves.push_back(move_id);
   }
   return possible_moves;
+}
+
+std::ostream& operator<<(std::ostream& os, const PartialGame& g) {
+    os << "--- PartialGame State ---\n";
+    os << "Turn: " << (g.turn == 0 ? "Player" : "Opponent") << "\n";
+    os << "Your Hand: [";
+    for (int i = 0; i < 13; ++i) {
+        for (int c = 0; c < g.player_hand_[i]; ++c)
+            os << rankToChar(i + 3);
+    }
+    os << "]\n";
+
+    os << "Opponent cards left: " << g.opponent_card_count_ << "\n";
+    os << "Discards: [";
+    for (int i = 0; i < 13; ++i) {
+        for (int c = 0; c < g.discard_pile_[i]; ++c)
+            os << rankToChar(i + 3);
+    }
+    os << "]\n";
+
+    os << "Last move: ";
+    os << g.last_move_ << "\n";
+
+    return os;
 }

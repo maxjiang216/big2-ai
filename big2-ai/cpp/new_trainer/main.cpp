@@ -7,9 +7,9 @@
 
 int main(int argc, char **argv) {
   // Configuration (could be extended to parse argc/argv)
-  int num_games = 1;
+  int num_games = 1000;
   std::string output_path = "game_records.jsonl";
-  int num_threads = std::max(1u, std::thread::hardware_concurrency());
+  int num_threads = 1;//std::max(1u, std::thread::hardware_concurrency());
   unsigned int seed = std::random_device{}();
 
   std::cout << "Running " << num_games << " self-play games with "
@@ -22,7 +22,7 @@ int main(int argc, char **argv) {
 
   // Initialize coordinator
   GameCoordinator coordinator(factory0, factory1, num_games, output_path,
-                              num_threads, seed);
+                              num_threads, "logs/game", seed);
 
   // Run self-play and export results
   coordinator.run_all();

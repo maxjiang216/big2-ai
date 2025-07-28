@@ -4,6 +4,9 @@
 
 #include <memory>
 #include <random>
+#include <fstream>
+#include <string>
+
 
 #include "game.h" // Internal game state representation
 #include "game_record.h"
@@ -22,7 +25,7 @@ public:
    * @param rng        A random number generator for dealing and randomness.
    */
   GameSimulator(std::unique_ptr<Player> player0,
-                std::unique_ptr<Player> player1, std::mt19937 &rng);
+                std::unique_ptr<Player> player1, std::mt19937 &rng, const std::string& log_path = "");
 
   /**
    * @brief Run the game to completion and return its record.
@@ -31,11 +34,17 @@ public:
   GameRecord run();
 
 private:
+  int _seed;
   std::unique_ptr<Player> _player0;
   std::unique_ptr<Player> _player1;
   std::mt19937 &_rng;
   Game _game; // Internal game state, handles deck, hands, tricks, scoring
   GameRecord _record;
+  
+  // Logging
+  std::string log_file_;
+  std::ofstream log_stream_;
+  bool log_enabled_ = false;
 
   /**
    * @brief Initialize the game: shuffle, deal, determine initiative.

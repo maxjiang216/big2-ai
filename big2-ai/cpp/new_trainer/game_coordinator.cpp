@@ -11,10 +11,10 @@
 GameCoordinator::GameCoordinator(
     std::shared_ptr<PlayerFactory> player_factory_p0,
     std::shared_ptr<PlayerFactory> player_factory_p1, int num_games,
-    const std::string &output_path, int num_threads, unsigned int random_seed)
+    const std::string &output_path, int num_threads, const std::string& log_path, unsigned int random_seed)
     : _player_factory_p0(std::move(player_factory_p0)),
       _player_factory_p1(std::move(player_factory_p1)), _num_games(num_games),
-      _output_path(output_path), _num_threads(std::max(1, num_threads)),
+      _output_path(output_path), _num_threads(std::max(1, num_threads)), _log_path(log_path),
       _rng_seed(random_seed) {}
 
 void GameCoordinator::run_all() {
@@ -47,7 +47,7 @@ void GameCoordinator::run_all() {
 GameRecord GameCoordinator::simulate_single_game(std::mt19937 &rng) {
   auto player0 = _player_factory_p0->create_player();
   auto player1 = _player_factory_p1->create_player();
-  GameSimulator sim(std::move(player0), std::move(player1), rng);
+  GameSimulator sim(std::move(player0), std::move(player1), rng, _log_path);
   return sim.run();
 }
 

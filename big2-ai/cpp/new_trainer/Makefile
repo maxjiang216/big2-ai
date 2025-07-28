@@ -1,6 +1,6 @@
 # ====== CONFIG ======
 CXX         = g++
-CXXFLAGS    = -O3 -std=c++17 -Wall -Wextra -march=native -fopenmp
+CXXFLAGS    = -O2 -std=c++17 -Wall -Wextra -march=native -fopenmp
 LDFLAGS     = -lparquet -larrow -pthread
 INCLUDES    = -Icpp        # Path to your headers
 
