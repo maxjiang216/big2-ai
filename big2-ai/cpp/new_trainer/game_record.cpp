@@ -22,4 +22,7 @@ void GameRecord::add_move(const Move &move) {
       _views[1 - _game.current_player()].get_possible_moves(),
       /* move           */ move};
   _turns.push_back(new_record);
+  _game.apply_move(move);
+  _views[0].apply_move(move);
+  _views[1].apply_move(move);
 }

@@ -49,6 +49,9 @@ public:
    */
   void add_move(const Move &move);
 
+  const Game &game() const { return _game; }
+  const std::vector<TurnRecord> &turns() const { return _turns; }
+
 private:
   Game _game;
   std::array<PartialGame, 2> _views;
