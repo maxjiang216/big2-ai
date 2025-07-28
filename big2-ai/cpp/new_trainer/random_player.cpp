@@ -2,8 +2,6 @@
 #include "move.h"
 #include <array>
 #include <stdexcept>
-#include <iostream>
-using namespace std;
 
 // Constructor: non-deterministic seed
 RandomPlayer::RandomPlayer() : rng_(std::random_device{}()), game_() {}

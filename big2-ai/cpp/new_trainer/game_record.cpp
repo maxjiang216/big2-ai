@@ -19,8 +19,7 @@ void GameRecord::add_move(const Move &move) {
       /* views          */ _views,
       /* legal_moves    */ _views[_game.current_player()].get_legal_moves(),
       /* possible_moves */
-      _views[1 - _game.current_player()]
-          .get_possible_moves(),
+      _views[1 - _game.current_player()].get_possible_moves(),
       /* move           */ move};
   _turns.push_back(new_record);
 }

@@ -3,11 +3,10 @@
 #include "util.h"
 #include <algorithm>
 #include <cassert>
+#include <iostream>
 #include <numeric>
 #include <random>
 #include <vector>
-#include <iostream>
-using namespace std;
 
 Game::Game() : hands_{}, current_player_(0) {}
 
@@ -84,7 +83,6 @@ void Game::apply_move(const Move &move) {
     assert(hands_[current_player_][rank] >= 0);
     discard_pile_[rank] += MOVE_TO_CARDS.at(move_id)[rank];
     assert(discard_pile_[rank] <= 4);
-    
   }
   last_move_ = move;
   // Advance turn (simplest: alternate)
@@ -128,34 +126,34 @@ std::vector<int> Game::get_legal_moves() const {
 }
 
 std::ostream &operator<<(std::ostream &os, const Game &game) {
-    os << "==== Big 2 Game State ====\n";
+  os << "==== Big 2 Game State ====\n";
 
-    // Print player hands
-    for (int p = 0; p < 2; ++p) {
-        os << "Player " << p << " hand (" << game.get_player_hand_size(p) << "): [";
-        for (int i = 0; i < 13; ++i) {
-            for (int c = 0; c < game.hands_[p][i]; ++c) {
-                os << rankToChar(i + 3);
-            }
-        }
-        os << "]\n";
-    }
-
-    // Discard pile
-    os << "Discards: [";
+  // Print player hands
+  for (int p = 0; p < 2; ++p) {
+    os << "Player " << p << " hand (" << game.get_player_hand_size(p) << "): [";
     for (int i = 0; i < 13; ++i) {
-        for (int c = 0; c < game.discard_pile_[i]; ++c)
-            os << rankToChar(i + 3);
+      for (int c = 0; c < game.hands_[p][i]; ++c) {
+        os << rankToChar(i + 3);
+      }
     }
     os << "]\n";
+  }
 
-    // Turn & last move
-    os << "Current turn: Player " << game.current_player_ << "\n";
-    os << "Last move: " << game.last_move_ << "\n";
+  // Discard pile
+  os << "Discards: [";
+  for (int i = 0; i < 13; ++i) {
+    for (int c = 0; c < game.discard_pile_[i]; ++c)
+      os << rankToChar(i + 3);
+  }
+  os << "]\n";
 
-    if (game.is_over()) {
-        os << "*** Game Over! Winner: Player " << game.get_winner() << " ***\n";
-    }
+  // Turn & last move
+  os << "Current turn: Player " << game.current_player_ << "\n";
+  os << "Last move: " << game.last_move_ << "\n";
 
-    return os;
+  if (game.is_over()) {
+    os << "*** Game Over! Winner: Player " << game.get_winner() << " ***\n";
+  }
+
+  return os;
 }

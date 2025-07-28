@@ -38,7 +38,7 @@ private:
   std::array<int, 13> discard_pile_{}; // Cards played so far (by rank)
   Move last_move_{Move::Combination::kPass};
 
-  friend std::ostream& operator<<(std::ostream&, const PartialGame&);
+  friend std::ostream &operator<<(std::ostream &, const PartialGame &);
 };
 
 #endif // PARTIAL_GAME_H

@@ -1,8 +1,7 @@
-#include <iostream>
-#include <iomanip>  // For std::setw
 #include "partial_game.h"
-#include "util.h" // for encodeMove and MOVE_TO_CARDS
-using namespace std;
+#include "util.h"  // for encodeMove and MOVE_TO_CARDS
+#include <iomanip> // For std::setw
+#include <iostream>
 
 // Initialize with a given player hand; other state defaults
 // Only used at the beginning of a game
@@ -13,7 +12,7 @@ PartialGame::PartialGame(const std::array<int, 13> &player_hand, int turn)
   for (int i = 0; i < 13; ++i) {
     discard_pile_[i] = 0;
   }
-      }
+}
 
 PartialGame::PartialGame(const Game &game, int player_num)
     : turn(game.current_player() == player_num
@@ -136,26 +135,26 @@ std::vector<int> PartialGame::get_possible_moves() const {
   return possible_moves;
 }
 
-std::ostream& operator<<(std::ostream& os, const PartialGame& g) {
-    os << "--- PartialGame State ---\n";
-    os << "Turn: " << (g.turn == 0 ? "Player" : "Opponent") << "\n";
-    os << "Your Hand: [";
-    for (int i = 0; i < 13; ++i) {
-        for (int c = 0; c < g.player_hand_[i]; ++c)
-            os << rankToChar(i + 3);
-    }
-    os << "]\n";
+std::ostream &operator<<(std::ostream &os, const PartialGame &g) {
+  os << "--- PartialGame State ---\n";
+  os << "Turn: " << (g.turn == 0 ? "Player" : "Opponent") << "\n";
+  os << "Your Hand: [";
+  for (int i = 0; i < 13; ++i) {
+    for (int c = 0; c < g.player_hand_[i]; ++c)
+      os << rankToChar(i + 3);
+  }
+  os << "]\n";
 
-    os << "Opponent cards left: " << g.opponent_card_count_ << "\n";
-    os << "Discards: [";
-    for (int i = 0; i < 13; ++i) {
-        for (int c = 0; c < g.discard_pile_[i]; ++c)
-            os << rankToChar(i + 3);
-    }
-    os << "]\n";
+  os << "Opponent cards left: " << g.opponent_card_count_ << "\n";
+  os << "Discards: [";
+  for (int i = 0; i < 13; ++i) {
+    for (int c = 0; c < g.discard_pile_[i]; ++c)
+      os << rankToChar(i + 3);
+  }
+  os << "]\n";
 
-    os << "Last move: ";
-    os << g.last_move_ << "\n";
+  os << "Last move: ";
+  os << g.last_move_ << "\n";
 
-    return os;
+  return os;
 }
