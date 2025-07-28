@@ -12,13 +12,13 @@
  */
 class PlayerFactory {
 public:
-    virtual ~PlayerFactory() = default;
+  virtual ~PlayerFactory() = default;
 
-    /**
-     * @brief Create a new Player instance.
-     * @return A unique_ptr to the newly constructed Player.
-     */
-    virtual std::unique_ptr<Player> create_player() = 0;
+  /**
+   * @brief Create a new Player instance.
+   * @return A unique_ptr to the newly constructed Player.
+   */
+  virtual std::unique_ptr<Player> create_player() = 0;
 };
 
 #endif // PLAYER_FACTORY_H

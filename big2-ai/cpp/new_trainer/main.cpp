@@ -1,26 +1,32 @@
-#include "game.h"
-#include "util.h"
-#include "move.h"
-
-#include <array>
+#include "game_coordinator.h"
+#include "random_player_factory.h"
 #include <iostream>
+#include <memory>
+#include <random>
+#include <thread>
 
-using namespace std;
+int main(int argc, char **argv) {
+  // Configuration (could be extended to parse argc/argv)
+  int num_games = 1;
+  std::string output_path = "game_records.jsonl";
+  int num_threads = std::max(1u, std::thread::hardware_concurrency());
+  unsigned int seed = std::random_device{}();
 
-int main() {
-    for (int i = 0; i < 472; ++i) {
-        try {
-            Move move(i);
-            cout << move << ' ';
-            for (int j = 0; j < 13; ++j) {
-                cout << MOVE_TO_CARDS.at(i)[j] << ",";
-            }
-            cout << MOVE_TO_CARDS.at(i)[13] << '\n';
-            
-        } catch (const std::exception& e) {
-            // Skip invalid moves
-            continue;
-        }
-    }
-    return 0;
+  std::cout << "Running " << num_games << " self-play games with "
+            << num_threads << " threads, output to '" << output_path
+            << "'...\n";
+
+  // Create two RandomPlayer factories with distinct seeds
+  auto factory0 = std::make_shared<RandomPlayerFactory>(seed);
+  auto factory1 = std::make_shared<RandomPlayerFactory>(seed + 12345);
+
+  // Initialize coordinator
+  GameCoordinator coordinator(factory0, factory1, num_games, output_path,
+                              num_threads, seed);
+
+  // Run self-play and export results
+  coordinator.run_all();
+
+  std::cout << "Done.\n";
+  return 0;
 }

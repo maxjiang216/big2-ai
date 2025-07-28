@@ -2,17 +2,31 @@
 #ifndef GAME_RECORD_H
 #define GAME_RECORD_H
 
-#include <vector>
 #include <array>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "move.h"
+#include "partial_game.h"
 #include <arrow/api.h>
 #include <parquet/arrow/writer.h>
 
 // Forward declaration
 class Game;
+
+struct TurnRecord {
+
+  int current_player;
+  Game game;
+  std::array<PartialGame, 2> views;
+  // Legal moves for current player
+  std::vector<int> legal_moves;
+  // Possible legal moves for opponent
+  std::vector<int> possible_moves;
+  // Move played
+  Move move;
+};
 
 /**
  * @brief Records the sequence of moves and outcome of a single Big 2 game.
@@ -20,45 +34,26 @@ class Game;
  */
 class GameRecord {
 public:
-    GameRecord();
+  GameRecord();
 
-    /**
-     * @brief Capture the initial state of the game (starting hands).
-     * @param game The Game object after deal but before any moves.
-     */
-    void set_initial_state(const Game &game);
+  /**
+   * @brief Capture the initial state of the game (starting hands).
+   * @param game The Game object after deal but before any moves.
+   */
+  void set_initial_state(const Game &game);
 
-    /**
-     * @brief Append a move by a player to the record.
-     * @param player Index of the player (0 or 1).
-     * @param move   The Move they played.
-     */
-    void add_move(const Move &move);
-
-    /**
-     * @brief Get a JSON string (for debugging).
-     */
-    std::string to_json() const;
-
-    /**
-     * @brief Return the Arrow schema for GameRecord.
-     */
-    static std::shared_ptr<arrow::Schema> arrow_schema();
-
-    /**
-     * @brief Convert a vector of GameRecord into an Arrow Table for Parquet.
-     * @param records Records to convert.
-     * @return Arrow Table containing all records.
-     */
-    static arrow::Result<std::shared_ptr<arrow::Table>> ToTable(
-        const std::vector<GameRecord>& records);
+  /**
+   * @brief Append a move by a player to the record.
+   * @param player Index of the player (0 or 1).
+   * @param move   The Move they played.
+   */
+  void add_move(const Move &move);
 
 private:
-    // Starting hand distributions for each player (rank counts)
-    std::array<std::array<int,13>,2> _initial_hands;
-
-    // Sequence of moves for the game
-    std::vector<Move> _moves;
+  Game _game;
+  std::array<PartialGame, 2> _views;
+  // Sequence of moves for the game
+  std::vector<TurnRecord> _turns;
 };
 
 #endif // GAME_RECORD_H

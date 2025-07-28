@@ -1,9 +1,10 @@
 #ifndef PARTIAL_GAME_H
 #define PARTIAL_GAME_H
 
-#include <vector>
+#include "game.h"
+#include "move.h" // Represents a single play (type, rank, length, etc.)
 #include <array>
-#include "move.h"  // Represents a single play (type, rank, length, etc.)
+#include <vector>
 
 /**
  * @brief Player's partial view of the Big 2 game state.
@@ -16,27 +17,26 @@
  */
 class PartialGame {
 public:
-    /**
-     * @brief Construct an empty PartialGame state.
-     */
-    PartialGame();
+  /**
+   * @brief Construct an empty PartialGame state.
+   */
+  PartialGame() = default;
 
-    /**
-     * @brief Initialize player state from hand, opponent card count, turn, and last move.
-     * @param player_hand Initial hand (counts by rank, 0=3, ..., 12=2)
-     */
-    PartialGame(const std::array<int, 13>& player_hand, bool turn);
+  PartialGame(const std::array<int, 13> &player_hand, int turn);
 
-    void apply_move(const Move& move);
+  PartialGame(const Game &game, int player_num);
 
-    std::vector<int> get_legal_moves() const;
+  void apply_move(const Move &move);
+
+  std::vector<int> get_legal_moves() const;
+  std::vector<int> get_possible_moves() const;
 
 private:
-    bool turn; // true if player's turn
-    std::array<int, 13> player_hand_{};    // This player's cards (by rank)
-    int opponent_card_count_{16};          // Opponent's cards left
-    std::array<int, 13> discard_pile_{};   // Cards played so far (by rank)
-    Move last_move_{Move::Combination::kPass};
+  int turn;                            // 0 if player's turn
+  std::array<int, 13> player_hand_{};  // This player's cards (by rank)
+  int opponent_card_count_{16};        // Opponent's cards left
+  std::array<int, 13> discard_pile_{}; // Cards played so far (by rank)
+  Move last_move_{Move::Combination::kPass};
 };
 
 #endif // PARTIAL_GAME_H
