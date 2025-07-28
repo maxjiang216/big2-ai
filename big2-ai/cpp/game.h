@@ -1,42 +1,74 @@
+// game.h
 #ifndef GAME_H
 #define GAME_H
 
-#include "move.h"
-#include <bitset>
-#include <vector>   
+#include <array>
+#include <random>
+#include <vector>
 
-using std::bitset;
-using std::vector;
+#include "move.h" // Represents a single play (type, rank, length, etc.)
 
+/**
+ * @brief Internal representation of a Big 2 game state.
+ * Handles deck, hands, current trick, initiative, and end conditions.
+ */
 class Game {
-    // A game state for Big 2
+public:
+  /**
+   * @brief Construct a new Game (empty state).
+   */
+  Game();
 
-    public:
-        Game() = default;
-        Game(const Game& other) = default;
-        ~Game() = default;
+  /**
+   * @brief Shuffle the deck and deal cards to both players.
+   * @param rng Random number generator.
+   */
+  void shuffle_deal(std::mt19937 &rng);
 
-        // Initialize the deal
-        Game(bool player_turn, int player_cards[13]);
+  /**
+   * @brief Get the index (0 or 1) of the player whose turn it is.
+   */
+  int current_player() const;
 
-        void doMove(Move move);
+  /**
+   * @brief Check if the game has ended (one player out of cards).
+   */
+  bool is_over() const;
 
-        vector<int> getLegalMoves() const;
-        
+  /**
+   * @brief Apply a player's move to the game state.
+   * @param move The move chosen by the current player.
+   */
+  void apply_move(const Move &move);
 
-    private:
-        // True if it's the player's turn
-        bool player_turn;
-        // The player's cards
-        int player_cards[13];
-        // The opponent's cards
-        int opponent_card_num{16};
-        // Cards played so far
-        int table_cards[13];
-        // The last move
-        Move last_move{Move::Combination::kPass};
-        
+  /**
+   * @brief Get the winner (0 or 1) after the game ends.
+   * Returns the index of the player who first emptied their hand.
+   */
+  int get_winner() const;
+
+  /**
+   * @brief Get a copy of a player's hand (rank counts) for initialization.
+   * @param player 0 or 1.
+   * @return vector of counts indexed by rank (0=3, ..., 12=2).
+   */
+  std::array<int, 13> player_hand(int player) const;
+
+  int get_player_hand_size(int player) const;
+
+  std::array<int, 13> discard_pile() const;
+
+  Move last_move() const;
+
+  std::vector<int> get_legal_moves() const;
+
+private:
+  std::array<std::array<int, 13>, 2> hands_;
+  std::array<int, 13> discard_pile_;
+  int current_player_;
+  Move last_move_{Move::Combination::kPass};
+
+  friend std::ostream &operator<<(std::ostream &os, const Game &game);
 };
 
-
-#endif
+#endif // GAME_H
