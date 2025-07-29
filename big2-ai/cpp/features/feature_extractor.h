@@ -27,7 +27,8 @@ public:
     throw std::logic_error("Game-level extract() not implemented.");
   }
 
-  // --------- Turn-level: One value per turn ----------
+  // --------- Turn-level: Two values per turn (one for each perspective)
+  // ----------
   virtual std::vector<int> turnExtract(const GameRecord &game) const {
     throw std::logic_error("Turn-level extract() not implemented.");
   }

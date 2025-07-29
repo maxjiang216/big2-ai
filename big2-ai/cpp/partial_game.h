@@ -31,6 +31,8 @@ public:
   std::vector<int> get_legal_moves() const;
   std::vector<int> get_possible_moves() const;
 
+  std::array<int, 13> player_hand() const { return player_hand_; }
+
 private:
   int turn;                            // 0 if player's turn
   std::array<int, 13> player_hand_{};  // This player's cards (by rank)

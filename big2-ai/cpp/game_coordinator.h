@@ -36,7 +36,8 @@ public:
   /**
    * @brief Run all self-play games
    */
-  void run_all();
+  void run_all(const std::string &game_feature_out,
+               const std::string &turn_feature_out);
 
   void export_features(const std::string &game_feature_out,
                        const std::string &turn_feature_out) const;
