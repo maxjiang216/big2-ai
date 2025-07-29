@@ -1,7 +1,7 @@
-// player_hand_size_feature.h
+// opponent_hand_size_feature.h
 
-#ifndef PLAYER_HAND_SIZE_FEATURE_H
-#define PLAYER_HAND_SIZE_FEATURE_H
+#ifndef OPPONENT_HAND_SIZE_FEATURE_H
+#define OPPONENT_HAND_SIZE_FEATURE_H
 
 #include "../feature_extractor.h"
 #include <stdexcept>
@@ -11,10 +11,10 @@
 /**
  * @brief Turn-level feature: player's hand size at each turn.
  */
-class PlayerHandSizeFeature : public FeatureExtractor {
+class OpponentHandSizeFeature : public FeatureExtractor {
 public:
   Type type() const override { return Type::TurnLevel; }
-  std::string name() const override { return "player_hand_size"; }
+  std::string name() const override { return "opponent_hand_size"; }
 
   // Extract for every turn: output vector has length == total number of turns
   // in all games
@@ -29,13 +29,13 @@ public:
       // and a Game or PartialGame with method get_player_hand_size(int)
       int hand_size = 0;
       // This assumes you stored the pre-move Game state in TurnRecord
-      hand_size = turn.game.get_player_hand_size(0);
-      features.push_back(hand_size);
       hand_size = turn.game.get_player_hand_size(1);
+      features.push_back(hand_size);
+      hand_size = turn.game.get_player_hand_size(0);
       features.push_back(hand_size);
     }
     return features;
   }
 };
 
-#endif // PLAYER_HAND_SIZE_FEATURE_H
+#endif // OPPONENT_HAND_SIZE_FEATURE_H

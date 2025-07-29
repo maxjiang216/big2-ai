@@ -1,8 +1,10 @@
 #include <arrow/builder.h>
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
+#include <arrow/result.h> //  (brings in ARROW_ASSIGN_OR_RAISE)
 #include <arrow/status.h>
 #include <arrow/table.h>
+#include <parquet/arrow/reader.h> //  ←  ADD THIS
 #include <parquet/arrow/writer.h>
 
 #include "feature_extractor.h"
@@ -12,6 +14,7 @@
 #include "player_factory.h"
 
 #include <atomic>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <thread>
@@ -30,37 +33,124 @@ GameCoordinator::GameCoordinator(
       _game_level_features(std::move(game_level_features)),
       _turn_level_features(std::move(turn_level_features)) {}
 
-void GameCoordinator::run_all() {
+void GameCoordinator::run_all(const std::string &game_feature_out,
+                              const std::string &turn_feature_out) {
 
-  std::atomic<int> next_index{0};
-  std::vector<std::thread> workers;
-  std::vector<std::vector<GameRecord>> local_records(_num_threads);
-  workers.reserve(_num_threads);
+  constexpr int BATCH_SIZE = 200'000; // <= 200 k games per chunk
+  const std::string game_tmp_prefix = "tmp_game_batch_";
+  const std::string turn_tmp_prefix = "tmp_turn_batch_";
 
-  // Launch threads
-  for (int t = 0; t < _num_threads; ++t) {
-    workers.emplace_back([this, &next_index, t, &local_records]() mutable {
-      // Thread-local RNG
-      std::mt19937 rng(_rng_seed + t);
-      auto &out = local_records[t];
-      int idx;
-      while ((idx = next_index.fetch_add(1)) < _num_games) {
-        out.emplace_back(simulate_single_game(rng));
+  int games_remaining = _num_games;
+  int batch_idx = 0;
+
+  std::vector<std::string> tmp_game_files;
+  std::vector<std::string> tmp_turn_files;
+
+  while (games_remaining > 0) {
+
+    int this_batch = std::min(BATCH_SIZE, games_remaining);
+    std::cout << "[Coordinator] Starting batch " << batch_idx << "  ("
+              << this_batch << " games, " << games_remaining << " remaining)\n";
+
+    // ------------------------------------------------------------------
+    // simulate
+    std::atomic<int> next_index{0};
+    std::vector<std::thread> workers;
+    std::vector<std::vector<GameRecord>> local_batch(_num_threads);
+    workers.reserve(_num_threads);
+
+    for (int t = 0; t < _num_threads; ++t) {
+      workers.emplace_back([&, t]() {
+        std::mt19937 rng(_rng_seed + t + batch_idx * _num_threads);
+        auto &out = local_batch[t];
+        int idx;
+        while ((idx = next_index.fetch_add(1)) < this_batch) {
+          out.emplace_back(simulate_single_game(rng));
+        }
+      });
+    }
+    for (auto &th : workers)
+      if (th.joinable())
+        th.join();
+
+    // flatten into _records (re‑use member to leverage existing exporters)
+    _records.clear();
+    for (auto &vec : local_batch)
+      _records.insert(_records.end(), vec.begin(), vec.end());
+
+    // ------------------------------------------------------------------ export
+    // batch
+    std::string gfile =
+        game_tmp_prefix + std::to_string(batch_idx) + ".parquet";
+    std::string tfile =
+        turn_tmp_prefix + std::to_string(batch_idx) + ".parquet";
+    export_features(gfile, tfile);
+    tmp_game_files.push_back(gfile);
+    tmp_turn_files.push_back(tfile);
+
+    // free memory before next batch
+    _records.clear();
+    local_batch.clear();
+    workers.clear();
+
+    games_remaining -= this_batch;
+    ++batch_idx;
+  }
+
+  // ------------------------------------------------------------------
+  // concatenate helper
+  auto concat = [](const std::vector<std::string> &parts,
+                   const std::string &out_file) {
+    std::shared_ptr<arrow::Table> concat_table;
+
+    for (size_t i = 0; i < parts.size(); ++i) {
+
+      // Open Parquet file and read full table
+      ARROW_ASSIGN_OR_RAISE(auto rf, arrow::io::ReadableFile::Open(parts[i]));
+
+      std::unique_ptr<parquet::arrow::FileReader> reader;
+      PARQUET_THROW_NOT_OK(
+          parquet::arrow::OpenFile(rf, arrow::default_memory_pool(), &reader));
+
+      std::shared_ptr<arrow::Table> piece;
+      PARQUET_THROW_NOT_OK(reader->ReadTable(&piece));
+
+      // Append to running table
+      if (i == 0) {
+        concat_table = piece;
+      } else {
+        ARROW_ASSIGN_OR_RAISE(
+            concat_table,
+            arrow::ConcatenateTables({concat_table, piece},
+                                     arrow::ConcatenateTablesOptions{false}));
       }
-    });
-  }
+    }
 
-  // Join threads
-  for (auto &th : workers) {
-    if (th.joinable())
-      th.join();
-  }
+    // Write final table
+    ARROW_ASSIGN_OR_RAISE(auto out,
+                          arrow::io::FileOutputStream::Open(out_file));
 
-  // Flatten to _records
-  _records.clear();
-  for (auto &v : local_records) {
-    _records.insert(_records.end(), v.begin(), v.end());
-  }
+    PARQUET_THROW_NOT_OK(parquet::arrow::WriteTable(
+        *concat_table, arrow::default_memory_pool(), out, 4096));
+  };
+
+  std::cout << "[Coordinator] Concatenating " << tmp_game_files.size()
+            << " game batches...\n";
+  concat(tmp_game_files, game_feature_out);
+
+  std::cout << "[Coordinator] Concatenating " << tmp_turn_files.size()
+            << " turn batches...\n";
+  concat(tmp_turn_files, turn_feature_out);
+
+  // ------------------------------------------------------------------ clean up
+  // temp files
+  for (auto &f : tmp_game_files)
+    std::filesystem::remove(f);
+  for (auto &f : tmp_turn_files)
+    std::filesystem::remove(f);
+
+  std::cout
+      << "[Coordinator] All batches complete — final Parquet files written.\n";
 }
 
 GameRecord GameCoordinator::simulate_single_game(std::mt19937 &rng) {

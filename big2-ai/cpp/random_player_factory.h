@@ -3,6 +3,7 @@
 
 #include "player_factory.h"
 #include "random_player.h"
+#include <memory>
 #include <random>
 
 /**
@@ -17,13 +18,20 @@ public:
    * @param seed Optional base seed; if not provided, std::random_device is
    * used.
    */
-  explicit RandomPlayerFactory(unsigned int seed = std::random_device{}());
+  explicit RandomPlayerFactory(unsigned int seed = std::random_device{}())
+      : next_seed_(seed) {}
 
   /**
    * @brief Create a new RandomPlayer with a unique seed.
    * @return unique_ptr<Player>
    */
-  std::unique_ptr<Player> create_player() override;
+  std::unique_ptr<Player> create_player() override {
+    // Construct a RandomPlayer with the next seed, then increment for
+    // uniqueness
+    auto player = std::make_unique<RandomPlayer>(next_seed_);
+    ++next_seed_;
+    return player;
+  }
 
 private:
   unsigned int next_seed_;
