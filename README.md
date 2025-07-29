@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/big2-ai-cards.png" alt="Big 2 AI Project Banner" width="400"/>
+</p>
+
 # Big 2 AI
 
 A C++ implementation of the Big 2 card game (Shanghainese variant) with AI players and data collection capabilities for machine learning research.
