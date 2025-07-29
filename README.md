@@ -1,4 +1,6 @@
-![Big 2 AI Project Banner](assets/big2-ai-cards.png)
+<p align="center">
+  <img src="assets/big2-ai-cards.png" alt="Big 2 AI Project Banner" width="400"/>
+</p>
 
 # Big 2 AI
 
