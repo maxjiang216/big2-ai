@@ -286,6 +286,65 @@ int encodeMove(const Move &move) {
   }
 }
 
+const char *combination_to_string(Move::Combination comb) {
+  switch (comb) {
+  case Move::Combination::kPass:
+    return "pass";
+  case Move::Combination::kSingle:
+    return "single";
+  case Move::Combination::kDouble:
+    return "double";
+  case Move::Combination::kTriple:
+    return "triple";
+  case Move::Combination::kFullHouse:
+    return "full_house";
+  case Move::Combination::kBomb:
+    return "bomb";
+  case Move::Combination::kStraight5:
+    return "straight_5";
+  case Move::Combination::kStraight6:
+    return "straight_6";
+  case Move::Combination::kStraight7:
+    return "straight_7";
+  case Move::Combination::kStraight8:
+    return "straight_8";
+  case Move::Combination::kStraight9:
+    return "straight_9";
+  case Move::Combination::kStraight10:
+    return "straight_10";
+  case Move::Combination::kStraight11:
+    return "straight_11";
+  case Move::Combination::kStraight12:
+    return "straight_12";
+  case Move::Combination::kStraight13:
+    return "straight_13";
+  case Move::Combination::kDoubleStraight2:
+    return "double_straight_2";
+  case Move::Combination::kDoubleStraight3:
+    return "double_straight_3";
+  case Move::Combination::kDoubleStraight4:
+    return "double_straight_4";
+  case Move::Combination::kDoubleStraight5:
+    return "double_straight_5";
+  case Move::Combination::kDoubleStraight6:
+    return "double_straight_6";
+  case Move::Combination::kDoubleStraight7:
+    return "double_straight_7";
+  case Move::Combination::kDoubleStraight8:
+    return "double_straight_8";
+  case Move::Combination::kTripleStraight2:
+    return "triple_straight_2";
+  case Move::Combination::kTripleStraight3:
+    return "triple_straight_3";
+  case Move::Combination::kTripleStraight4:
+    return "triple_straight_4";
+  case Move::Combination::kTripleStraight5:
+    return "triple_straight_5";
+  default:
+    return "unknown";
+  }
+}
+
 std::ostream &operator<<(std::ostream &os, const Move &move) {
   char rank_char = rankToChar(move.rank);
   char auxiliary_char = rankToChar(move.auxiliary);

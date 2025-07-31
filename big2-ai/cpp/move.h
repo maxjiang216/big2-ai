@@ -58,6 +58,8 @@ public:
 // 38 triple straights.)
 int encodeMove(const Move &move);
 
+const char *combination_to_string(Move::Combination comb);
+
 // Print a move
 std::ostream &operator<<(std::ostream &os, const Move &move);
 

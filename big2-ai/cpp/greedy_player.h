@@ -100,7 +100,7 @@ private:
 
     for (int i = 0; i < 13; ++i) {
       n_cards += hand_array[i];
-      if (i < 11 && hand_array[i] == 4 || i == 11 && hand_array[i] == 3)
+      if ((i < 11 && hand_array[i] == 4) || (i == 11 && hand_array[i] == 3))
         ++n_bombs;
     }
 
