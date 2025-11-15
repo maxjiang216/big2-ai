@@ -1,0 +1,8 @@
+{
+    "player0": "greedy",
+    "player1": "greedy", 
+    "num_games": 100000,
+    "game_features": ["outcome", "length"],
+    "turn_features": ["turn_outcome", "hand_sizes"],
+    "output": "data/greedy_mirror_100k"
+  }
