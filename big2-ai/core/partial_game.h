@@ -30,11 +30,20 @@ public:
 
   std::vector<int> get_legal_moves() const;
   std::vector<int> get_possible_moves() const;
+  std::vector<int> get_possible_moves_not_bomb() const;
 
   std::array<int, 13> player_hand() const { return player_hand_; }
 
+  int count_bombs() const;
+
+  int get_trick_rank() const;
+
+  Move last_move() const { return last_move_; }
+
+  int turn() const { return turn_; }
+
 private:
-  int turn;                            // 0 if player's turn
+  int turn_;                           // 0 if player's turn
   std::array<int, 13> player_hand_{};  // This player's cards (by rank)
   int opponent_card_count_{16};        // Opponent's cards left
   std::array<int, 13> discard_pile_{}; // Cards played so far (by rank)

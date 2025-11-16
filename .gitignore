@@ -4,8 +4,10 @@
 
 # -------------------- C++ Build Artifacts --------------------
 # Compiled binaries
-cpp/bin/
-cpp/build/
+big2-ai/bin/
+big2-ai/build/
+big2-ai/data/
+big2-ai/venv/
 
 # Object files
 *.o
