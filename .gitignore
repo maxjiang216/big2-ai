@@ -1,0 +1,127 @@
+# ============================================================
+# Big 2 AI Project - Git Ignore
+# ============================================================
+
+# -------------------- C++ Build Artifacts --------------------
+# Compiled binaries
+cpp/bin/
+cpp/build/
+
+# Object files
+*.o
+*.obj
+
+# Executables (in research folder)
+research/a.out
+research/avg_moves
+research/best_hand
+research/multi_comb
+research/endgame
+
+# -------------------- Generated Data --------------------
+# Training data (too large for git)
+cpp/data/
+*.parquet
+
+# Temporary batch files
+tmp_game_batch_*.parquet
+tmp_turn_batch_*.parquet
+
+# Logs
+cpp/logs/
+*.log
+*.txt
+
+# Game records
+*.jsonl
+game_records.jsonl
+
+# -------------------- Python --------------------
+# Virtual environments
+venv/
+env/
+.venv/
+*.egg-info/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# -------------------- IDEs and Editors --------------------
+# VSCode
+.vscode/
+*.code-workspace
+
+# CLion / IntelliJ
+.idea/
+cmake-build-*/
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# -------------------- OS Files --------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+.directory
+.Trash-*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# -------------------- Research Experiments --------------------
+# Keep source but ignore compiled outputs in research/
+research/*.out
+research/a.out
+
+# -------------------- Temporary Files --------------------
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# -------------------- Analysis Outputs --------------------
+# Generated plots and figures
+*.png
+*.pdf
+!assets/*.png  # Keep assets folder images
+!assets/*.pdf
+
+# Analysis results
+cpp/analysis/results/
+*.csv
+!*_summary.csv  # Keep summary CSVs for reference
+
+# -------------------- Model Files --------------------
+# Trained models (add later when you have them)
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.pkl
+*.joblib
+
+# -------------------- Documentation --------------------
+# Keep markdown but ignore generated docs
+!README.md
+!DEVLOG.md
+!ROADMAP.md

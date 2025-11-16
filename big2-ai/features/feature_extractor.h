@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "../game_record.h"
+#include "../core/game_record.h"
 
 class GameRecord;
 class TurnRecord;
