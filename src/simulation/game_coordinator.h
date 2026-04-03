@@ -4,7 +4,7 @@
 #include "game_record.h"
 #include "feature_extractor.h"
 
-#include "../players/player_factory.h"
+#include "player_factory.h"
 
 #include <memory>
 #include <random>

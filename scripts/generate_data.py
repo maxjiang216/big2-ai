@@ -6,8 +6,8 @@ Run from anywhere; paths are resolved relative to the repository root (parent of
 this scripts/ directory).
 
 Usage:
-    python scripts/generate_data.py configs/greedy.json
-    python scripts/generate_data.py configs/greedy.json --compile
+    python scripts/generate_data.py scripts/configs/greedy.json
+    python scripts/generate_data.py scripts/configs/greedy.json --compile
 """
 
 import argparse
@@ -16,7 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Repository root (contains Makefile, bin/, configs/)
+# Repository root (contains Makefile, bin/, src/, scripts/configs/)
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -143,9 +143,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python scripts/generate_data.py configs/greedy.json
-  python scripts/generate_data.py configs/greedy.json --compile
-  cd <repo-root> && python scripts/generate_data.py configs/test.json
+  python scripts/generate_data.py scripts/configs/greedy.json
+  python scripts/generate_data.py scripts/configs/greedy.json --compile
+  cd <repo-root> && python scripts/generate_data.py scripts/configs/test.json
         """,
     )
 

@@ -28,18 +28,14 @@ Big 2 is a shedding-type card game. This repo follows the **Shanghainese variant
 
 ```
 .
-├── core/           # Game, PartialGame, Move, GameRecord, tablebase loader, util
-├── simulation/     # GameSimulator, GameCoordinator (Parquet batches)
-├── players/        # Player interface, random + greedy policies
-├── features/       # FeatureExtractor hierarchy (game_level/, turn_level/)
-├── datagen/        # generate_data, selfplay_main, parquet_export, feature_registry
-├── test/           # Unit tests and perf benchmark source
-├── tools/          # tablebase_opp1_gen (precompute binary tablebase)
-├── configs/        # JSON configs for data generation
-├── scripts/        # Python driver for generate_data
-├── analysis/       # Python Parquet EDA and experiments
-├── research/       # Standalone experiments (not part of main build)
-├── assets/         # Images for docs
+├── src/              # Engine: core, simulation, players, features, datagen
+├── test/             # Unit tests and perf benchmark source
+├── scripts/          # Drivers (e.g. data generation), JSON configs, tablebase precompute source
+├── analysis/         # Analyze self-play output, train models, experiments
+├── research/         # Exploratory C++/Python (outputs go to build/research/ when built via Makefile)
+├── build/            # Compiled objects and research binaries (gitignored)
+├── bin/              # Main binaries (gitignored)
+├── assets/           # Images for docs
 ├── Makefile
 └── README.md
 ```
@@ -79,16 +75,17 @@ make selfplay          # JSONL stats (no Arrow)
 make benchmark         # perf binary (no Arrow)
 make generate_data     # Parquet pipeline (needs libarrow)
 make tablebase_opp1_gen  # build tablebase precompute tool
+make research          # standalone research/*.cpp -> build/research/
 ```
 
 ## Data generation
 
 ```bash
 # Example: greedy self-play with full Parquet export
-python3 scripts/generate_data.py configs/greedy.json --compile
+python3 scripts/generate_data.py scripts/configs/greedy.json --compile
 ```
 
-Writes `<output_path>_game.parquet` and `<output_path>_turn.parquet` (see `configs/*.json`).
+Writes `<output_path>_game.parquet` and `<output_path>_turn.parquet` (see `scripts/configs/*.json`).
 
 ## Tablebase
 
@@ -99,7 +96,7 @@ make tablebase_opp1_gen
 ./bin/tablebase_opp1_gen [out.bin] [samples.txt]
 ```
 
-Point the engine at the file via your player/load path (see `core/tablebase_opp1.*`).
+Point the engine at the file via your player/load path (see `src/core/tablebase_opp1.*`).
 
 ## Tests
 

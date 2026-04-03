@@ -1,7 +1,7 @@
 #include "parquet_export.hpp"
 
-#include "../core/game_record.h"
-#include "../features/feature_extractor.h"
+#include "game_record.h"
+#include "feature_extractor.h"
 
 #include <arrow/builder.h>
 #include <arrow/io/api.h>

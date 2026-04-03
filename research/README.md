@@ -9,7 +9,7 @@ call `bin/selfplay` (see below).
 ## Engine game-level statistics (`game_feature_stats.py`)
 
 Use this for aggregate statistics that match the **core game** and **feature
-extractors** in `features/game_level/`:
+extractors** in `src/features/game_level/`:
 
 - `length` — number of turns in the game (same as `GameLengthExtractor`)
 - `outcome` — winner index (same as `OutcomeFeature`)
@@ -66,12 +66,12 @@ move is a straight ("non-trivial" positions) are written to disk.
 - `endgame_straight_dp_sample.txt` — first 1 000 of those lines in a compact
   plain-text format for quick sanity checks
 
-Compiled binary: `endgame` (build manually with `g++` if needed; not in `Makefile`)
+Compiled binary: `build/research/endgame` (`make research` from repo root)
 
 **Relationship to `tablebase_opp1`:** **No.** `endgame.cpp` is a separate
 research tool (straight-first DP, JSONL dump). The opponent-1-card tablebase is
-built by `tools/tablebase_opp1_gen.cpp` → `bin/tablebase_opp1_gen`, loaded at
-runtime via `core/tablebase_opp1.*`. The generator only mentions
+built by `scripts/tablebase_opp1_gen.cpp` → `bin/tablebase_opp1_gen`, loaded at
+runtime via `src/core/tablebase_opp1.*`. The generator only mentions
 `endgame.cpp` in a comment comparing sample-file purposes.
 
 ---
@@ -84,7 +84,7 @@ moves** (under the same counting rules as that program’s move generator).
 
 **Produces:** printed composition and move count.
 
-Compiled binary: `best_hand`
+Compiled binary: `build/research/best_hand` (`make research`)
 
 ---
 
@@ -97,7 +97,7 @@ doubles** (pairs among ranks 3–A).
 
 **Produces:** printed probability.
 
-Compiled binary: `multi_comb`
+Compiled binary: `build/research/multi_comb` (`make research`)
 
 ---
 
@@ -110,6 +110,8 @@ can play that move.
 
 **Produces:** printed probability table.
 
+Compiled binary: `build/research/play_probs` (`make research`)
+
 ---
 
 ## Output / data files
@@ -119,12 +121,18 @@ can play that move.
 | `endgame_straight_dp.jsonl` | `endgame.cpp` | Large; regenerable |
 | `endgame_straight_dp_sample.txt` | `endgame.cpp` | Small sanity sample |
 | `tablebase_opp1_samples.txt` | `bin/tablebase_opp1_gen` | Optional diagnostic |
-| `tablebase_opp1.bin` | `bin/tablebase_opp1_gen` | **Used at runtime** — see `core/tablebase_opp1.h` |
+| `tablebase_opp1.bin` | `bin/tablebase_opp1_gen` | **Used at runtime** — see `src/core/tablebase_opp1.h` |
 
 ---
 
-## Compiled binaries in `research/`
+## Compiled binaries
 
-Prefer `make selfplay` / `make tablebase_opp1_gen` for supported tools. Ad-hoc
-binaries (`best_hand`, `endgame`, etc.) can be removed and rebuilt from source.
+Prefer `make selfplay` / `make tablebase_opp1_gen` for supported tools. For the
+standalone C++ programs in `research/`, use:
+
+```bash
+make research   # builds endgame, best_hand, multi_comb, play_probs -> build/research/
+```
+
+Ad-hoc copies in `research/` can be removed; rebuild from source via `make research`.
 `a.out` / `big2_moves` without source should be deleted.

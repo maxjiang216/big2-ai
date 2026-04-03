@@ -25,7 +25,7 @@ const int kSTRAIGHT12_START = kSTRAIGHT11_START + 4;
 const int kSTRAIGHT13_START = kSTRAIGHT12_START + 3;
 const int kDOUBLESTRAIGHT2_START = kSTRAIGHT13_START + 1;
 
-#include "../core/move_to_cards.inc"
+#include "move_to_cards.inc"
 
 namespace {
 

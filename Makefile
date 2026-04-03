@@ -2,21 +2,24 @@
 CXX         = g++
 CXXFLAGS    = -O2 -std=c++17 -Wall -Wextra -march=native -fopenmp
 DEPFLAGS    = -MMD -MP
-INCLUDES    = -Icore -Isimulation -Iplayers -Idatagen -Ifeatures -Itest
+INCLUDES    = -Isrc/core -Isrc/simulation -Isrc/players -Isrc/datagen -Isrc/features -Itest
 LDFLAGS     = -pthread
 LDFLAGS_PARQUET = -lparquet -larrow -pthread
 
 BUILD_DIR   = build
 BIN_DIR     = bin
 
-CORE_CPP    := $(wildcard core/*.cpp)
-SIM_CPP     := simulation/game_simulator.cpp
-COORD_CPP   := simulation/game_coordinator.cpp
-DATAGEN_CPP := datagen/parquet_export.cpp
+CORE_CPP    := $(wildcard src/core/*.cpp)
+SIM_CPP     := src/simulation/game_simulator.cpp
+COORD_CPP   := src/simulation/game_coordinator.cpp
+DATAGEN_CPP := src/datagen/parquet_export.cpp
 
 TEST_CPP    := $(wildcard test/*.cpp)
 
-.PHONY: all clean dirs test_core coordinator selfplay generate_data benchmark tablebase_opp1_gen help
+RESEARCH_BIN_NAMES := endgame best_hand multi_comb play_probs
+RESEARCH_BINS      := $(addprefix $(BUILD_DIR)/research/,$(RESEARCH_BIN_NAMES))
+
+.PHONY: all clean dirs test_core coordinator selfplay generate_data benchmark tablebase_opp1_gen research help
 
 all: help
 
@@ -28,32 +31,33 @@ help:
 	@echo "  make coordinator          - coordinator + Parquet objects (needs libarrow)"
 	@echo "  make generate_data        - full Parquet data gen binary (needs libarrow)"
 	@echo "  make tablebase_opp1_gen   - build opp-1-card tablebase binary generator (no Arrow)"
+	@echo "  make research             - standalone research/*.cpp -> build/research/"
 	@echo "  make clean"
 
 dirs:
-	@mkdir -p $(BUILD_DIR)/core $(BUILD_DIR)/simulation $(BUILD_DIR)/datagen \
-	          $(BUILD_DIR)/test $(BIN_DIR)
+	@mkdir -p $(BUILD_DIR)/src/core $(BUILD_DIR)/src/simulation $(BUILD_DIR)/src/datagen \
+	          $(BUILD_DIR)/test $(BUILD_DIR)/research $(BIN_DIR)
 
 # ============================================================================
 # Object file rules
 # ============================================================================
 
-$(BUILD_DIR)/core/%.o: core/%.cpp | dirs
+$(BUILD_DIR)/src/core/%.o: src/core/%.cpp | dirs
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
-$(BUILD_DIR)/simulation/game_simulator.o: simulation/game_simulator.cpp | dirs
+$(BUILD_DIR)/src/simulation/game_simulator.o: src/simulation/game_simulator.cpp | dirs
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
-$(BUILD_DIR)/simulation/game_coordinator.o: simulation/game_coordinator.cpp | dirs
+$(BUILD_DIR)/src/simulation/game_coordinator.o: src/simulation/game_coordinator.cpp | dirs
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
-$(BUILD_DIR)/datagen/parquet_export.o: datagen/parquet_export.cpp | dirs
+$(BUILD_DIR)/src/datagen/parquet_export.o: src/datagen/parquet_export.cpp | dirs
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
-$(BUILD_DIR)/datagen/selfplay_main.o: datagen/selfplay_main.cpp | dirs
+$(BUILD_DIR)/src/datagen/selfplay_main.o: src/datagen/selfplay_main.cpp | dirs
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
-$(BUILD_DIR)/datagen/generate_data.o: datagen/generate_data.cpp | dirs
+$(BUILD_DIR)/src/datagen/generate_data.o: src/datagen/generate_data.cpp | dirs
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
 $(BUILD_DIR)/test/%.o: test/%.cpp | dirs
@@ -66,11 +70,11 @@ $(BUILD_DIR)/test/test_perf_bench.o: test/test_perf.cpp | dirs
 # Common object lists
 # ============================================================================
 
-CORE_OBJS := $(patsubst core/%.cpp,$(BUILD_DIR)/core/%.o,$(CORE_CPP))
+CORE_OBJS := $(patsubst src/core/%.cpp,$(BUILD_DIR)/src/core/%.o,$(CORE_CPP))
 
 # test_core excludes test_perf.cpp (it has its own main under BENCHMARK_MAIN)
 TEST_OBJS := $(CORE_OBJS) \
-             $(BUILD_DIR)/simulation/game_simulator.o \
+             $(BUILD_DIR)/src/simulation/game_simulator.o \
              $(patsubst test/%.cpp,$(BUILD_DIR)/test/%.o,$(TEST_CPP))
 
 # ============================================================================
@@ -88,8 +92,8 @@ test_core: dirs $(BIN_DIR)/test_core
 # ============================================================================
 
 SELFPLAY_OBJS := $(CORE_OBJS) \
-                 $(BUILD_DIR)/simulation/game_simulator.o \
-                 $(BUILD_DIR)/datagen/selfplay_main.o
+                 $(BUILD_DIR)/src/simulation/game_simulator.o \
+                 $(BUILD_DIR)/src/datagen/selfplay_main.o
 
 $(BIN_DIR)/selfplay: $(SELFPLAY_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
@@ -102,7 +106,7 @@ selfplay: dirs $(BIN_DIR)/selfplay
 # ============================================================================
 
 BENCH_OBJS := $(CORE_OBJS) \
-              $(BUILD_DIR)/simulation/game_simulator.o \
+              $(BUILD_DIR)/src/simulation/game_simulator.o \
               $(BUILD_DIR)/test/test_perf_bench.o
 
 $(BIN_DIR)/benchmark: $(BENCH_OBJS)
@@ -116,9 +120,9 @@ benchmark: dirs $(BIN_DIR)/benchmark
 # ============================================================================
 
 COORD_OBJS := $(CORE_OBJS) \
-              $(BUILD_DIR)/simulation/game_simulator.o \
-              $(BUILD_DIR)/simulation/game_coordinator.o \
-              $(BUILD_DIR)/datagen/parquet_export.o
+              $(BUILD_DIR)/src/simulation/game_simulator.o \
+              $(BUILD_DIR)/src/simulation/game_coordinator.o \
+              $(BUILD_DIR)/src/datagen/parquet_export.o
 
 coordinator: dirs $(COORD_OBJS)
 	@echo "✓ Coordinator + Parquet objects built (no main binary)."
@@ -128,10 +132,10 @@ coordinator: dirs $(COORD_OBJS)
 # ============================================================================
 
 GENDATA_OBJS := $(CORE_OBJS) \
-                $(BUILD_DIR)/simulation/game_simulator.o \
-                $(BUILD_DIR)/simulation/game_coordinator.o \
-                $(BUILD_DIR)/datagen/parquet_export.o \
-                $(BUILD_DIR)/datagen/generate_data.o
+                $(BUILD_DIR)/src/simulation/game_simulator.o \
+                $(BUILD_DIR)/src/simulation/game_coordinator.o \
+                $(BUILD_DIR)/src/datagen/parquet_export.o \
+                $(BUILD_DIR)/src/datagen/generate_data.o
 
 $(BIN_DIR)/generate_data: $(GENDATA_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS_PARQUET)
@@ -143,11 +147,21 @@ generate_data: dirs $(BIN_DIR)/generate_data
 # bin/tablebase_opp1_gen — precompute tablebase binary (no Arrow)
 # ============================================================================
 
-$(BIN_DIR)/tablebase_opp1_gen: tools/tablebase_opp1_gen.cpp | dirs
-	$(CXX) $(CXXFLAGS) -o $@ $^
+$(BIN_DIR)/tablebase_opp1_gen: scripts/tablebase_opp1_gen.cpp | dirs
+	$(CXX) $(CXXFLAGS) -o $@ $< -Isrc/core
 	@echo "✓ $(BIN_DIR)/tablebase_opp1_gen"
 
 tablebase_opp1_gen: dirs $(BIN_DIR)/tablebase_opp1_gen
+
+# ============================================================================
+# build/research/* — standalone research programs (no Arrow)
+# ============================================================================
+
+$(BUILD_DIR)/research/%: research/%.cpp | dirs
+	$(CXX) $(CXXFLAGS) -o $@ $^
+
+research: $(RESEARCH_BINS)
+	@echo "✓ research binaries -> $(BUILD_DIR)/research/"
 
 # ============================================================================
 
