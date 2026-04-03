@@ -16,7 +16,7 @@ DATAGEN_CPP := src/datagen/parquet_export.cpp
 
 TEST_CPP    := $(wildcard test/*.cpp)
 
-RESEARCH_BIN_NAMES := endgame best_hand multi_comb play_probs
+RESEARCH_BIN_NAMES := best_hand multi_comb play_probs
 RESEARCH_BINS      := $(addprefix $(BUILD_DIR)/research/,$(RESEARCH_BIN_NAMES))
 
 .PHONY: all clean dirs test_core coordinator selfplay generate_data benchmark tablebase_opp1_gen research help

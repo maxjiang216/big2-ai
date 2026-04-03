@@ -28,11 +28,11 @@ Big 2 is a shedding-type card game. This repo follows the **Shanghainese variant
 
 ```
 .
-├── src/              # Engine: core, simulation, players, features, datagen
-├── test/             # Unit tests and perf benchmark source
-├── scripts/          # Drivers (e.g. data generation), JSON configs, tablebase precompute source
-├── analysis/         # Analyze self-play output, train models, experiments
-├── research/         # Exploratory C++/Python (outputs go to build/research/ when built via Makefile)
+├── src/              # Engine: core, simulation, players, features, datagen (see src/README.md)
+├── test/             # Unit tests and perf benchmark source (see test/README.md)
+├── scripts/          # Drivers (e.g. data generation), JSON configs, tablebase precompute source (see scripts/README.md)
+├── analysis/         # Analyze self-play output, train models, experiments (see analysis/README.md)
+├── research/         # Exploratory C++/Python; binaries under build/research/ via make research (see research/README.md)
 ├── build/            # Compiled objects and research binaries (gitignored)
 ├── bin/              # Main binaries (gitignored)
 ├── assets/           # Images for docs
@@ -116,4 +116,4 @@ python3 analysis/analysis.py
 ## See also
 
 - `DEVLOG.md`, `ROADMAP.md`
-- `research/` for standalone C++/Python experiments
+- Per-directory docs: `research/README.md`, `scripts/README.md`, `src/README.md`, `test/README.md`, `analysis/README.md`
