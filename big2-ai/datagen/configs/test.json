@@ -1,8 +1,0 @@
-{
-    "player": "random",
-    "num_games": 1000,
-    "output_path": "analysis/data/test_1k",
-    "game_features": ["outcome"],
-    "turn_features": ["player_hand_size"],
-    "threads": 4
-  }

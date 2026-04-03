@@ -1,0 +1,15 @@
+{
+  "player": "random",
+  "num_games": 1000,
+  "output_path": "data/test_1k",
+  "game_features": [
+    "outcome",
+    "tb_hits",
+    "tb_case1",
+    "tb_case2",
+    "tb_forced_seq_len",
+    "tb_opp1_table_straight"
+  ],
+  "turn_features": ["player_hand_size"],
+  "threads": 4
+}

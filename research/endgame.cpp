@@ -2,10 +2,10 @@
 // Compile: g++ -O3 -std=c++17 -o build_memo build_memo.cpp
 // -----------------------------------------------------------------------------
 // Generates two files:
-//   1. memo.jsonl  –  every hand (≤15 cards) whose best_move is **non-trivial**
-//                     ("h" = hand array, "s" = score, "m" = [len,endRank]).
-//   2. sample.txt  –  up to 1 000 non-trivial hands with only hand & score for
-//                     quick sanity-checking.
+//   1. endgame_straight_dp.jsonl      –  every hand (≤15 cards) whose best_move is **non-trivial**
+//                                        ("h" = hand array, "s" = score, "m" = [len,endRank]).
+//   2. endgame_straight_dp_sample.txt –  up to 1 000 non-trivial hands with only hand & score for
+//                                        quick sanity-checking.
 // After the run it prints the distribution of scores for both trivial and
 // non-trivial positions as well as the counts of each category.
 // -----------------------------------------------------------------------------
@@ -134,8 +134,8 @@ int main() {
     // Generate universe of hands
     std::vector<Hand> hands; Hand h{}; gen_rec(0,0,h,hands);
 
-    std::ofstream jsonl("memo.jsonl");
-    std::ofstream sample("sample.txt");
+    std::ofstream jsonl("endgame_straight_dp.jsonl");
+    std::ofstream sample("endgame_straight_dp_sample.txt");
 
     std::array<std::uint64_t,16> trivDist{};      // score freq for trivial
     std::array<std::uint64_t,16> nonTrivDist{};   // score freq for non-trivial
@@ -183,7 +183,7 @@ int main() {
 
     std::cout << "\nTotal hands        : " << hands.size() << '\n';
     std::cout << "Non-trivial hands  : " << nonTrivialCnt << '\n';
-    std::cout << "memo.jsonl lines   : " << nonTrivialCnt << '\n';
-    std::cout << "sample.txt lines   : " << std::min<std::size_t>(nonTrivialCnt,SAMPLE_CAP) << '\n';
+    std::cout << "endgame_straight_dp.jsonl lines        : " << nonTrivialCnt << '\n';
+    std::cout << "endgame_straight_dp_sample.txt lines   : " << std::min<std::size_t>(nonTrivialCnt,SAMPLE_CAP) << '\n';
     return 0;
 }
