@@ -3,11 +3,11 @@
 # ============================================================
 
 # -------------------- C++ Build Artifacts --------------------
-# Compiled binaries
-big2-ai/bin/
-big2-ai/build/
-big2-ai/data/
-big2-ai/venv/
+# Compiled binaries and object dirs (repo root)
+bin/
+build/
+data/
+venv/
 
 # Object files
 *.o
@@ -17,12 +17,18 @@ big2-ai/venv/
 research/a.out
 research/avg_moves
 research/best_hand
+research/big2_moves
 research/multi_comb
 research/endgame
+research/tablebase_opp1
+research/tablebase_opp1.bin
+# Generated data files (in research folder)
+research/endgame_straight_dp.jsonl
+research/endgame_straight_dp_sample.txt
+research/tablebase_opp1_samples.txt
 
 # -------------------- Generated Data --------------------
 # Training data (too large for git)
-cpp/data/
 *.parquet
 
 # Temporary batch files
@@ -30,7 +36,6 @@ tmp_game_batch_*.parquet
 tmp_turn_batch_*.parquet
 
 # Logs
-cpp/logs/
 *.log
 *.txt
 
@@ -109,7 +114,6 @@ research/a.out
 !assets/*.pdf
 
 # Analysis results
-cpp/analysis/results/
 *.csv
 !*_summary.csv  # Keep summary CSVs for reference
 
