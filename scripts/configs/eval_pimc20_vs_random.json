@@ -1,0 +1,10 @@
+{
+  "p0": "pimc",
+  "p0_param": 20,
+  "p1": "random",
+  "p1_param": 0.0,
+  "deals": 2000,
+  "seed": 42,
+  "threads": 8,
+  "output_log": "analysis/eval_pimc20_vs_random.log"
+}

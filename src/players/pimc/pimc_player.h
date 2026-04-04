@@ -3,6 +3,7 @@
 
 #include "game.h"
 #include "greedy/greedy_player.h"
+#include "greedy/linear_evaluator.h"
 #include "greedy/tree_evaluator.h"
 #include "partial_game.h"
 #include "player.h"
@@ -36,6 +37,8 @@ struct PimcGlobalStats {
   std::atomic<uint64_t> total_dets_used{0};
   std::atomic<uint64_t> total_dets_saved{0};
   std::atomic<uint64_t> total_rollout_equiv_saved{0};
+  std::atomic<uint64_t> voluntary_pass_opportunities{0};
+  std::atomic<uint64_t> voluntary_pass_chosen{0};
 };
 
 inline PimcGlobalStats &pimc_global_stats() {
@@ -126,11 +129,34 @@ inline bool confident_leader_hoeffding(const std::vector<int> &wins, int n, int 
 
 // ---------------------------------------------------------------------------
 // Rollout policy: mirrors Player::select_move order.
+//
+// If ``resample_opponent_each_turn`` is true, before each opponent move in the
+// simulated game we draw a new opponent hand from the remaining unseen pool
+// (same distribution as ``sample_opponent_hand``) and reconstruct ``Game``.
+// Moves already played stay in the discard pile; the new hand is consistent
+// with public information but may be inconsistent with greedy choices made
+// under earlier hypothetical hands.
 // ---------------------------------------------------------------------------
 template <typename EvalFn>
-inline int policy_rollout(Game g, int my_player, EvalFn eval_fn) {
+inline int policy_rollout(Game g, int my_player, EvalFn eval_fn,
+                          bool resample_opponent_each_turn, std::mt19937 &rng) {
   while (!g.is_over()) {
     int cp = g.current_player();
+    if (resample_opponent_each_turn && cp != my_player) {
+      const std::array<int, 13> my_h = g.player_hand(my_player);
+      const std::array<int, 13> disc = g.discard_pile();
+      const int opp = 1 - my_player;
+      const int opp_count = g.get_player_hand_size(opp);
+      const std::array<int, 13> new_opp =
+          sample_opponent_hand(my_h, disc, opp_count, rng);
+      std::array<int, 13> h0 = g.player_hand(0);
+      std::array<int, 13> h1 = g.player_hand(1);
+      if (opp == 0)
+        h0 = new_opp;
+      else
+        h1 = new_opp;
+      g = Game(h0, h1, disc, g.last_move(), cp);
+    }
     PartialGame pg(g, cp);
     TablebasePeekResult tb = peek_tablebase_move(pg);
     if (tb.move) {
@@ -143,17 +169,60 @@ inline int policy_rollout(Game g, int my_player, EvalFn eval_fn) {
   return g.get_winner() == my_player ? 1 : 0;
 }
 
+// Rollout policy: like policy_rollout, but when pass and non-pass are both legal,
+// pass if Ridge model predicts Δ>0 (same semantics as GreedyPassPlayer).
+template <typename EvalFn>
+inline int policy_rollout_pass_aware(Game g, int my_player, EvalFn eval_fn,
+                                     LinearEvaluator &pass_model,
+                                     bool resample_opponent_each_turn,
+                                     std::mt19937 &rng) {
+  while (!g.is_over()) {
+    int cp = g.current_player();
+    if (resample_opponent_each_turn && cp != my_player) {
+      const std::array<int, 13> my_h = g.player_hand(my_player);
+      const std::array<int, 13> disc = g.discard_pile();
+      const int opp = 1 - my_player;
+      const int opp_count = g.get_player_hand_size(opp);
+      const std::array<int, 13> new_opp =
+          sample_opponent_hand(my_h, disc, opp_count, rng);
+      std::array<int, 13> h0 = g.player_hand(0);
+      std::array<int, 13> h1 = g.player_hand(1);
+      if (opp == 0)
+        h0 = new_opp;
+      else
+        h1 = new_opp;
+      g = Game(h0, h1, disc, g.last_move(), cp);
+    }
+    PartialGame pg(g, cp);
+    TablebasePeekResult tb = peek_tablebase_move(pg);
+    if (tb.move) {
+      g.apply_move(*tb.move);
+    } else {
+      const std::vector<int> legal = pg.get_legal_moves();
+      if (voluntary_pass_legal(legal) && pass_model.loaded() &&
+          pass_model.predict(pg) > 0.0)
+        g.apply_move(Move(kPASS));
+      else
+        g.apply_move(greedy_best(pg, legal, eval_fn));
+    }
+  }
+  return g.get_winner() == my_player ? 1 : 0;
+}
+
 // Shared PIMC move selection.
 //
 // Common random numbers (CRN): one opponent hand per det, all candidates scored.
 //
 // If adaptive: loop up to n_max; after n_min dets, stop early when
 // confident_leader_hoeffding fires. If not adaptive: exactly n_max dets.
-template <typename EvalFn>
+//
+// rollout_fn: (Game, my_player, eval_fn, resample_opponent_each_turn, rng) -> win {0,1}
+template <typename EvalFn, typename RolloutFn>
 inline Move pimc_select_move_impl(const PartialGame &game_, int player_num_,
                                   int n_max, int n_min, bool adaptive,
                                   double delta, std::mt19937 &rng_,
-                                  EvalFn eval_fn) {
+                                  EvalFn eval_fn, bool resample_opponent_each_turn,
+                                  RolloutFn rollout_fn) {
   const std::vector<int> legal = game_.get_legal_moves();
 
   std::vector<int> candidates;
@@ -168,6 +237,12 @@ inline Move pimc_select_move_impl(const PartialGame &game_, int player_num_,
 
   if (candidates.empty())
     return Move(kPASS);
+
+  [[maybe_unused]] const bool voluntary_ctx = has_pass && !candidates.empty();
+#if BIG2_PIMC_STATS
+  if (voluntary_ctx)
+    pimc_global_stats().voluntary_pass_opportunities += 1;
+#endif
 
   if (has_pass)
     candidates.push_back(kPASS);
@@ -197,7 +272,8 @@ inline Move pimc_select_move_impl(const PartialGame &game_, int player_num_,
     for (int ci = 0; ci < M; ++ci) {
       Game g(hand0, hand1, discard, last_mv, player_num_);
       g.apply_move(candidates[ci]);
-      wins[ci] += policy_rollout(g, player_num_, eval_fn);
+      wins[ci] += rollout_fn(g, player_num_, eval_fn,
+                             resample_opponent_each_turn, rng_);
     }
 
     dets_used = det + 1;
@@ -228,6 +304,13 @@ inline Move pimc_select_move_impl(const PartialGame &game_, int player_num_,
     else if (wins[ci] == wins[best_ci] && candidates[ci] < candidates[best_ci])
       best_ci = ci;
   }
+
+#if BIG2_PIMC_STATS
+  if (voluntary_ctx &&
+      Move(candidates[best_ci]).combination == Move::Combination::kPass)
+    pimc_global_stats().voluntary_pass_chosen += 1;
+#endif
+
   return Move(candidates[best_ci]);
 }
 
@@ -237,14 +320,16 @@ inline Move pimc_select_move_impl(const PartialGame &game_, int player_num_,
 class PimcPlayer : public Player {
 public:
   // Fixed N determinizations (legacy).
-  explicit PimcPlayer(int num_samples, unsigned int seed)
+  explicit PimcPlayer(int num_samples, unsigned int seed,
+                    bool resample_opponent_each_turn = false)
       : n_max_(num_samples), n_min_(0), delta_(0.05), adaptive_(false),
-        rng_(seed) {}
+        resample_opponent_each_turn_(resample_opponent_each_turn), rng_(seed) {}
 
   // Adaptive: up to n_max dets; stop early after n_min when Hoeffding test passes.
-  PimcPlayer(int n_max, int n_min, double delta, unsigned int seed)
+  PimcPlayer(int n_max, int n_min, double delta, unsigned int seed,
+             bool resample_opponent_each_turn = false)
       : n_max_(n_max), n_min_(n_min), delta_(delta), adaptive_(true),
-        rng_(seed) {}
+        resample_opponent_each_turn_(resample_opponent_each_turn), rng_(seed) {}
 
 protected:
   void on_deal(const std::array<int, 13> & /*hand*/, int player_num) override {
@@ -252,8 +337,12 @@ protected:
   }
 
   Move select_move_impl() override {
-    return pimc_select_move_impl(game_, player_num_, n_max_, n_min_, adaptive_,
-                                 delta_, rng_, greedy_hand_eval);
+    return pimc_select_move_impl(
+        game_, player_num_, n_max_, n_min_, adaptive_, delta_, rng_, greedy_hand_eval,
+        resample_opponent_each_turn_,
+        [](Game g, int my_player, const auto &eval_fn, bool redet, std::mt19937 &rng) {
+          return policy_rollout(g, my_player, eval_fn, redet, rng);
+        });
   }
 
 private:
@@ -261,6 +350,7 @@ private:
   int n_min_;
   double delta_;
   bool adaptive_;
+  bool resample_opponent_each_turn_;
   int player_num_{0};
   std::mt19937 rng_;
 };
@@ -271,8 +361,9 @@ private:
 class PimcTreePlayer : public Player {
 public:
   PimcTreePlayer(int num_samples, const std::string &model_path,
-                 unsigned int seed)
+                 unsigned int seed, bool resample_opponent_each_turn = false)
       : n_max_(num_samples), n_min_(0), delta_(0.05), adaptive_(false),
+        resample_opponent_each_turn_(resample_opponent_each_turn),
         evaluator_(model_path), rng_(seed) {
     if (!evaluator_.loaded())
       throw std::runtime_error("PimcTreePlayer: model failed to load from '" +
@@ -280,8 +371,10 @@ public:
   }
 
   PimcTreePlayer(int n_max, int n_min, double delta,
-                 const std::string &model_path, unsigned int seed)
+                 const std::string &model_path, unsigned int seed,
+                 bool resample_opponent_each_turn = false)
       : n_max_(n_max), n_min_(n_min), delta_(delta), adaptive_(true),
+        resample_opponent_each_turn_(resample_opponent_each_turn),
         evaluator_(model_path), rng_(seed) {
     if (!evaluator_.loaded())
       throw std::runtime_error("PimcTreePlayer: model failed to load from '" +
@@ -296,7 +389,11 @@ protected:
   Move select_move_impl() override {
     return pimc_select_move_impl(
         game_, player_num_, n_max_, n_min_, adaptive_, delta_, rng_,
-        [this](const PartialGame &sim) { return evaluator_.predict(sim); });
+        [this](const PartialGame &sim) { return evaluator_.predict(sim); },
+        resample_opponent_each_turn_,
+        [](Game g, int my_player, const auto &eval_fn, bool redet, std::mt19937 &rng) {
+          return policy_rollout(g, my_player, eval_fn, redet, rng);
+        });
   }
 
 private:
@@ -304,8 +401,116 @@ private:
   int n_min_;
   double delta_;
   bool adaptive_;
+  bool resample_opponent_each_turn_;
   int player_num_{0};
   TreeEvaluator evaluator_;
+  std::mt19937 rng_;
+};
+
+// ---------------------------------------------------------------------------
+// PimcLinearPlayer — Ridge linear rollout (after tablebase).
+// ---------------------------------------------------------------------------
+class PimcLinearPlayer : public Player {
+public:
+  PimcLinearPlayer(int num_samples, const std::string &model_path,
+                   unsigned int seed, bool resample_opponent_each_turn = false)
+      : n_max_(num_samples), n_min_(0), delta_(0.05), adaptive_(false),
+        resample_opponent_each_turn_(resample_opponent_each_turn),
+        evaluator_(model_path), rng_(seed) {
+    if (!evaluator_.loaded())
+      throw std::runtime_error("PimcLinearPlayer: model failed to load from '" +
+                               model_path + "'");
+  }
+
+  PimcLinearPlayer(int n_max, int n_min, double delta,
+                   const std::string &model_path, unsigned int seed,
+                   bool resample_opponent_each_turn = false)
+      : n_max_(n_max), n_min_(n_min), delta_(delta), adaptive_(true),
+        resample_opponent_each_turn_(resample_opponent_each_turn),
+        evaluator_(model_path), rng_(seed) {
+    if (!evaluator_.loaded())
+      throw std::runtime_error("PimcLinearPlayer: model failed to load from '" +
+                               model_path + "'");
+  }
+
+protected:
+  void on_deal(const std::array<int, 13> & /*hand*/, int player_num) override {
+    player_num_ = player_num;
+  }
+
+  Move select_move_impl() override {
+    return pimc_select_move_impl(
+        game_, player_num_, n_max_, n_min_, adaptive_, delta_, rng_,
+        [this](const PartialGame &sim) { return evaluator_.predict(sim); },
+        resample_opponent_each_turn_,
+        [](Game g, int my_player, const auto &eval_fn, bool redet, std::mt19937 &rng) {
+          return policy_rollout(g, my_player, eval_fn, redet, rng);
+        });
+  }
+
+private:
+  int n_max_;
+  int n_min_;
+  double delta_;
+  bool adaptive_;
+  bool resample_opponent_each_turn_;
+  int player_num_{0};
+  LinearEvaluator evaluator_;
+  std::mt19937 rng_;
+};
+
+// ---------------------------------------------------------------------------
+// PimcPassRolloutPlayer — PIMC with pass-aware rollout (after tablebase).
+// Loads Ridge pass weights (same format as LinearEvaluator, default data/pass_ridge_w.txt).
+// ---------------------------------------------------------------------------
+class PimcPassRolloutPlayer : public Player {
+public:
+  explicit PimcPassRolloutPlayer(int num_samples, const std::string &model_path,
+                                 unsigned int seed,
+                                 bool resample_opponent_each_turn = false)
+      : n_max_(num_samples), n_min_(0), delta_(0.05), adaptive_(false),
+        resample_opponent_each_turn_(resample_opponent_each_turn),
+        pass_model_(model_path), rng_(seed) {
+    if (!pass_model_.loaded())
+      throw std::runtime_error("PimcPassRolloutPlayer: model failed to load from '" +
+                               model_path + "'");
+  }
+
+  PimcPassRolloutPlayer(int n_max, int n_min, double delta,
+                        const std::string &model_path, unsigned int seed,
+                        bool resample_opponent_each_turn = false)
+      : n_max_(n_max), n_min_(n_min), delta_(delta), adaptive_(true),
+        resample_opponent_each_turn_(resample_opponent_each_turn),
+        pass_model_(model_path), rng_(seed) {
+    if (!pass_model_.loaded())
+      throw std::runtime_error("PimcPassRolloutPlayer: model failed to load from '" +
+                               model_path + "'");
+  }
+
+protected:
+  void on_deal(const std::array<int, 13> & /*hand*/, int player_num) override {
+    player_num_ = player_num;
+  }
+
+  Move select_move_impl() override {
+    return pimc_select_move_impl(
+        game_, player_num_, n_max_, n_min_, adaptive_, delta_, rng_, greedy_hand_eval,
+        resample_opponent_each_turn_,
+        [this](Game g, int my_player, const auto &eval_fn, bool redet,
+               std::mt19937 &rng) {
+          return policy_rollout_pass_aware(g, my_player, eval_fn, pass_model_, redet,
+                                           rng);
+        });
+  }
+
+private:
+  int n_max_;
+  int n_min_;
+  double delta_;
+  bool adaptive_;
+  bool resample_opponent_each_turn_;
+  int player_num_{0};
+  LinearEvaluator pass_model_;
   std::mt19937 rng_;
 };
 

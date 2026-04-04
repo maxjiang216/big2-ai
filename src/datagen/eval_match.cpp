@@ -75,14 +75,17 @@ static void print_usage(const char *prog) {
       << "  --deals <N>          Number of unique deals (total games = 2*N) (required)\n"
       << "  --seed <S>           Base RNG seed (default: random)\n"
       << "  --threads <T>        Worker threads (default: hardware - 2)\n"
-      << "\nAvailable players: random, greedy, greedy_random, greedy_random_pass, greedy_no_bomb\n"
+      << "\nAvailable players: random, greedy, greedy_random, greedy_random_pass, greedy_no_bomb,\n"
+      << "  greedy_linear, greedy_pass, tree_greedy, pimc, pimc_tree, pimc_linear, pimc_redet,\n"
+      << "  pimc_linear_redet, pimc_tree_redet, pimc_adaptive, pimc_tree_adaptive,\n"
+      << "  pimc_pass_rollout, pimc_pass_rollout_adaptive\n"
       << "\nExample:\n"
       << "  " << prog
       << " --p0 greedy_no_bomb --p0-param 0.3 --p1 greedy --deals 50000\n";
 }
 
 static std::string player_label(const std::string &name, double param) {
-  if (name == "greedy" || name == "random")
+  if (name == "greedy" || name == "random" || name == "greedy_pass")
     return name;
   char buf[64];
   std::snprintf(buf, sizeof(buf), "%s(%.2g)", name.c_str(), param);
@@ -161,6 +164,9 @@ int main(int argc, char **argv) {
   // We give thread t an offset of t * 1000003 from the base seed.
   std::atomic<int> next_deal{0};
   std::atomic<long> a_wins_total{0};
+  std::atomic<long> deals_p0_sweep{0};
+  std::atomic<long> deals_split{0};
+  std::atomic<long> deals_p1_sweep{0};
 
   auto t_start = std::chrono::high_resolution_clock::now();
 
@@ -176,13 +182,26 @@ int main(int argc, char **argv) {
 
       int deal_idx;
       long local_wins = 0;
+      long local_p0_sweep = 0;
+      long local_split = 0;
+      long local_p1_sweep = 0;
       while ((deal_idx = next_deal.fetch_add(1)) < num_deals) {
         // Deal seed is deterministic from the global seed + deal index so
         // that every thread arrives at the same card distribution for deal i.
         unsigned int deal_seed = seed + static_cast<unsigned int>(deal_idx);
-        local_wins += run_paired_deal(deal_seed, *fa, *fb);
+        int r = run_paired_deal(deal_seed, *fa, *fb);
+        local_wins += r;
+        if (r == 2)
+          ++local_p0_sweep;
+        else if (r == 1)
+          ++local_split;
+        else
+          ++local_p1_sweep;
       }
       a_wins_total.fetch_add(local_wins);
+      deals_p0_sweep.fetch_add(local_p0_sweep);
+      deals_split.fetch_add(local_split);
+      deals_p1_sweep.fetch_add(local_p1_sweep);
     });
   }
 
@@ -234,6 +253,34 @@ int main(int argc, char **argv) {
   else
     std::cout << "Result: no significant difference (CI includes 50%)\n";
 
+  long d0 = deals_p0_sweep.load();
+  long d1 = deals_split.load();
+  long d2 = deals_p1_sweep.load();
+  double inv_deals = num_deals > 0 ? 1.0 / static_cast<double>(num_deals) : 0.0;
+
+  std::cout << "Deals: P0_sweep=" << d0 << " split=" << d1 << " P1_sweep=" << d2
+            << " total=" << num_deals << "\n";
+  std::cout << "Deals: P0 sweep 2-0: " << d0 << " (" << std::fixed;
+  std::cout.precision(2);
+  std::cout << 100.0 * static_cast<double>(d0) * inv_deals << "%)  |  split 1-1: " << d1
+            << " (" << 100.0 * static_cast<double>(d1) * inv_deals << "%)  |  P1 sweep 0-2: "
+            << d2 << " (" << 100.0 * static_cast<double>(d2) * inv_deals << "%)\n";
+
+  long n_decisive = d0 + d2;
+  if (n_decisive > 0) {
+    double p_dec = static_cast<double>(d0) / static_cast<double>(n_decisive);
+    WilsonCI ci_dec = wilson_ci(p_dec, n_decisive);
+    std::cout << "Among decisive deals (non-split): P0 sweep " << d0 << " / " << n_decisive
+              << " (" << 100.0 * p_dec << "%)  95% Wilson CI: [" << 100.0 * ci_dec.lo << "%, "
+              << 100.0 * ci_dec.hi << "%]\n";
+    if (ci_dec.lo > 0.50)
+      std::cout << "Result (decisive): " << label0 << " sweeps more often (CI excludes 50%)\n";
+    else if (ci_dec.hi < 0.50)
+      std::cout << "Result (decisive): " << label1 << " sweeps more often (CI excludes 50%)\n";
+    else
+      std::cout << "Result (decisive): no significant difference (CI includes 50%)\n";
+  }
+
   std::cout << "Elapsed: " << format_elapsed(elapsed_ms)
             << "  (" << static_cast<long>(games_per_sec) << " games/s)\n\n";
 
@@ -242,12 +289,24 @@ int main(int argc, char **argv) {
     const auto &st = pimc_global_stats();
     const uint64_t calls = st.total_select_calls.load();
     const uint64_t dets = st.total_dets_used.load();
+    const uint64_t vol_opp = st.voluntary_pass_opportunities.load();
+    const uint64_t vol_ch = st.voluntary_pass_chosen.load();
     std::fprintf(stderr,
                  "[PIMC stats] select_calls=%" PRIu64 " total_dets=%" PRIu64
                  " avg_dets_per_call=%.3f\n",
                  calls, dets,
                  calls ? static_cast<double>(dets) / static_cast<double>(calls)
                        : 0.0);
+    std::fprintf(stderr,
+                 "[PIMC stats] voluntary_pass: opportunities=%" PRIu64
+                 " chosen=%" PRIu64,
+                 vol_opp, vol_ch);
+    if (vol_opp > 0) {
+      std::fprintf(stderr, " rate=%.4f\n",
+                   static_cast<double>(vol_ch) / static_cast<double>(vol_opp));
+    } else {
+      std::fprintf(stderr, " rate=n/a\n");
+    }
     std::fprintf(stderr,
                  "[PIMC stats] total_dets_saved=%" PRIu64
                  " rollout_equiv_saved=%" PRIu64

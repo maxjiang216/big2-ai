@@ -40,9 +40,36 @@ def analyze_text(text: str) -> str:
     if m:
         lines.append(f"**95% Wilson CI:** [{m.group(1)}%, {m.group(2)}%]")
 
-    m = re.search(r"Result:\s*(.+?)(?:\n|$)", text)
+    m = re.search(r"^Result:\s*(.+)$", text, re.MULTILINE)
     if m:
         lines.append(f"**Result:** {m.group(1).strip()}")
+
+    m = re.search(
+        r"Deals: P0_sweep=(\d+) split=(\d+) P1_sweep=(\d+) total=(\d+)",
+        text,
+    )
+    if m:
+        lines.append(
+            "**Deals:** "
+            f"P0_sweep={m.group(1)} split={m.group(2)} P1_sweep={m.group(3)} "
+            f"total={m.group(4)}"
+        )
+
+    m = re.search(
+        r"Among decisive deals \(non-split\): P0 sweep (\d+) / (\d+) "
+        r"\(([\d.]+)%\)\s+95% Wilson CI: \[([\d.]+)%,\s*([\d.]+)%\]",
+        text,
+    )
+    if m:
+        lines.append(
+            "**Decisive (non-split):** "
+            f"{m.group(1)} / {m.group(2)} ({m.group(3)}%)  "
+            f"95% Wilson CI: [{m.group(4)}%, {m.group(5)}%]"
+        )
+
+    m = re.search(r"^Result \(decisive\):\s*(.+)$", text, re.MULTILINE)
+    if m:
+        lines.append(f"**Result (decisive):** {m.group(1).strip()}")
 
     m = re.search(r"Elapsed:\s*(.+?)(?:\n|$)", text)
     if m:

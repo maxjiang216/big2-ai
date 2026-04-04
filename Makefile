@@ -16,10 +16,10 @@ DATAGEN_CPP := src/datagen/parquet_export.cpp src/datagen/samples_md.cpp
 
 TEST_CPP    := $(wildcard test/*.cpp)
 
-RESEARCH_BIN_NAMES := best_hand multi_comb play_probs
+RESEARCH_BIN_NAMES := best_hand multi_comb play_probs count_turn_states
 RESEARCH_BINS      := $(addprefix $(BUILD_DIR)/research/,$(RESEARCH_BIN_NAMES))
 
-.PHONY: all clean dirs test_core coordinator generate_data eval_match move_agreement benchmark tablebase_opp1_gen research help
+.PHONY: all clean dirs test_core coordinator generate_data eval_match pass_greedy_datagen move_agreement benchmark tablebase_opp1_gen research help
 
 all: help
 
@@ -30,6 +30,7 @@ help:
 	@echo "  make coordinator          - coordinator + Parquet objects (needs libarrow)"
 	@echo "  make generate_data        - self-play + Parquet + stats (needs libarrow)"
 	@echo "  make eval_match           - head-to-head evaluation binary (no Arrow)"
+	@echo "  make pass_greedy_datagen  - CSV dataset for pass-vs-greedy logistic (no Arrow)"
 	@echo "  make move_agreement       - greedy vs tree move agreement stats (no Arrow)"
 	@echo "  make tablebase_opp1_gen   - build opp-1-card tablebase binary generator (no Arrow)"
 	@echo "  make research             - standalone research/*.cpp -> build/research/"
@@ -148,6 +149,23 @@ $(BIN_DIR)/eval_match: $(EVALMATCH_OBJS)
 	@echo "✓ $(BIN_DIR)/eval_match"
 
 eval_match: dirs $(BIN_DIR)/eval_match
+
+# ============================================================================
+# bin/pass_greedy_datagen — pass vs greedy labels from PIMC self-play (no Arrow)
+# ============================================================================
+
+$(BUILD_DIR)/src/datagen/pass_greedy_datagen.o: src/datagen/pass_greedy_datagen.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+PASSGREEDY_OBJS := $(CORE_OBJS) \
+                  $(BUILD_DIR)/src/simulation/game_simulator.o \
+                  $(BUILD_DIR)/src/datagen/pass_greedy_datagen.o
+
+$(BIN_DIR)/pass_greedy_datagen: $(PASSGREEDY_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ $(BIN_DIR)/pass_greedy_datagen"
+
+pass_greedy_datagen: dirs $(BIN_DIR)/pass_greedy_datagen
 
 # ============================================================================
 # bin/move_agreement — greedy vs tree move choice comparison (no Arrow)

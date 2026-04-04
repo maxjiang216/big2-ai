@@ -80,7 +80,10 @@ static void print_usage(const char *prog) {
       << "  --seed <S>                 RNG seed (default: random)\n"
       << "  --threads <T>              Threads (default: hardware - 2)\n"
       << "  --samples-md <path>        Markdown: anomaly games with hands + history\n"
-      << "\nAvailable players: random, greedy, greedy_random, greedy_random_pass, greedy_no_bomb\n"
+      << "  --player-param <f>         Extra parameter for parameterized players (default: 0)\n"
+      << "                             e.g. pimc: number of determinizations N (default 10 if 0)\n"
+      << "\nAvailable players: random, greedy, greedy_random, greedy_random_pass, greedy_no_bomb,\n"
+      << "  pimc, pimc_tree, pimc_adaptive, pimc_tree_adaptive (see player_factory_registry.h)\n"
       << "  (greedy_random, greedy_random_pass, greedy_no_bomb are only valid in eval_match)\n"
       << "\nExample:\n"
       << "  " << prog
@@ -96,6 +99,7 @@ static void print_usage(const char *prog) {
 
 int main(int argc, char **argv) {
   std::string player_name;
+  double player_param = 0.0;
   int num_games = 0;
   std::string output_path;
   std::string samples_md_path;
@@ -124,6 +128,8 @@ int main(int argc, char **argv) {
       num_threads = std::stoi(argv[++i]);
     else if (arg == "--samples-md" && i + 1 < argc)
       samples_md_path = argv[++i];
+    else if (arg == "--player-param" && i + 1 < argc)
+      player_param = std::stod(argv[++i]);
     else {
       std::cerr << "Unknown argument: " << arg << "\n";
       print_usage(argv[0]);
@@ -160,11 +166,12 @@ int main(int argc, char **argv) {
     }
   }
 
-  auto factory = make_player_factory(player_name, 0.0, seed);
+  auto factory = make_player_factory(player_name, player_param, seed);
   if (!factory) return 1;
 
   std::cout << "\n=== Data generation / self-play ===\n"
             << "Player:   " << player_name << " vs " << player_name << "\n"
+            << "Param:    " << player_param << "\n"
             << "Games:    " << num_games << "\n";
   if (!output_path.empty()) {
     std::cout << "Output:   " << output_path << "_game.parquet\n"

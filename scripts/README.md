@@ -13,8 +13,19 @@ These strings work anywhere the code calls `make_player_factory` (e.g. `bin/eval
 | `greedy_random` | Usually greedy; with probability `param`, play a random legal move |
 | `greedy_random_pass` | Usually greedy; with probability `param`, pass when legal |
 | `greedy_no_bomb` | Usually greedy; when greedy would play a bomb, only do so with probability `param` |
+| `pimc`, `pimc_linear`, `pimc_tree`, … | See `src/players/player_factory_registry.h` (e.g. `pimc_redet` = PIMC with opponent hand re-sampled each opponent turn inside rollouts) |
 
 Parameterized variants take `--p0-param` / `--p1-param` (or `param` in JSON configs for `eval_match` / round robin). **`bin/generate_data` fixes `param` at 0** for self-play; use `eval_match` or round robin for parameter sweeps.
+
+## `compare_pimc_rollout_strategies.py`
+
+Runs a **fixed matrix** of `eval_match` jobs (greedy vs random; `pimc(N)` vs random/greedy; `pimc_redet(N)` vs random/greedy; `pimc` vs `pimc_redet`) with the same `--deals`, `--seed`, and `--threads`, and prints P0 win rate, Wilson CI, `eval_match` elapsed line, and process wall time. Optional `--csv` writes a summary table.
+
+```bash
+uv run python scripts/compare_pimc_rollout_strategies.py --deals 2000 --seed 42
+```
+
+Individual matchups are also available as JSON under `scripts/configs/eval_pimc20_vs_greedy.json`, `eval_pimc_redet20_vs_greedy.json`, `eval_pimc20_vs_random.json`, `eval_pimc_redet20_vs_random.json`, `eval_pimc20_vs_pimc_redet20.json`.
 
 ---
 
