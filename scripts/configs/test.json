@@ -1,6 +1,6 @@
 {
   "player": "random",
-  "num_games": 1000,
+  "num_games": 100000,
   "output_path": "data/test_1k",
   "game_features": [
     "outcome",

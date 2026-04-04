@@ -23,7 +23,9 @@ import numpy as np
 import pandas as pd
 
 
-def load_parquet(game_file: Path | None, turn_file: Path | None) -> tuple[pd.DataFrame, pd.DataFrame]:
+def load_parquet(
+    game_file: Path | None, turn_file: Path | None
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     games = pd.DataFrame()
     turns = pd.DataFrame()
     if game_file is not None and game_file.is_file():
@@ -71,8 +73,12 @@ def print_anomaly_samples(games: pd.DataFrame, samples_md_hint: str | None) -> N
         print(f"  Shortest game:  {format_game_sample(games.loc[L.idxmin()])}")
     if "start_legal_moves" in games.columns:
         S = games["start_legal_moves"]
-        print(f"  Most start legal moves:   {format_game_sample(games.loc[S.idxmax()])}")
-        print(f"  Fewest start legal moves: {format_game_sample(games.loc[S.idxmin()])}")
+        print(
+            f"  Most start legal moves:   {format_game_sample(games.loc[S.idxmax()])}"
+        )
+        print(
+            f"  Fewest start legal moves: {format_game_sample(games.loc[S.idxmin()])}"
+        )
     if samples_md_hint:
         print(f"\n  (Full hands + histories: {samples_md_hint})")
 
@@ -129,7 +135,9 @@ def build_report_figure(
     samples_md_hint: str | None,
 ) -> plt.Figure:
     fig = plt.figure(figsize=(15, 12))
-    gs = fig.add_gridspec(3, 3, height_ratios=[1.0, 1.0, 0.42], hspace=0.32, wspace=0.28)
+    gs = fig.add_gridspec(
+        3, 3, height_ratios=[1.0, 1.0, 0.42], hspace=0.32, wspace=0.28
+    )
     axes = np.empty((2, 3), dtype=object)
     for r in range(2):
         for c in range(3):
@@ -162,7 +170,14 @@ def build_report_figure(
         ax.set_title("Win rate (P0 vs P1)")
     else:
         ax.set_title("Win rate")
-        ax.text(0.5, 0.5, "No outcome data", ha="center", va="center", transform=ax.transAxes)
+        ax.text(
+            0.5,
+            0.5,
+            "No outcome data",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
 
     ax = axes[0, 1]
     if not games.empty and "length" in games.columns:
@@ -196,7 +211,9 @@ def build_report_figure(
         ax.set_title(f"Game length (n={len(L)})")
     else:
         ax.set_title("Game length")
-        ax.text(0.5, 0.5, "No length data", ha="center", va="center", transform=ax.transAxes)
+        ax.text(
+            0.5, 0.5, "No length data", ha="center", va="center", transform=ax.transAxes
+        )
 
     ax = axes[0, 2]
     if not games.empty and "start_legal_moves" in games.columns:
@@ -216,7 +233,11 @@ def build_report_figure(
         ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
 
     ax = axes[1, 0]
-    if not turns.empty and "turn_idx" in turns.columns and "player_hand_size" in turns.columns:
+    if (
+        not turns.empty
+        and "turn_idx" in turns.columns
+        and "player_hand_size" in turns.columns
+    ):
         g = turns.groupby("turn_idx")["player_hand_size"].mean()
         ax.plot(g.index, g.values, color="darkgreen", linewidth=1.5)
         ax.fill_between(g.index, g.values, alpha=0.2, color="darkgreen")
@@ -225,7 +246,9 @@ def build_report_figure(
         ax.set_title("Mean hand size over game progress")
     else:
         ax.set_title("Hand size over turns")
-        ax.text(0.5, 0.5, "No turn data", ha="center", va="center", transform=ax.transAxes)
+        ax.text(
+            0.5, 0.5, "No turn data", ha="center", va="center", transform=ax.transAxes
+        )
 
     ax = axes[1, 1]
     if not turns.empty and "possible_moves" in turns.columns:
@@ -273,8 +296,12 @@ def build_report_figure(
         note_lines.append(f"Shortest:  {format_game_sample(games.loc[L.idxmin()])}")
     if not games.empty and "start_legal_moves" in games.columns and len(games) > 0:
         S = games["start_legal_moves"]
-        note_lines.append(f"Most start legal moves:   {format_game_sample(games.loc[S.idxmax()])}")
-        note_lines.append(f"Fewest start legal moves: {format_game_sample(games.loc[S.idxmin()])}")
+        note_lines.append(
+            f"Most start legal moves:   {format_game_sample(games.loc[S.idxmax()])}"
+        )
+        note_lines.append(
+            f"Fewest start legal moves: {format_game_sample(games.loc[S.idxmin()])}"
+        )
     if samples_md_hint:
         note_lines.append("")
         note_lines.append(f"Full histories: {samples_md_hint}")
@@ -287,7 +314,11 @@ def build_report_figure(
         fontsize=9,
         verticalalignment="top",
         fontfamily="monospace",
-        bbox={"boxstyle": "round,pad=0.4", "facecolor": "#f5f5f5", "edgecolor": "#888888"},
+        bbox={
+            "boxstyle": "round,pad=0.4",
+            "facecolor": "#f5f5f5",
+            "edgecolor": "#888888",
+        },
     )
 
     fig.subplots_adjust(top=0.93, bottom=0.06)
@@ -314,7 +345,9 @@ def main() -> None:
         default=Path("."),
         help="Directory for report PNG and optional CSV exports",
     )
-    ap.add_argument("--report-name", type=str, default="report.png", help="Report image filename")
+    ap.add_argument(
+        "--report-name", type=str, default="report.png", help="Report image filename"
+    )
     ap.add_argument(
         "--samples-md-hint",
         type=str,

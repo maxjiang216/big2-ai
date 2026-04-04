@@ -22,7 +22,6 @@ from pathlib import Path
 
 import pandas as pd
 
-
 DEFAULT_GAME_FEATURES = "length,outcome,tb_hits,start_legal_moves"
 
 

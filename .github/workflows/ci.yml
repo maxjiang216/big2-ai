@@ -1,4 +1,4 @@
-# Build and run C++ unit tests (make test_core + ./bin/test_core).
+# C++ tests (make test_core) + Python formatting (black --check).
 name: CI
 
 on:
@@ -8,6 +8,21 @@ on:
     branches: [main]
 
 jobs:
+  black:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Black
+        run: pip install black
+
+      - name: Check Python formatting
+        run: python -m black --check --diff .
+
   test:
     runs-on: ubuntu-latest
     steps:
