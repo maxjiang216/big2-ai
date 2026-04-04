@@ -54,11 +54,11 @@ A pair of cards with the same rank. Doubles are compared by rank, same order as 
 
 ### Triple
 
-Three cards of the same rank. Compared by rank. There are no triple aces (a triple ace is a **bomb** instead — see below) and no triple 2.
+Three cards of the same rank. Compared by rank. You cannot play three aces **as a triple by itself** — they are the **ace bomb** (see below). There is no triple 2. (Three aces **can** be the triple half of a **full house**; see below.)
 
 ### Full House
 
-A triple of one rank combined with a double of another rank — i.e. a standard poker full house. Full houses are **always compared by the rank of the triple**, regardless of the pair.
+A triple of one rank combined with a double of another rank — i.e. a standard poker full house. Full houses are **always compared by the rank of the triple**, regardless of the pair. The triple may be aces (e.g. AAA paired with a pair of another rank).
 
 ### Straight
 
@@ -126,3 +126,13 @@ The winner of each game has the initiative to open the next game.
 ### Winning the Series
 
 The first player to reach **50 points total** wins the series.
+
+---
+
+## Why exclude AAA from consecutive triples but allow AAA in full houses?
+
+**Consecutive triple (triple straight).** To play aces as part of a consecutive triple, you must also hold kings — aces are only adjacent to kings. In that situation you can always split the line: play the **ace bomb** (unbeatable; you take the trick and keep initiative), then play **KKK** on a later trick. The opponent’s options after the bomb, then after KKK, match what they would have faced against the consecutive triple, so the longer combination is never strictly better. For that reason, this ruleset does **not** treat “AAA–KKK” as a legal consecutive triple: the ace bomb plus KKK covers the same ground.
+
+**Full house.** The same decomposition does not work. A full house **AAAxx** is only beatable by a bomb. If you instead play the ace bomb and then the pair **xx** separately, the opponent can beat **xx** with any higher pair — they do not need a bomb. So **AAAxx** can be **strictly stronger** than playing the bomb and then the weak pair, when **xx** is a low pair you do not want to expose alone. Full houses therefore **allow** aces as the triple rank.
+
+This distinction is about which combinations remain worth keeping as separate legal moves, not about whether three aces “count” as a triple in the abstract.
