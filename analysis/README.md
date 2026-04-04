@@ -6,7 +6,15 @@ Python scripts for exploring **Parquet** exports from `bin/generate_data`, plus 
 
 **Eval logs:** `scripts/analyze_eval_match.py` parses `bin/eval_match` output (or a file saved by `scripts/run_eval_match.py`, e.g. `analysis/eval_match_last.log`) and prints wins, Wilson CI, and verdict lines. See [`scripts/README.md`](../scripts/README.md).
 
-**Dependencies:** `pandas`, `numpy`, `matplotlib`, `seaborn`; `random_forest_tester.py` also needs `scikit-learn` and `joblib`.
+**Dependencies:** managed with **[uv](https://docs.astral.sh/uv/)** — run `uv sync` at the repo root (see root `README.md`). Core stack: `pandas`, `numpy`, `pyarrow`, `scikit-learn`, `joblib`, `matplotlib`; optional `seaborn` via `uv sync --extra analysis`.
+
+## `feature_interaction_explore.py`
+
+Uses the same **last-player / no-TB** table as `train_linear_rollout.py`. Writes MI and Random Forest bar charts, **Pearson** correlation heatmap (top features by MI), **binned mean** `turn_outcome` vs feature (nonlinearity), **quadratic** probes `|corr(y, x_i^2)|`, and pairwise **product** correlations `|corr(y, z_i z_j)|` with `summary.txt`. Example:
+
+```bash
+uv run python analysis/feature_interaction_explore.py data/pimc20_selfplay_turn.parquet --out-dir analysis/feature_explore_out
+```
 
 ## End-to-end: `scripts/run.sh`
 

@@ -126,10 +126,20 @@ make test_core
 
 ## Python analysis
 
+Dependencies are declared in **`pyproject.toml`** and locked with **[uv](https://docs.astral.sh/uv/)**. From the repo root:
+
+```bash
+uv sync                    # create .venv and install numpy, pandas, pyarrow, scikit-learn, …
+uv run python analysis/train_linear_rollout.py data/pimc20_selfplay_turn.parquet --out data/linear_rollout_w.txt --top-k 35
+# or: source .venv/bin/activate && python analysis/train_linear_rollout.py …
+```
+
+Optional extras (e.g. Seaborn for some notebooks/scripts): `uv sync --extra analysis`.
+
 **Parquet reports** (after `generate_data`): with `game_features.parquet` / `turn_features.parquet` in the current directory, or pass paths explicitly:
 
 ```bash
-python3 analysis/analysis.py
+uv run python analysis/analysis.py
 ```
 
 **Eval logs:** summarize a saved `eval_match` transcript:

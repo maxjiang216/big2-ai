@@ -18,7 +18,7 @@
 //   turn_outcome (label), next_player, tb_case (used only for training filters).
 // ---------------------------------------------------------------------------
 
-static constexpr int TREE_N_FEATURES = 61;
+static constexpr int TREE_N_FEATURES = 60;
 
 inline int highest_rank_with_count(const std::array<int, 13> &hand, int count) {
   for (int r = 12; r >= 0; --r) {
@@ -95,8 +95,9 @@ extract_tree_features(const PartialGame &sim) {
   for (int i = 0; i < 13; ++i)
     f[k++] = static_cast<float>(h[i]);
 
-  // n_ge_4 .. n_ge_2  (RankGeFeature rank index 1..12)
-  for (int start = 1; start <= 12; ++start)
+  // n_ge_4 .. n_ge_a  (rank index 1..11).  Omit n_ge_2: for top rank "2", count_ge
+  // equals n_2 (redundant with per-rank count).
+  for (int start = 1; start <= 11; ++start)
     f[k++] = static_cast<float>(count_ge(h, start));
 
   // n_le_3 .. n_le_a  (RankLeFeature end index 0..11)

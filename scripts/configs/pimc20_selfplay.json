@@ -1,8 +1,8 @@
 {
-  "player": "greedy",
-  "num_games": 100000,
-  "output_path": "data/greedy_all_features_100k",
-  "samples_md_path": "analysis/sample_games.md",
+  "player": "pimc",
+  "player_param": 20,
+  "num_games": 5000,
+  "output_path": "data/pimc20_selfplay",
   "game_features": [
     "outcome",
     "length",
@@ -13,10 +13,9 @@
     "tb_opp1_table_straight"
   ],
   "turn_features": [
-    "turn_outcome",
-    "next_player",
     "player_hand_size",
     "opponent_hand_size",
+    "only_single",
     "n_3",
     "n_4",
     "n_5",
@@ -69,12 +68,15 @@
     "last_move_is_single_straight",
     "last_move_is_double_straight",
     "last_move_is_triple_straight",
-    "n_bombs",
     "last_move_card_count",
+    "n_bombs",
     "possible_moves",
     "possible_moves_not_bomb",
-    "trick_rank"
+    "trick_rank",
+    "turn_outcome",
+    "next_player",
+    "tb_case"
   ],
-  "threads": 18,
+  "threads": 8,
   "seed": 42
 }

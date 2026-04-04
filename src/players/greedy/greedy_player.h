@@ -113,6 +113,18 @@ inline Move greedy_best(const PartialGame &game,
   return greedy_best(game, legal, greedy_hand_eval);
 }
 
+// True iff pass legal and at least one non-pass move legal.
+inline bool voluntary_pass_legal(const std::vector<int> &legal) {
+  bool has_pass = false, has_non = false;
+  for (int m : legal) {
+    if (Move(m).combination == Move::Combination::kPass)
+      has_pass = true;
+    else
+      has_non = true;
+  }
+  return has_pass && has_non;
+}
+
 class GreedyPlayer : public Player {
 protected:
   Move select_move_impl() override {

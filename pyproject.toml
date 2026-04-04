@@ -1,0 +1,23 @@
+[project]
+name = "big2-ai"
+version = "0.1.0"
+description = "Big 2 AI — C++ engine and Python analysis for self-play / ML"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "scikit-learn>=1.3",
+    "joblib>=1.3",
+    "matplotlib>=3.7",
+    "tqdm>=4.65",
+]
+
+[project.optional-dependencies]
+analysis = [
+    "seaborn>=0.13",
+]
+
+[tool.uv]
+package = false

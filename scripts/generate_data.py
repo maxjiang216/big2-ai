@@ -8,6 +8,9 @@ this scripts/ directory).
 Usage:
     python scripts/generate_data.py scripts/configs/greedy.json
     python scripts/generate_data.py scripts/configs/greedy.json --compile
+
+JSON fields:
+    player_param — optional float passed to ``make_player_factory`` (e.g. pimc N=20).
 """
 
 import argparse
@@ -108,6 +111,9 @@ def run_datagen(config, binary_path=None):
 
     if "threads" in config:
         cmd.extend(["--threads", str(config["threads"])])
+
+    if "player_param" in config:
+        cmd.extend(["--player-param", str(config["player_param"])])
 
     if "samples_md_path" in config and config["samples_md_path"]:
         p = Path(config["samples_md_path"])

@@ -76,7 +76,6 @@ FEATURE_COLS = [
     "n_ge_q",
     "n_ge_k",
     "n_ge_a",
-    "n_ge_2",
     "n_le_3",
     "n_le_4",
     "n_le_5",
@@ -112,7 +111,7 @@ FEATURE_COLS = [
     "trick_rank",
 ]
 
-assert len(FEATURE_COLS) == 61
+assert len(FEATURE_COLS) == 60
 
 # n_3 .. n_2 in FEATURE_COLS order (matches C++ hand rank layout).
 RANK_COUNT_COLS = FEATURE_COLS[3:16]
@@ -169,14 +168,30 @@ def load_data(path: str) -> pd.DataFrame:
 
 
 def get_training_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Last-player rows with TB-territory turns removed."""
+    """Last-player rows with tablebase-heavy data removed.
+
+    1) Keep only last-player rows (``next_player == 0``), excluding the synthetic
+       pre-deal row.
+    2) Drop all turns on or after the first tablebase move in each
+       (``game_index``, ``perspective``) segment. Uses every row with
+       ``tb_case != -1`` (not only ``next_player == 1`` rows) so TB turns are not
+       missed when tagging differs by row type.
+    3) Drop any remaining row where ``tb_case != -1`` on that turn (the moving
+       player used a tablebase move), so training never includes turns that the
+       engine resolves via TB (matches rollout after ``peek_tablebase``).
+    """
     mask = (df[NEXT_PLAYER_COL] == 0) & ~(
         (df["player_hand_size"] == 16) & (df["opponent_hand_size"] == 16)
     )
     lp = df[mask].copy()
 
-    mover_rows = df[df[NEXT_PLAYER_COL] == 1].copy()
-    tb_hits = mover_rows[mover_rows[TB_CASE_COL] != -1]
+    if TB_CASE_COL not in df.columns:
+        raise ValueError(
+            f"get_training_rows requires column {TB_CASE_COL!r} (turn Parquet from "
+            "datagen with tb_case in turn_features)."
+        )
+
+    tb_hits = df[df[TB_CASE_COL] != -1]
     first_tb = (
         tb_hits.groupby(["game_index", "perspective"])["turn_idx"]
         .min()
@@ -188,6 +203,8 @@ def get_training_rows(df: pd.DataFrame) -> pd.DataFrame:
     lp["first_tb_turn"] = lp["first_tb_turn"].fillna(np.inf)
     lp = lp[lp["turn_idx"] < lp["first_tb_turn"]]
     lp = lp.drop(columns=["first_tb_turn"])
+
+    lp = lp[lp[TB_CASE_COL] == -1]
 
     return lp
 
