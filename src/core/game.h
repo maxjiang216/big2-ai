@@ -11,6 +11,11 @@ class Game {
 public:
   Game();
 
+  // Construct a Game from an explicit full state (used by PIMC rollouts).
+  // hand_size_ is derived from the hand arrays.
+  Game(std::array<int, 13> hand0, std::array<int, 13> hand1,
+       std::array<int, 13> discard, Move last_move, int current_player);
+
   void shuffle_deal(std::mt19937 &rng);
 
   int current_player() const;

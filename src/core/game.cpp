@@ -9,6 +9,16 @@
 
 Game::Game() : hands_{}, hand_size_{0, 0}, current_player_(0) {}
 
+Game::Game(std::array<int, 13> hand0, std::array<int, 13> hand1,
+           std::array<int, 13> discard, Move last_move, int current_player)
+    : hands_({hand0, hand1}), discard_pile_(discard),
+      current_player_(current_player), last_move_(last_move) {
+  hand_size_[0] = 0;
+  for (int r = 0; r < 13; ++r) hand_size_[0] += hand0[r];
+  hand_size_[1] = 0;
+  for (int r = 0; r < 13; ++r) hand_size_[1] += hand1[r];
+}
+
 void Game::shuffle_deal(std::mt19937 &rng) {
   std::vector<int> deck;
   for (int r = 0; r < 13; ++r) {

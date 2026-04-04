@@ -12,6 +12,10 @@
 #include <thread>
 #include <vector>
 
+#if BIG2_PIMC_STATS
+#include <inttypes.h>
+#endif
+
 // ============================================================================
 // Wilson score 95% confidence interval for a proportion
 // ============================================================================
@@ -232,6 +236,26 @@ int main(int argc, char **argv) {
 
   std::cout << "Elapsed: " << format_elapsed(elapsed_ms)
             << "  (" << static_cast<long>(games_per_sec) << " games/s)\n\n";
+
+#if BIG2_PIMC_STATS
+  {
+    const auto &st = pimc_global_stats();
+    const uint64_t calls = st.total_select_calls.load();
+    const uint64_t dets = st.total_dets_used.load();
+    std::fprintf(stderr,
+                 "[PIMC stats] select_calls=%" PRIu64 " total_dets=%" PRIu64
+                 " avg_dets_per_call=%.3f\n",
+                 calls, dets,
+                 calls ? static_cast<double>(dets) / static_cast<double>(calls)
+                       : 0.0);
+    std::fprintf(stderr,
+                 "[PIMC stats] total_dets_saved=%" PRIu64
+                 " rollout_equiv_saved=%" PRIu64
+                 " (candidate×det cells skipped vs n_max per call)\n",
+                 st.total_dets_saved.load(),
+                 st.total_rollout_equiv_saved.load());
+  }
+#endif
 
   return 0;
 }

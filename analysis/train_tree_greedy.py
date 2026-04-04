@@ -114,6 +114,28 @@ FEATURE_COLS = [
 
 assert len(FEATURE_COLS) == 61
 
+# n_3 .. n_2 in FEATURE_COLS order (matches C++ hand rank layout).
+RANK_COUNT_COLS = FEATURE_COLS[3:16]
+
+
+def ensure_derived_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Fill columns that older Parquet exports may omit (must match C++ TreeEvaluator)."""
+    if "only_single" not in df.columns:
+        missing_ranks = [c for c in RANK_COUNT_COLS if c not in df.columns]
+        if missing_ranks:
+            raise ValueError(
+                "Cannot derive only_single: missing rank columns: "
+                + ", ".join(missing_ranks)
+            )
+        df = df.copy()
+        df["only_single"] = (df[RANK_COUNT_COLS].max(axis=1) <= 1).astype(np.float32)
+        print(
+            "  Derived only_single from rank counts (column absent in Parquet — "
+            "regenerate data with only_single for consistency)"
+        )
+    return df
+
+
 # For ``bin/generate_data``: comma-separated turn features (X + labels/filters).
 TURN_FEATURES_FOR_DATAGEN = ",".join(
     FEATURE_COLS + ["turn_outcome", "next_player", "tb_case"]
@@ -414,6 +436,8 @@ def main() -> None:
     print(f"Loading {args.input} …")
     df = load_data(args.input)
     print(f"  Total rows: {len(df):,}")
+
+    df = ensure_derived_features(df)
 
     df = get_training_rows(df)
     print(f"  After last-player + TB filter: {len(df):,} rows")
