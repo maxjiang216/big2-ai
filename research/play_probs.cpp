@@ -278,10 +278,10 @@ int main() {
         }
     }
 
-    // 8. Triple Straights: for L from 2 to 5, for H in [L+2,14].
+    // 8. Triple Straights: for L from 2 to 5, for H in [L+2,13] (ace excluded).
     cout << "Processing triple straights...\n";
     for (int L = 2; L <= 5; L++) {
-        for (int H = L + 2; H <= 14; H++) {
+        for (int H = L + 2; H <= 13; H++) {
             string desc = "TripleStraight " + to_string(L) + " (highest " + rank_label(H) + ")";
             long double s = 0;
             for (auto &hand : allHands) {

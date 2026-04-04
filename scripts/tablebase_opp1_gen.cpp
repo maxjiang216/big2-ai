@@ -12,7 +12,7 @@
 #include <unordered_map>
 #include <vector>
 
-#define LEGAL_MOVES_SIZE 472
+#define LEGAL_MOVES_SIZE 468
 
 const int kSTRAIGHT5_START = 325;
 const int kSTRAIGHT6_START = kSTRAIGHT5_START + 10;
