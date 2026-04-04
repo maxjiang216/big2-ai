@@ -37,7 +37,7 @@ make generate_data    # produces bin/generate_data
 python3 research/game_feature_stats.py --games 10000 --player random
 ```
 
-**Inputs:** CLI flags (`--games`, `--player`, `--threads`, `--seed`, `--game-features`, etc.; see `--help`).
+**Inputs:** CLI flags (`--games`, `--player`, `--threads`, `--seed`, `--game-features`, etc.; see `--help`). `--player` uses the same names as self-play / eval (`random`, `greedy`, …; see [`scripts/README.md`](../scripts/README.md)).
 
 **Outputs:** Printed mean / stdev / min / max (and winner counts for `outcome`) from a temporary `_game.parquet`. The C++ `bin/generate_data` process also prints aggregate stats on stdout.
 

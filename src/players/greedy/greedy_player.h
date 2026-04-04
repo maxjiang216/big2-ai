@@ -42,9 +42,15 @@ struct GreedyEval {
 class GreedyPlayer : public Player {
 protected:
   Move select_move_impl() override {
-    std::vector<int> legal = game_.get_legal_moves();
+    return greedy_best(game_, game_.get_legal_moves());
+  }
 
+  // Selects the best non-pass move by greedy evaluation, or pass if forced.
+  // Exposed as protected so variant subclasses can reuse it.
+  static Move greedy_best(const PartialGame &game,
+                          const std::vector<int> &legal) {
     std::vector<int> nonpass_moves;
+    nonpass_moves.reserve(legal.size());
     for (int m : legal) {
       if (Move(m).combination != Move::Combination::kPass)
         nonpass_moves.push_back(m);
@@ -54,9 +60,9 @@ protected:
       return Move(kPASS);
 
     auto best_it = nonpass_moves.begin();
-    GreedyEval best_eval = evaluate_after_move(game_, Move(*best_it));
+    GreedyEval best_eval = evaluate_after_move(game, Move(*best_it));
     for (auto it = nonpass_moves.begin() + 1; it != nonpass_moves.end(); ++it) {
-      GreedyEval eval = evaluate_after_move(game_, Move(*it));
+      GreedyEval eval = evaluate_after_move(game, Move(*it));
       if (best_eval < eval) {
         best_eval = eval;
         best_it = it;
@@ -65,7 +71,6 @@ protected:
     return Move(*best_it);
   }
 
-private:
   static GreedyEval evaluate_after_move(const PartialGame &base,
                                         const Move &move) {
     PartialGame sim = base;

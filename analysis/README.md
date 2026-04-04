@@ -1,8 +1,10 @@
 # Analysis
 
-Python scripts for exploring Parquet exports from `bin/generate_data`. Run from the repo root (or pass explicit paths), unless noted.
+Python scripts for exploring **Parquet** exports from `bin/generate_data`, plus helpers that summarize **eval** logs. Run from the repo root (or pass explicit paths), unless noted.
 
-**Typical inputs:** `<prefix>_game.parquet` and `<prefix>_turn.parquet` produced by `scripts/generate_data.py` / `bin/generate_data`.
+**Typical Parquet inputs:** `<prefix>_game.parquet` and `<prefix>_turn.parquet` produced by `scripts/generate_data.py` / `bin/generate_data`.
+
+**Eval logs:** `scripts/analyze_eval_match.py` parses `bin/eval_match` output (or a file saved by `scripts/run_eval_match.py`, e.g. `analysis/eval_match_last.log`) and prints wins, Wilson CI, and verdict lines. See [`scripts/README.md`](../scripts/README.md).
 
 **Dependencies:** `pandas`, `numpy`, `matplotlib`, `seaborn`; `random_forest_tester.py` also needs `scikit-learn` and `joblib`.
 
