@@ -1,0 +1,10 @@
+{
+  "p0": "pimc_tree",
+  "p0_param": 10,
+  "p1": "greedy",
+  "p1_param": 0.0,
+  "deals": 2000,
+  "seed": 42,
+  "threads": 8,
+  "output_log": "analysis/eval_match_last.log"
+}

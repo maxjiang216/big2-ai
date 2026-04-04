@@ -135,8 +135,9 @@ generate_data: dirs $(BIN_DIR)/generate_data
 # bin/eval_match — head-to-head evaluation (no Arrow)
 # ============================================================================
 
+# PIMC stats (dets saved, etc.) printed at end of eval_match when enabled.
 $(BUILD_DIR)/src/datagen/eval_match.o: src/datagen/eval_match.cpp | dirs
-	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -DBIG2_PIMC_STATS=1 -c $< -o $@
 
 EVALMATCH_OBJS := $(CORE_OBJS) \
                   $(BUILD_DIR)/src/simulation/game_simulator.o \

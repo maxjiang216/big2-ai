@@ -1,0 +1,10 @@
+{
+  "p0": "pimc_adaptive",
+  "p0_param": 50,
+  "p1": "greedy",
+  "p1_param": 0.0,
+  "deals": 500,
+  "seed": 42,
+  "threads": 8,
+  "output_log": "analysis/eval_match_last.log"
+}
