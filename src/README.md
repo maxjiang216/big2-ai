@@ -37,6 +37,6 @@ Header-only **feature extractors** registered by name for datagen:
 
 Binaries are linked from the repo `Makefile`, not as a separate library:
 
-- **`generate_data.cpp`** — CLI entry for threaded Parquet generation (`bin/generate_data`).
-- **`selfplay_main.cpp`** — lighter self-play + JSONL stats (`bin/selfplay`).
+- **`generate_data.cpp`** — CLI entry for threaded self-play, stats, optional Parquet + sample Markdown (`bin/generate_data`).
+- **`samples_md.*`** — writes anomaly game histories for `--samples-md`.
 - **`parquet_export.*`, `feature_registry.h`** — Arrow/Parquet schema and feature column wiring.

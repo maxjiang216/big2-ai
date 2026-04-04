@@ -29,7 +29,7 @@ struct TurnRecord {
 
 // Per-game counts for tablebase use: each "segment" (consecutive case1 or case2
 // turns by the same player) contributes one hit — the first turn of the segment.
-// Matches selfplay / benchmark aggregation for mean forced-seq length.
+// Matches generate_data / benchmark aggregation for mean forced-seq length.
 struct TablebaseFirstHitStats {
   int case1 = 0;
   int case2 = 0;

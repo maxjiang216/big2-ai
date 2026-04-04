@@ -55,9 +55,7 @@ def main() -> None:
     skip_cols = {TARGET_COL, NEXT_PLAYER_COL}
     numeric_dtypes = [np.int16, np.int32, np.int64, np.float32, np.float64]
     feat_cols = [
-        c
-        for c in df.columns
-        if c not in skip_cols and df[c].dtype in numeric_dtypes
+        c for c in df.columns if c not in skip_cols and df[c].dtype in numeric_dtypes
     ]
 
     X = df[feat_cols].values.astype(np.float32)
@@ -82,7 +80,9 @@ def main() -> None:
         verbose=2,
     )
     rf.fit(X_train, y_train)
-    print(f"OOB Brier (quick check): {brier_score_loss(y_train, rf.oob_prediction_):.4f}")
+    print(
+        f"OOB Brier (quick check): {brier_score_loss(y_train, rf.oob_prediction_):.4f}"
+    )
 
     # 5. Evaluate
     train_brier = brier_score_loss(y_train, rf.predict(X_train))

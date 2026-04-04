@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+
 def count_unique_hands():
     # Limits for each rank.
     # 11 ranks (3 through K) have 4 copies,
@@ -13,7 +14,7 @@ def count_unique_hands():
         # If we've processed all ranks, success only if no cards remain.
         if i == total_ranks:
             return 1 if remaining == 0 else 0
-        
+
         ways = 0
         # For the current rank i, choose x cards, where 0 <= x <= min(limit, remaining)
         for x in range(0, min(limits[i], remaining) + 1):
@@ -22,6 +23,7 @@ def count_unique_hands():
 
     return dp(0, 16)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     num_hands = count_unique_hands()
     print("Number of unique starting hands:", num_hands)

@@ -28,7 +28,7 @@ Aggregates game-level fields that align with **`src/features/game_level/`** extr
 **Prerequisite:**
 
 ```bash
-make selfplay    # produces bin/selfplay
+make generate_data    # produces bin/generate_data
 ```
 
 **Run:**
@@ -39,7 +39,7 @@ python3 research/game_feature_stats.py --games 10000 --player random
 
 **Inputs:** CLI flags (`--games`, `--player`, `--threads`, `--seed`, `--game-features`, etc.; see `--help`).
 
-**Outputs:** Printed mean / stdev / min / max (and winner counts for `outcome`). Optional `--jsonl-out path.jsonl` / `--keep-jsonl` to retain per-game JSON lines. The C++ self-play process also prints aggregate lines on stdout.
+**Outputs:** Printed mean / stdev / min / max (and winner counts for `outcome`) from a temporary `_game.parquet`. The C++ `bin/generate_data` process also prints aggregate stats on stdout.
 
 ## Python: hand enumeration (`count_num_hands.py`)
 

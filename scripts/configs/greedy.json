@@ -2,6 +2,7 @@
   "player": "greedy",
   "num_games": 100000,
   "output_path": "data/greedy_all_features_100k",
+  "samples_md_path": "analysis/sample_games.md",
   "game_features": [
     "outcome",
     "length",

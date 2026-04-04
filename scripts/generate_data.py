@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate training data from self-play games.
+Generate training data from self-play games (bin/generate_data → Parquet).
 
 Run from anywhere; paths are resolved relative to the repository root (parent of
 this scripts/ directory).
@@ -16,14 +16,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Repository root (contains Makefile, bin/, src/, scripts/configs/)
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def compile_binary(verbose=True):
     """Compile the generate_data binary (make target: generate_data)."""
     if verbose:
-        print("🔨 Compiling generate_data binary...")
+        print("Compiling generate_data binary...")
 
     result = subprocess.run(
         ["make", "generate_data"],
@@ -33,13 +32,13 @@ def compile_binary(verbose=True):
     )
 
     if result.returncode != 0:
-        print("❌ Compilation failed!")
+        print("Compilation failed!")
         if not verbose:
             print(result.stderr)
         sys.exit(1)
 
     if verbose:
-        print("✓ Compilation successful\n")
+        print("Compilation successful.\n")
 
 
 def load_config(config_path):
@@ -49,17 +48,17 @@ def load_config(config_path):
         config_file = (REPO_ROOT / config_path).resolve()
 
     if not config_file.exists():
-        print(f"❌ Config file not found: {config_file}")
+        print(f"Config file not found: {config_file}")
         sys.exit(1)
 
     with open(config_file) as f:
         config = json.load(f)
 
-    required = ["player", "num_games", "output_path"]
+    required = ["player", "num_games"]
     missing = [field for field in required if field not in config]
 
     if missing:
-        print(f"❌ Config missing required fields: {missing}")
+        print(f"Config missing required fields: {missing}")
         sys.exit(1)
 
     return config
@@ -72,31 +71,31 @@ def run_datagen(config, binary_path=None):
     else:
         binary_path = Path(binary_path)
 
-    raw = config["output_path"]
-    outp = Path(raw)
-    try:
-        if outp.is_absolute():
-            outp.parent.mkdir(parents=True, exist_ok=True)
-            print(f"📁 Ensured output directory: {outp.parent}")
-        else:
-            (REPO_ROOT / outp.parent).mkdir(parents=True, exist_ok=True)
-            print(f"📁 Ensured output directory: {REPO_ROOT / outp.parent}")
-    except PermissionError:
-        print(f"❌ Permission denied: Cannot create output directory")
-        sys.exit(1)
-    except Exception as e:
-        print(f"❌ Error creating output directory: {e}")
-        sys.exit(1)
-
     cmd = [
         str(binary_path),
         "--player",
         config["player"],
         "--games",
         str(config["num_games"]),
-        "--output",
-        raw,
     ]
+
+    out_raw = config.get("output_path")
+    if out_raw:
+        outp = Path(out_raw)
+        try:
+            if outp.is_absolute():
+                outp.parent.mkdir(parents=True, exist_ok=True)
+                print(f"Ensured output directory: {outp.parent}")
+            else:
+                (REPO_ROOT / outp.parent).mkdir(parents=True, exist_ok=True)
+                print(f"Ensured output directory: {REPO_ROOT / outp.parent}")
+        except PermissionError:
+            print("Permission denied: Cannot create output directory")
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error creating output directory: {e}")
+            sys.exit(1)
+        cmd.extend(["--output", out_raw])
 
     if "game_features" in config:
         cmd.extend(["--game-features", ",".join(config["game_features"])])
@@ -110,16 +109,36 @@ def run_datagen(config, binary_path=None):
     if "threads" in config:
         cmd.extend(["--threads", str(config["threads"])])
 
-    print("🎮 Running data generation...")
+    if "samples_md_path" in config and config["samples_md_path"]:
+        p = Path(config["samples_md_path"])
+        if not p.is_absolute():
+            p = REPO_ROOT / p
+        p.parent.mkdir(parents=True, exist_ok=True)
+        cmd.extend(["--samples-md", str(p)])
+
+    if out_raw and "game_features" not in config and "turn_features" not in config:
+        print(
+            "Error: output_path requires game_features and/or turn_features in config.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print("Running data generation...")
     print(f"Command: {' '.join(cmd)}\n")
 
     result = subprocess.run(cmd, cwd=str(REPO_ROOT))
 
     if result.returncode != 0:
-        print("\n❌ Data generation failed!")
+        print("\nData generation failed!")
         sys.exit(1)
 
-    print("\n✓ Data generation complete!")
+    print("\nData generation complete.")
+
+    if not out_raw:
+        return
+
+    raw = out_raw
+    outp = Path(raw)
 
     def parquet_file(suffix: str) -> Path:
         p = f"{raw}_{suffix}.parquet"
@@ -169,7 +188,7 @@ Examples:
     if args.compile or (not binary.exists() and not args.no_compile):
         compile_binary()
     elif not binary.exists():
-        print(f"❌ Binary '{binary}' not found!")
+        print(f"Binary '{binary}' not found!")
         print("   Run with --compile to build it first")
         sys.exit(1)
 
