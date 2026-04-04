@@ -71,21 +71,25 @@ From the **repository root** (directory containing `Makefile`):
 ```bash
 make help              # list targets
 make test_core         # unit tests (no Arrow)
-make selfplay          # JSONL stats (no Arrow)
 make benchmark         # perf binary (no Arrow)
-make generate_data     # Parquet pipeline (needs libarrow)
+make generate_data     # self-play + Parquet (needs libarrow)
 make tablebase_opp1_gen  # build tablebase precompute tool
 make research          # standalone research/*.cpp -> build/research/
 ```
 
 ## Data generation
 
+`bin/generate_data` is the single self-play binary: stats on stdout, optional Parquet export, optional `--samples-md` for anomaly game write-ups.
+
 ```bash
 # Example: greedy self-play with full Parquet export
 python3 scripts/generate_data.py scripts/configs/greedy.json --compile
+
+# Or: generate Parquet then the analysis report (see scripts/configs/*.json)
+./scripts/run.sh scripts/configs/test.json
 ```
 
-Writes `<output_path>_game.parquet` and `<output_path>_turn.parquet` (see `scripts/configs/*.json`).
+Writes `<output_path>_game.parquet` and `<output_path>_turn.parquet` when `output_path` and feature lists are set in the config.
 
 ## Tablebase
 

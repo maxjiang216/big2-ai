@@ -1,6 +1,5 @@
 #include "parquet_export.hpp"
 
-#include "game_record.h"
 #include "feature_extractor.h"
 
 #include <arrow/builder.h>
@@ -14,28 +13,50 @@
 #include <iostream>
 
 void export_parquet_features(
-    const std::vector<GameRecord> &records,
+    const std::vector<std::pair<int, GameRecord>> &indexed,
     const std::string &game_feature_out,
     const std::string &turn_feature_out,
     const std::vector<std::shared_ptr<FeatureExtractor>> &game_level_features,
     const std::vector<std::shared_ptr<FeatureExtractor>> &turn_level_features) {
 
   auto export_game = [&]() {
-    if (game_level_features.empty()) {
-      std::cout << "No game-level features to export.\n";
-      return;
-    }
-    if (records.empty()) {
+    if (indexed.empty()) {
       std::cout << "No game records to export.\n";
       return;
     }
 
-    std::cout << "Exporting " << records.size() << " game records with "
-              << game_level_features.size() << " features...\n";
+    if (game_level_features.empty()) {
+      std::cout << "Exporting " << indexed.size()
+                << " game_index rows only (no game-level features).\n";
+    } else {
+      std::cout << "Exporting " << indexed.size() << " game records with "
+                << game_level_features.size() << " features...\n";
+    }
 
     try {
       std::vector<std::shared_ptr<arrow::Array>> columns;
       std::vector<std::shared_ptr<arrow::Field>> schema_fields;
+
+      {
+        arrow::Int32Builder idx_builder;
+        for (const auto &pr : indexed) {
+          auto status = idx_builder.Append(pr.first);
+          if (!status.ok()) {
+            std::cerr << "Error appending game_index: " << status.ToString()
+                      << std::endl;
+            return;
+          }
+        }
+        std::shared_ptr<arrow::Array> arr;
+        auto status = idx_builder.Finish(&arr);
+        if (!status.ok()) {
+          std::cerr << "Error finishing game_index: " << status.ToString()
+                    << std::endl;
+          return;
+        }
+        columns.push_back(arr);
+        schema_fields.push_back(arrow::field("game_index", arrow::int32()));
+      }
 
       for (const auto &extractor : game_level_features) {
         if (!extractor) {
@@ -44,8 +65,8 @@ void export_parquet_features(
         }
 
         arrow::Int32Builder builder;
-        for (const auto &record : records) {
-          int feature_value = extractor->gameExtract(record);
+        for (const auto &pr : indexed) {
+          int feature_value = extractor->gameExtract(pr.second);
           auto status = builder.Append(feature_value);
           if (!status.ok()) {
             std::cerr << "Error appending to builder: " << status.ToString()
@@ -72,7 +93,7 @@ void export_parquet_features(
       }
 
       auto schema = std::make_shared<arrow::Schema>(schema_fields);
-      auto table = arrow::Table::Make(schema, columns, records.size());
+      auto table = arrow::Table::Make(schema, columns, indexed.size());
 
       auto file_result = arrow::io::FileOutputStream::Open(game_feature_out);
       if (!file_result.ok()) {
@@ -99,23 +120,42 @@ void export_parquet_features(
   };
 
   auto export_turn = [&]() {
-    if (turn_level_features.empty()) {
-      std::cout << "No turn-level features to export.\n";
-      return;
-    }
-    if (records.empty()) {
+    if (indexed.empty()) {
       std::cout << "No game records to export.\n";
       return;
     }
 
-    std::cout << "Exporting turn features for " << records.size()
-              << " games with " << turn_level_features.size()
-              << " features...\n";
+    if (turn_level_features.empty()) {
+      std::cout << "Exporting turn table (game_index, turn_idx, perspective only).\n";
+    } else {
+      std::cout << "Exporting turn features for " << indexed.size()
+                << " games with " << turn_level_features.size()
+                << " features...\n";
+    }
 
     try {
-      std::vector<std::vector<int>> all_columns(turn_level_features.size());
-      size_t total_turns = 0;
+      std::vector<int> game_index_col;
+      std::vector<int> turn_idx_col;
+      std::vector<int> perspective_col;
+      for (const auto &pr : indexed) {
+        int gi = pr.first;
+        const auto &rec = pr.second;
+        for (size_t t = 0; t < rec.turns().size(); ++t) {
+          for (int p = 0; p < 2; ++p) {
+            game_index_col.push_back(gi);
+            turn_idx_col.push_back(static_cast<int>(t));
+            perspective_col.push_back(p);
+          }
+        }
+      }
+      size_t total_turns = game_index_col.size();
 
+      if (total_turns == 0) {
+        std::cout << "No turns found to export.\n";
+        return;
+      }
+
+      std::vector<std::vector<int>> all_columns(turn_level_features.size());
       for (size_t f = 0; f < turn_level_features.size(); ++f) {
         if (!turn_level_features[f]) {
           std::cerr << "Warning: Null turn feature extractor at index " << f
@@ -123,20 +163,11 @@ void export_parquet_features(
           continue;
         }
 
-        for (const auto &record : records) {
-          auto feature_vals = turn_level_features[f]->turnExtract(record);
+        for (const auto &pr : indexed) {
+          auto feature_vals = turn_level_features[f]->turnExtract(pr.second);
           all_columns[f].insert(all_columns[f].end(), feature_vals.begin(),
                                 feature_vals.end());
         }
-      }
-
-      if (!all_columns.empty()) {
-        total_turns = all_columns[0].size();
-      }
-
-      if (total_turns == 0) {
-        std::cout << "No turns found to export.\n";
-        return;
       }
 
       for (size_t f = 0; f < all_columns.size(); ++f) {
@@ -152,6 +183,32 @@ void export_parquet_features(
 
       std::vector<std::shared_ptr<arrow::Array>> columns;
       std::vector<std::shared_ptr<arrow::Field>> schema_fields;
+
+      auto append_int_col = [&](const char *name, const std::vector<int> &vals) {
+        arrow::Int32Builder builder;
+        for (auto v : vals) {
+          auto status = builder.Append(v);
+          if (!status.ok()) {
+            std::cerr << "Error appending " << name << ": " << status.ToString()
+                      << std::endl;
+            return false;
+          }
+        }
+        std::shared_ptr<arrow::Array> arr;
+        auto status = builder.Finish(&arr);
+        if (!status.ok())
+          return false;
+        columns.push_back(arr);
+        schema_fields.push_back(arrow::field(name, arrow::int32()));
+        return true;
+      };
+
+      if (!append_int_col("game_index", game_index_col))
+        return;
+      if (!append_int_col("turn_idx", turn_idx_col))
+        return;
+      if (!append_int_col("perspective", perspective_col))
+        return;
 
       for (size_t f = 0; f < turn_level_features.size(); ++f) {
         if (!turn_level_features[f])

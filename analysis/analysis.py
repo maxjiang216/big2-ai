@@ -1,311 +1,367 @@
 #!/usr/bin/env python3
 """
-Parquet Data Analysis Script
+Analyze Parquet exports from bin/generate_data (game_*.parquet + turn_*.parquet).
 
-Loads and analyzes game-level and turn-level features exported from GameCoordinator.
+Produces a multi-panel report (PNG) and stdout summaries. Full move histories for
+anomaly games are produced by generate_data --samples-md (not by this script).
 
-Schema notes (vs legacy big2-ai exports):
-  - Game-level: optional ``tb_hits`` (first-hit episodes per game); ``tb_case1``,
-    ``tb_case2`` (segment counts); ``tb_forced_seq_len`` (max forced-seq length
-    among case1 first hits); ``tb_opp1_table_straight`` (count of case2 first hits
-    using the precomputed straight table).
-  - ``last_move_card_count`` replaces the old ``n_cards`` name for last-move size.
+Example:
+  python analysis/analysis.py \\
+    --game-parquet data/foo_game.parquet --turn-parquet data/foo_turn.parquet \\
+    --output-dir analysis/
 """
 
+from __future__ import annotations
+
+import argparse
 import sys
+from collections import Counter
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import seaborn as sns
 
 
-def load_data(game_file="game_features.parquet", turn_file="turn_features.parquet"):
-    """Load the parquet files and return DataFrames."""
-    try:
-        game_df = pd.read_parquet(game_file)
-        print(f"✓ Loaded game features: {game_file}")
-        print(f"  Shape: {game_df.shape}")
-    except FileNotFoundError:
-        print(f"✗ Game features file not found: {game_file}")
-        game_df = None
-
-    try:
-        turn_df = pd.read_parquet(turn_file)
-        print(f"✓ Loaded turn features: {turn_file}")
-        print(f"  Shape: {turn_df.shape}")
-    except FileNotFoundError:
-        print(f"✗ Turn features file not found: {turn_file}")
-        turn_df = None
-
-    return game_df, turn_df
+def load_parquet(game_file: Path | None, turn_file: Path | None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    games = pd.DataFrame()
+    turns = pd.DataFrame()
+    if game_file is not None and game_file.is_file():
+        games = pd.read_parquet(game_file)
+        print(f"Loaded game features: {game_file}  shape={games.shape}")
+    else:
+        print(f"Game parquet not found or not given: {game_file}")
+    if turn_file is not None and turn_file.is_file():
+        turns = pd.read_parquet(turn_file)
+        print(f"Loaded turn features: {turn_file}  shape={turns.shape}")
+    else:
+        print(f"Turn parquet not found or not given: {turn_file}")
+    return games, turns
 
 
-def print_tablebase_summary(game_df, turn_df):
-    """Summarize tablebase-related columns if present."""
-    if game_df is not None:
-        tb_game_cols = [c for c in game_df.columns if c.startswith("tb_")]
-        if tb_game_cols:
-            print("\n" + "=" * 60)
-            print("TABLEBASE (game-level: tb_*)")
-            print("=" * 60)
-            print(game_df[tb_game_cols].describe().to_string())
-
-
-def analyze_game_features(df):
-    """Analyze game-level features."""
-    if df is None:
-        return
-
-    print("\n" + "=" * 60)
-    print("GAME-LEVEL FEATURE ANALYSIS")
-    print("=" * 60)
-
-    print(f"\nDataset Info:")
-    print(f"  Number of games: {len(df)}")
-    print(f"  Features: {list(df.columns)}")
-
-    print(f"\nBasic Statistics:")
-    print(df.describe())
-
-    # If there's an outcome column, analyze win rates
-    if "outcome" in df.columns or any("outcome" in col.lower() for col in df.columns):
-        outcome_col = next(
-            (col for col in df.columns if "outcome" in col.lower()), None
-        )
-        if outcome_col:
-            print(f"\nOutcome Distribution:")
-            outcome_counts = df[outcome_col].value_counts().sort_index()
-            print(outcome_counts)
-
-            win_rates = df[outcome_col].value_counts(normalize=True).sort_index()
-            print(f"\nWin Rates:")
-            for outcome, rate in win_rates.items():
-                print(f"  Player {outcome}: {rate:.3f} ({rate*100:.1f}%)")
-
-    # Correlation matrix if multiple columns
-    if len(df.columns) > 1:
-        print(f"\nCorrelation Matrix:")
-        corr_matrix = df.corr()
-        print(corr_matrix)
-
+def prepare_games_df(games: pd.DataFrame) -> pd.DataFrame:
+    if games.empty:
+        return games
+    df = games.copy()
+    if "game_index" in df.columns:
+        df.insert(0, "game_id", df["game_index"].astype(int))
+    else:
+        df.insert(0, "game_id", np.arange(len(df), dtype=int))
     return df
 
 
-def analyze_turn_features(df):
-    """Analyze turn-level features."""
-    if df is None:
+def format_game_sample(row: pd.Series) -> str:
+    parts: list[str] = [f"game_id={int(row['game_id'])}"]
+    if "length" in row.index and pd.notna(row["length"]):
+        parts.append(f"length={int(row['length'])}")
+    if "outcome" in row.index and pd.notna(row["outcome"]):
+        parts.append(f"winner=P{int(row['outcome'])}")
+    if "start_legal_moves" in row.index and pd.notna(row["start_legal_moves"]):
+        parts.append(f"start_legal_moves={int(row['start_legal_moves'])}")
+    return " | ".join(parts)
+
+
+def print_anomaly_samples(games: pd.DataFrame, samples_md_hint: str | None) -> None:
+    if games.empty:
+        return
+    print("\n--- Anomalous sample games ---")
+    if "length" in games.columns:
+        L = games["length"]
+        print(f"  Longest game:   {format_game_sample(games.loc[L.idxmax()])}")
+        print(f"  Shortest game:  {format_game_sample(games.loc[L.idxmin()])}")
+    if "start_legal_moves" in games.columns:
+        S = games["start_legal_moves"]
+        print(f"  Most start legal moves:   {format_game_sample(games.loc[S.idxmax()])}")
+        print(f"  Fewest start legal moves: {format_game_sample(games.loc[S.idxmin()])}")
+    if samples_md_hint:
+        print(f"\n  (Full hands + histories: {samples_md_hint})")
+
+
+def print_text_summary(
+    games: pd.DataFrame,
+    turns: pd.DataFrame,
+    *,
+    samples_md_hint: str | None,
+) -> None:
+    if games.empty:
+        print("No game rows.")
         return
 
-    print("\n" + "=" * 60)
-    print("TURN-LEVEL FEATURE ANALYSIS")
-    print("=" * 60)
-
-    print(f"\nDataset Info:")
-    print(f"  Number of turns: {len(df)}")
-    print(f"  Features: {list(df.columns)}")
-
-    print(f"\nBasic Statistics:")
-    print(df.describe())
-
-    # Hand size analysis if present
-    if "player_hand_size" in df.columns or any(
-        "hand" in col.lower() for col in df.columns
-    ):
-        hand_col = next((col for col in df.columns if "hand" in col.lower()), None)
-        if hand_col:
-            print(f"\nHand Size Distribution:")
-            hand_dist = df[hand_col].value_counts().sort_index()
-            print(hand_dist)
-
-            print(f"\nHand Size Statistics:")
-            print(f"  Mean: {df[hand_col].mean():.2f}")
-            print(f"  Median: {df[hand_col].median():.2f}")
-            print(f"  Min: {df[hand_col].min()}")
-            print(f"  Max: {df[hand_col].max()}")
-            print(f"  Std Dev: {df[hand_col].std():.2f}")
-
-    return df
-
-
-def create_visualizations(game_df, turn_df):
-    """Create visualizations of the data."""
-
-    # Set up the plotting style
-    plt.style.use("seaborn-v0_8")
-    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-    fig.suptitle("Game Simulation Analysis", fontsize=16, fontweight="bold")
-
-    outcome_col = None
-    hand_col = None
-
-    # Game-level visualizations
-    if game_df is not None:
-        # Outcome distribution
-        outcome_col = next(
-            (col for col in game_df.columns if "outcome" in col.lower()), None
+    print("\n--- Game-level (per-game) ---")
+    for col in sorted(c for c in games.columns if c not in ("game_id", "game_index")):
+        vals = games[col].tolist()
+        if col == "outcome":
+            c = Counter(vals)
+            parts = ", ".join(f"P{w} wins: {c[w]}" for w in sorted(c))
+            print(f"  {col}: {parts}")
+            continue
+        arr = np.array(vals, dtype=float)
+        print(
+            f"  {col}: mean={arr.mean():.4f}  "
+            f"stdev={arr.std(ddof=1) if len(arr) > 1 else 0:.4f}  "
+            f"min={arr.min():.0f}  max={arr.max():.0f}"
         )
-        if outcome_col:
-            ax = axes[0, 0]
-            outcome_counts = game_df[outcome_col].value_counts().sort_index()
-            bars = ax.bar(
-                outcome_counts.index,
-                outcome_counts.values,
-                color=["skyblue", "lightcoral"],
-                alpha=0.7,
+
+    print_anomaly_samples(games, samples_md_hint)
+
+    if not turns.empty and "player_hand_size" in turns.columns:
+        ph = turns["player_hand_size"]
+        print("\n--- Turn-level (all turns x perspectives) ---")
+        print(
+            f"  player_hand_size: mean={ph.mean():.4f}  "
+            f"stdev={ph.std(ddof=1) if len(ph) > 1 else 0:.4f}  "
+            f"min={ph.min()}  max={ph.max()}"
+        )
+        if "possible_moves" in turns.columns:
+            pm = turns["possible_moves"]
+            print(
+                f"  possible_moves: mean={pm.mean():.4f}  "
+                f"stdev={pm.std(ddof=1) if len(pm) > 1 else 0:.4f}  "
+                f"min={pm.min()}  max={pm.max()}"
             )
-            ax.set_title("Game Outcomes Distribution")
-            ax.set_xlabel("Winner (Player)")
-            ax.set_ylabel("Number of Games")
 
-            # Add percentage labels on bars
-            total = len(game_df)
-            for bar, count in zip(bars, outcome_counts.values):
-                height = bar.get_height()
-                ax.text(
-                    bar.get_x() + bar.get_width() / 2.0,
-                    height + total * 0.01,
-                    f"{count}\n({count/total*100:.1f}%)",
-                    ha="center",
-                    va="bottom",
-                )
-        else:
-            axes[0, 0].text(
-                0.5,
-                0.5,
-                "No outcome data available",
-                ha="center",
-                va="center",
-                transform=axes[0, 0].transAxes,
-            )
-            axes[0, 0].set_title("Game Outcomes")
 
-    # Turn-level visualizations
-    if turn_df is not None:
-        # Hand size distribution
-        hand_col = next((col for col in turn_df.columns if "hand" in col.lower()), None)
-        if hand_col:
-            ax = axes[0, 1]
-            ax.hist(
-                turn_df[hand_col],
-                bins=range(
-                    int(turn_df[hand_col].min()), int(turn_df[hand_col].max()) + 2
-                ),
-                alpha=0.7,
-                color="lightgreen",
-                edgecolor="black",
-            )
-            ax.set_title("Hand Size Distribution")
-            ax.set_xlabel("Hand Size")
-            ax.set_ylabel("Frequency")
-
-            # Hand size over time (if we assume sequential turns)
-            ax = axes[1, 0]
-            sample_size = min(1000, len(turn_df))  # Sample for readability
-            sample_indices = np.linspace(0, len(turn_df) - 1, sample_size, dtype=int)
-            ax.plot(
-                sample_indices,
-                turn_df[hand_col].iloc[sample_indices],
-                alpha=0.6,
-                linewidth=0.5,
-            )
-            ax.set_title(f"Hand Size Over Time (Sample of {sample_size} turns)")
-            ax.set_xlabel("Turn Index")
-            ax.set_ylabel("Hand Size")
-        else:
-            axes[0, 1].text(
-                0.5,
-                0.5,
-                "No hand size data available",
-                ha="center",
-                va="center",
-                transform=axes[0, 1].transAxes,
-            )
-            axes[0, 1].set_title("Hand Size Distribution")
-
-            axes[1, 0].text(
-                0.5,
-                0.5,
-                "No hand size data available",
-                ha="center",
-                va="center",
-                transform=axes[1, 0].transAxes,
-            )
-            axes[1, 0].set_title("Hand Size Over Time")
-
-    # Summary statistics table
-    ax = axes[1, 1]
-    ax.axis("off")
-
-    summary_text = "Summary Statistics\n\n"
-    if game_df is not None:
-        summary_text += f"Games analyzed: {len(game_df):,}\n"
-        if outcome_col:
-            win_rates = game_df[outcome_col].value_counts(normalize=True).sort_index()
-            for player, rate in win_rates.items():
-                summary_text += f"Player {player} win rate: {rate:.3f}\n"
-        summary_text += "\n"
-
-    if turn_df is not None:
-        summary_text += f"Turns analyzed: {len(turn_df):,}\n"
-        if hand_col:
-            summary_text += f"Avg hand size: {turn_df[hand_col].mean():.2f}\n"
-            summary_text += f"Hand size range: {turn_df[hand_col].min()}-{turn_df[hand_col].max()}\n"
-
-    ax.text(
-        0.1,
-        0.9,
-        summary_text,
-        transform=ax.transAxes,
-        fontsize=12,
-        verticalalignment="top",
-        fontfamily="monospace",
+def build_report_figure(
+    games: pd.DataFrame,
+    turns: pd.DataFrame,
+    *,
+    title_suffix: str,
+    samples_md_hint: str | None,
+) -> plt.Figure:
+    fig = plt.figure(figsize=(15, 12))
+    gs = fig.add_gridspec(3, 3, height_ratios=[1.0, 1.0, 0.42], hspace=0.32, wspace=0.28)
+    axes = np.empty((2, 3), dtype=object)
+    for r in range(2):
+        for c in range(3):
+            axes[r, c] = fig.add_subplot(gs[r, c])
+    ax_note = fig.add_subplot(gs[2, :])
+    fig.suptitle(
+        f"Self-play game statistics{title_suffix}",
+        fontsize=14,
+        fontweight="bold",
+        y=0.98,
     )
 
-    plt.tight_layout()
-    plt.savefig("game_analysis.png", dpi=300, bbox_inches="tight")
-    print(f"\n✓ Visualization saved as 'game_analysis.png'")
-    # plt.show()
+    ax = axes[0, 0]
+    if not games.empty and "outcome" in games.columns:
+        vc = games["outcome"].value_counts().sort_index()
+        labels = [f"P{int(i)} wins" for i in vc.index]
+        bars = ax.bar(labels, vc.values, color=["steelblue", "coral"], alpha=0.85)
+        total = len(games)
+        for bar, count in zip(bars, vc.values):
+            h = bar.get_height()
+            ax.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                h + total * 0.01,
+                f"{int(count)}\n({100.0 * count / total:.1f}%)",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+            )
+        ax.set_ylabel("Games")
+        ax.set_title("Win rate (P0 vs P1)")
+    else:
+        ax.set_title("Win rate")
+        ax.text(0.5, 0.5, "No outcome data", ha="center", va="center", transform=ax.transAxes)
+
+    ax = axes[0, 1]
+    if not games.empty and "length" in games.columns:
+        L = games["length"]
+        ax.hist(
+            L,
+            bins=min(40, max(10, int(L.max() - L.min() + 1))),
+            color="seagreen",
+            alpha=0.75,
+            edgecolor="black",
+        )
+        ax.axvline(L.mean(), color="red", linestyle="--", label=f"mean={L.mean():.2f}")
+        if len(L) > 0 and int(L.min()) != int(L.max()):
+            ax.axvline(
+                games.loc[L.idxmax(), "length"],
+                color="darkviolet",
+                linestyle="-",
+                linewidth=1.2,
+                label="longest sample",
+            )
+            ax.axvline(
+                games.loc[L.idxmin(), "length"],
+                color="orange",
+                linestyle="-",
+                linewidth=1.2,
+                label="shortest sample",
+            )
+        ax.legend(fontsize=7, loc="upper right")
+        ax.set_xlabel("Turns per game")
+        ax.set_ylabel("Count")
+        ax.set_title(f"Game length (n={len(L)})")
+    else:
+        ax.set_title("Game length")
+        ax.text(0.5, 0.5, "No length data", ha="center", va="center", transform=ax.transAxes)
+
+    ax = axes[0, 2]
+    if not games.empty and "start_legal_moves" in games.columns:
+        s = games["start_legal_moves"]
+        ax.hist(
+            s,
+            bins=range(int(s.min()), int(s.max()) + 2),
+            color="mediumpurple",
+            alpha=0.75,
+            edgecolor="black",
+        )
+        ax.set_xlabel("Legal moves (opening player, turn 0)")
+        ax.set_ylabel("Games")
+        ax.set_title("Starting legal moves")
+    else:
+        ax.set_title("Starting legal moves")
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+
+    ax = axes[1, 0]
+    if not turns.empty and "turn_idx" in turns.columns and "player_hand_size" in turns.columns:
+        g = turns.groupby("turn_idx")["player_hand_size"].mean()
+        ax.plot(g.index, g.values, color="darkgreen", linewidth=1.5)
+        ax.fill_between(g.index, g.values, alpha=0.2, color="darkgreen")
+        ax.set_xlabel("Turn index (within game)")
+        ax.set_ylabel("Mean hand size")
+        ax.set_title("Mean hand size over game progress")
+    else:
+        ax.set_title("Hand size over turns")
+        ax.text(0.5, 0.5, "No turn data", ha="center", va="center", transform=ax.transAxes)
+
+    ax = axes[1, 1]
+    if not turns.empty and "possible_moves" in turns.columns:
+        pm = turns["possible_moves"]
+        hi = min(80, int(pm.max()) + 2)
+        lo = max(0, int(pm.min()))
+        bins = min(50, hi - lo + 1) if hi > lo else 10
+        ax.hist(
+            pm,
+            bins=bins,
+            range=(lo, hi) if hi > lo else None,
+            color="teal",
+            alpha=0.75,
+            edgecolor="black",
+        )
+        ax.set_xlabel("Possible moves")
+        ax.set_ylabel("Turn-perspectives")
+        ax.set_title("Possible moves per position")
+    else:
+        ax.set_title("Possible moves")
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+
+    ax = axes[1, 2]
+    if not turns.empty and "last_move_card_count" in turns.columns:
+        c = turns["last_move_card_count"]
+        ax.hist(
+            c,
+            bins=range(int(c.min()), int(c.max()) + 2),
+            color="goldenrod",
+            alpha=0.8,
+            edgecolor="black",
+        )
+        ax.set_xlabel("Cards in last combo (0 = pass)")
+        ax.set_ylabel("Turn-perspectives")
+        ax.set_title("Last move size")
+    else:
+        ax.set_title("Last move card count")
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+
+    ax_note.axis("off")
+    note_lines = ["Anomalous sample games", ""]
+    if not games.empty and "length" in games.columns and len(games) > 0:
+        L = games["length"]
+        note_lines.append(f"Longest:   {format_game_sample(games.loc[L.idxmax()])}")
+        note_lines.append(f"Shortest:  {format_game_sample(games.loc[L.idxmin()])}")
+    if not games.empty and "start_legal_moves" in games.columns and len(games) > 0:
+        S = games["start_legal_moves"]
+        note_lines.append(f"Most start legal moves:   {format_game_sample(games.loc[S.idxmax()])}")
+        note_lines.append(f"Fewest start legal moves: {format_game_sample(games.loc[S.idxmin()])}")
+    if samples_md_hint:
+        note_lines.append("")
+        note_lines.append(f"Full histories: {samples_md_hint}")
+
+    ax_note.text(
+        0.02,
+        0.98,
+        "\n".join(note_lines),
+        transform=ax_note.transAxes,
+        fontsize=9,
+        verticalalignment="top",
+        fontfamily="monospace",
+        bbox={"boxstyle": "round,pad=0.4", "facecolor": "#f5f5f5", "edgecolor": "#888888"},
+    )
+
+    fig.subplots_adjust(top=0.93, bottom=0.06)
+    return fig
 
 
-def main():
-    """Main analysis function."""
-    print("Big 2 Game Data Analysis")
-    print("=" * 40)
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--game-parquet",
+        type=Path,
+        default=None,
+        help="Path to *_game.parquet (default: cwd game_features.parquet)",
+    )
+    ap.add_argument(
+        "--turn-parquet",
+        type=Path,
+        default=None,
+        help="Path to *_turn.parquet (default: cwd turn_features.parquet)",
+    )
+    ap.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("."),
+        help="Directory for report PNG and optional CSV exports",
+    )
+    ap.add_argument("--report-name", type=str, default="report.png", help="Report image filename")
+    ap.add_argument(
+        "--samples-md-hint",
+        type=str,
+        default=None,
+        help="Shown in report/footer (path to sample_games.md from generate_data)",
+    )
+    ap.add_argument("--title", type=str, default="", help="Extra title suffix")
+    args = ap.parse_args()
 
-    # Check if files exist
-    game_file = "game_features.parquet"
-    turn_file = "turn_features.parquet"
+    game_path = args.game_parquet or Path("game_features.parquet")
+    turn_path = args.turn_parquet or Path("turn_features.parquet")
 
-    if not Path(game_file).exists() and not Path(turn_file).exists():
-        print(f"Error: Neither {game_file} nor {turn_file} found.")
-        print("Make sure to run the C++ simulation first to generate the data files.")
+    if not game_path.exists() and not turn_path.exists():
+        print(f"Error: neither {game_path} nor {turn_path} found.", file=sys.stderr)
         sys.exit(1)
 
-    # Load data
-    game_df, turn_df = load_data(game_file, turn_file)
+    games_raw, turns = load_parquet(
+        game_path if game_path.exists() else None,
+        turn_path if turn_path.exists() else None,
+    )
+    games = prepare_games_df(games_raw)
 
-    # Analyze features
-    game_df = analyze_game_features(game_df)
-    turn_df = analyze_turn_features(turn_df)
+    n_games = len(games) if not games.empty else 0
+    title_suffix = args.title or (f" (n={n_games} games)" if n_games else "")
 
-    print_tablebase_summary(game_df, turn_df)
+    print_text_summary(games, turns, samples_md_hint=args.samples_md_hint)
 
-    # Create visualizations
-    if game_df is not None or turn_df is not None:
-        create_visualizations(game_df, turn_df)
-    else:
-        print("\nNo data available for visualization.")
+    fig = build_report_figure(
+        games,
+        turns,
+        title_suffix=title_suffix,
+        samples_md_hint=args.samples_md_hint,
+    )
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = args.output_dir / args.report_name
+    fig.savefig(report_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"\nWrote report: {report_path}")
 
-    # Export summary to CSV for further analysis
-    if game_df is not None:
-        game_df.to_csv("game_features_summary.csv", index=False)
-        print(f"✓ Game features exported to 'game_features_summary.csv'")
-
-    if turn_df is not None:
-        turn_df.to_csv("turn_features_summary.csv", index=False)
-        print(f"✓ Turn features exported to 'turn_features_summary.csv'")
+    if not games.empty:
+        csv_g = args.output_dir / "game_features_summary.csv"
+        games.to_csv(csv_g, index=False)
+        print(f"Wrote {csv_g}")
+    if not turns.empty:
+        csv_t = args.output_dir / "turn_features_summary.csv"
+        turns.to_csv(csv_t, index=False)
+        print(f"Wrote {csv_t}")
 
 
 if __name__ == "__main__":

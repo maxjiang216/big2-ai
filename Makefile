@@ -12,24 +12,23 @@ BIN_DIR     = bin
 CORE_CPP    := $(wildcard src/core/*.cpp)
 SIM_CPP     := src/simulation/game_simulator.cpp
 COORD_CPP   := src/simulation/game_coordinator.cpp
-DATAGEN_CPP := src/datagen/parquet_export.cpp
+DATAGEN_CPP := src/datagen/parquet_export.cpp src/datagen/samples_md.cpp
 
 TEST_CPP    := $(wildcard test/*.cpp)
 
 RESEARCH_BIN_NAMES := best_hand multi_comb play_probs
 RESEARCH_BINS      := $(addprefix $(BUILD_DIR)/research/,$(RESEARCH_BIN_NAMES))
 
-.PHONY: all clean dirs test_core coordinator selfplay generate_data benchmark tablebase_opp1_gen research help
+.PHONY: all clean dirs test_core coordinator generate_data benchmark tablebase_opp1_gen research help
 
 all: help
 
 help:
 	@echo "Targets:"
 	@echo "  make test_core            - unit tests (no Arrow)"
-	@echo "  make selfplay             - self-play runner: stats + JSONL output (no Arrow)"
 	@echo "  make benchmark            - perf benchmark binary (no Arrow)"
 	@echo "  make coordinator          - coordinator + Parquet objects (needs libarrow)"
-	@echo "  make generate_data        - full Parquet data gen binary (needs libarrow)"
+	@echo "  make generate_data        - self-play + Parquet + stats (needs libarrow)"
 	@echo "  make tablebase_opp1_gen   - build opp-1-card tablebase binary generator (no Arrow)"
 	@echo "  make research             - standalone research/*.cpp -> build/research/"
 	@echo "  make clean"
@@ -54,7 +53,7 @@ $(BUILD_DIR)/src/simulation/game_coordinator.o: src/simulation/game_coordinator.
 $(BUILD_DIR)/src/datagen/parquet_export.o: src/datagen/parquet_export.cpp | dirs
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
-$(BUILD_DIR)/src/datagen/selfplay_main.o: src/datagen/selfplay_main.cpp | dirs
+$(BUILD_DIR)/src/datagen/samples_md.o: src/datagen/samples_md.cpp | dirs
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
 $(BUILD_DIR)/src/datagen/generate_data.o: src/datagen/generate_data.cpp | dirs
@@ -86,20 +85,6 @@ $(BIN_DIR)/test_core: $(TEST_OBJS)
 	@echo "✓ $(BIN_DIR)/test_core"
 
 test_core: dirs $(BIN_DIR)/test_core
-
-# ============================================================================
-# bin/selfplay — self-play stats + JSONL (no Arrow)
-# ============================================================================
-
-SELFPLAY_OBJS := $(CORE_OBJS) \
-                 $(BUILD_DIR)/src/simulation/game_simulator.o \
-                 $(BUILD_DIR)/src/datagen/selfplay_main.o
-
-$(BIN_DIR)/selfplay: $(SELFPLAY_OBJS)
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
-	@echo "✓ $(BIN_DIR)/selfplay"
-
-selfplay: dirs $(BIN_DIR)/selfplay
 
 # ============================================================================
 # bin/benchmark — perf timing binary (no Arrow)
@@ -135,6 +120,7 @@ GENDATA_OBJS := $(CORE_OBJS) \
                 $(BUILD_DIR)/src/simulation/game_simulator.o \
                 $(BUILD_DIR)/src/simulation/game_coordinator.o \
                 $(BUILD_DIR)/src/datagen/parquet_export.o \
+                $(BUILD_DIR)/src/datagen/samples_md.o \
                 $(BUILD_DIR)/src/datagen/generate_data.o
 
 $(BIN_DIR)/generate_data: $(GENDATA_OBJS)
