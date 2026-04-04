@@ -27,11 +27,18 @@ def main() -> int:
     root = _repo_root()
     exe = os.path.join(root, "bin", "move_agreement")
     if not os.path.isfile(exe):
-        print("error: bin/move_agreement not found; run: make move_agreement", file=sys.stderr)
+        print(
+            "error: bin/move_agreement not found; run: make move_agreement",
+            file=sys.stderr,
+        )
         return 1
 
-    p = argparse.ArgumentParser(description="Greedy vs tree move agreement (wrapper around bin/move_agreement).")
-    p.add_argument("--games", type=int, required=True, help="Number of random deals to simulate.")
+    p = argparse.ArgumentParser(
+        description="Greedy vs tree move agreement (wrapper around bin/move_agreement)."
+    )
+    p.add_argument(
+        "--games", type=int, required=True, help="Number of random deals to simulate."
+    )
     p.add_argument("--seed", type=int, help="RNG seed (default: C++ random_device).")
     p.add_argument(
         "--tree-model",
@@ -44,7 +51,12 @@ def main() -> int:
         default="greedy",
         help="Which policy steps the game after each comparison (default: greedy).",
     )
-    p.add_argument("--max-samples", type=int, default=8, help="How many disagreement examples to print.")
+    p.add_argument(
+        "--max-samples",
+        type=int,
+        default=8,
+        help="How many disagreement examples to print.",
+    )
 
     args = p.parse_args()
     tm = args.tree_model

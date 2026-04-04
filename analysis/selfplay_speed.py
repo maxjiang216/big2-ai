@@ -114,7 +114,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="Compare self-play speed: greedy vs tree_greedy (d10, d15 by default).",
     )
-    ap.add_argument("--deals", type=int, required=True, help="Unique deals (total games = 2 * deals).")
+    ap.add_argument(
+        "--deals",
+        type=int,
+        required=True,
+        help="Unique deals (total games = 2 * deals).",
+    )
     ap.add_argument("--seed", type=int, default=0, help="Base RNG seed (default: 0).")
     ap.add_argument(
         "--threads",
@@ -129,7 +134,9 @@ def main() -> int:
         default=[10, 15],
         help="Tree max_depth values to test (loads data/tree_model_d{N}.txt). Default: 10 15.",
     )
-    ap.add_argument("--compile", action="store_true", help="Run `make eval_match` before timing.")
+    ap.add_argument(
+        "--compile", action="store_true", help="Run `make eval_match` before timing."
+    )
     ap.add_argument(
         "--show-eval-output",
         action="store_true",
@@ -157,11 +164,15 @@ def main() -> int:
     results: List[RunResult] = []
     for p0, p1, p0p, p1p in configs:
         label = "greedy" if p0 == "greedy" else f"tree_d{p0p:.0f}"
-        rr, proc = _run_eval_match(root, exe, p0, p1, p0p, p1p, args.deals, args.seed, args.threads)
+        rr, proc = _run_eval_match(
+            root, exe, p0, p1, p0p, p1p, args.deals, args.seed, args.threads
+        )
         rr.label = label
         results.append(rr)
         if proc.returncode != 0:
-            print(f"eval_match failed ({label}), exit {proc.returncode}", file=sys.stderr)
+            print(
+                f"eval_match failed ({label}), exit {proc.returncode}", file=sys.stderr
+            )
             if proc.stderr:
                 print(proc.stderr, file=sys.stderr)
             return proc.returncode or 1
@@ -170,7 +181,9 @@ def main() -> int:
 
     baseline_s = results[0].elapsed_s
     print("=== self-play speed (eval_match) ===")
-    print(f"deals={args.deals}  total_games={results[0].total_games}  seed={args.seed}  threads={args.threads}")
+    print(
+        f"deals={args.deals}  total_games={results[0].total_games}  seed={args.seed}  threads={args.threads}"
+    )
     print()
     print(f"{'model':<12} {'seconds':>10} {'games/s':>12} {'vs greedy':>12}")
     print("-" * 48)

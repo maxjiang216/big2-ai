@@ -283,7 +283,9 @@ def main() -> None:
     print(f"Figures: {bar_path}")
     print(f"         {cum_path}")
     print(f"CSV:      {csv_path}")
-    print(f"Open:     file://{os.path.abspath(os.path.join(args.out_dir, 'report.html'))}")
+    print(
+        f"Open:     file://{os.path.abspath(os.path.join(args.out_dir, 'report.html'))}"
+    )
 
 
 if __name__ == "__main__":

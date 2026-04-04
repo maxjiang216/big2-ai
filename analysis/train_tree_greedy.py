@@ -52,21 +52,63 @@ FEATURE_COLS = [
     "player_hand_size",
     "opponent_hand_size",
     "only_single",
-    "n_3", "n_4", "n_5", "n_6", "n_7", "n_8", "n_9", "n_10",
-    "n_j", "n_q", "n_k", "n_a", "n_2",
-    "n_ge_4", "n_ge_5", "n_ge_6", "n_ge_7", "n_ge_8", "n_ge_9", "n_ge_10",
-    "n_ge_j", "n_ge_q", "n_ge_k", "n_ge_a", "n_ge_2",
-    "n_le_3", "n_le_4", "n_le_5", "n_le_6", "n_le_7", "n_le_8", "n_le_9", "n_le_10",
-    "n_le_j", "n_le_q", "n_le_k", "n_le_a",
-    "highest_single", "highest_double", "highest_triple", "highest_bomb",
-    "highest_single_not_bomb", "highest_double_not_bomb", "highest_triple_not_bomb",
-    "last_move_is_pass", "last_move_is_single", "last_move_is_double",
-    "last_move_is_triple", "last_move_is_full_house", "last_move_is_bomb",
-    "last_move_is_single_straight", "last_move_is_double_straight",
+    "n_3",
+    "n_4",
+    "n_5",
+    "n_6",
+    "n_7",
+    "n_8",
+    "n_9",
+    "n_10",
+    "n_j",
+    "n_q",
+    "n_k",
+    "n_a",
+    "n_2",
+    "n_ge_4",
+    "n_ge_5",
+    "n_ge_6",
+    "n_ge_7",
+    "n_ge_8",
+    "n_ge_9",
+    "n_ge_10",
+    "n_ge_j",
+    "n_ge_q",
+    "n_ge_k",
+    "n_ge_a",
+    "n_ge_2",
+    "n_le_3",
+    "n_le_4",
+    "n_le_5",
+    "n_le_6",
+    "n_le_7",
+    "n_le_8",
+    "n_le_9",
+    "n_le_10",
+    "n_le_j",
+    "n_le_q",
+    "n_le_k",
+    "n_le_a",
+    "highest_single",
+    "highest_double",
+    "highest_triple",
+    "highest_bomb",
+    "highest_single_not_bomb",
+    "highest_double_not_bomb",
+    "highest_triple_not_bomb",
+    "last_move_is_pass",
+    "last_move_is_single",
+    "last_move_is_double",
+    "last_move_is_triple",
+    "last_move_is_full_house",
+    "last_move_is_bomb",
+    "last_move_is_single_straight",
+    "last_move_is_double_straight",
     "last_move_is_triple_straight",
     "last_move_card_count",
     "n_bombs",
-    "possible_moves", "possible_moves_not_bomb",
+    "possible_moves",
+    "possible_moves_not_bomb",
     "trick_rank",
 ]
 
@@ -74,17 +116,29 @@ assert len(FEATURE_COLS) == 61
 
 # For ``bin/generate_data``: comma-separated turn features (X + labels/filters).
 TURN_FEATURES_FOR_DATAGEN = ",".join(
-    FEATURE_COLS
-    + ["turn_outcome", "next_player", "tb_case"]
+    FEATURE_COLS + ["turn_outcome", "next_player", "tb_case"]
 )
 # Full pipeline (data → train → export → report): scripts/pipeline_tree_greedy.sh
 
-TARGET_COL      = "turn_outcome"
+TARGET_COL = "turn_outcome"
 NEXT_PLAYER_COL = "next_player"
-TB_CASE_COL     = "tb_case"
+TB_CASE_COL = "tb_case"
 
 DEFAULT_DEPTHS = [
-    3, 5, 7, 10, 15, 18, 20, 22, 25, 30, 35, 40, 45, 50,
+    3,
+    5,
+    7,
+    10,
+    15,
+    18,
+    20,
+    22,
+    25,
+    30,
+    35,
+    40,
+    45,
+    50,
 ]
 
 
@@ -177,8 +231,9 @@ def plot_cv_brier_vs_depth(
     fig, ax = plt.subplots(figsize=(9, 5))
     global_best = None
     for lab, depths, briers, color in series:
-        ax.plot(depths, briers, "o-", color=color, linewidth=1.5, markersize=5,
-                label=lab)
+        ax.plot(
+            depths, briers, "o-", color=color, linewidth=1.5, markersize=5, label=lab
+        )
         bi = int(np.argmin(briers))
         cand = (briers[bi], depths[bi], lab)
         if global_best is None or cand[0] < global_best[0]:
@@ -211,10 +266,7 @@ def run_depth_sweep(
     depths: list[int],
     min_samples_leaf: int,
     kf,
-) -> tuple[
-    list[dict],
-    list[tuple[float, int, int, DecisionTreeRegressor]],
-]:
+) -> tuple[list[dict], list[tuple[float, int, int, DecisionTreeRegressor]],]:
     """Returns sweep_rows and (cv_brier, depth, min_samples_leaf, fitted_model)."""
     sweep_rows: list[dict] = []
     results: list[tuple[float, int, int, DecisionTreeRegressor]] = []
@@ -230,9 +282,7 @@ def run_depth_sweep(
             criterion="squared_error",
             random_state=42,
         )
-        cv_scores = cross_val_score(
-            dt, X, y, cv=kf, scoring=brier_neg, n_jobs=-1
-        )
+        cv_scores = cross_val_score(dt, X, y, cv=kf, scoring=brier_neg, n_jobs=-1)
         cv_brier = float(-cv_scores.mean())
         cv_std = float(cv_scores.std())
 
@@ -397,9 +447,7 @@ def main() -> None:
 
     kf = KFold(n_splits=args.cv_folds, shuffle=True, random_state=42)
 
-    sweep_rows, results = run_depth_sweep(
-        X, y, depths, args.min_samples_leaf, kf
-    )
+    sweep_rows, results = run_depth_sweep(X, y, depths, args.min_samples_leaf, kf)
     print_plateau_hint(depths, sweep_rows)
 
     compare_rows: list[dict] = []
@@ -419,9 +467,7 @@ def main() -> None:
     print(f"\nWrote depth sweep CSV: {csv_path}")
 
     all_results = results + compare_results
-    best_brier, best_depth, best_leaf, best_model = min(
-        all_results, key=lambda r: r[0]
-    )
+    best_brier, best_depth, best_leaf, best_model = min(all_results, key=lambda r: r[0])
     print(
         f"\nBest by CV Brier: depth={best_depth}  min_samples_leaf={best_leaf}  "
         f"Brier={best_brier:.5f}  nodes={best_model.tree_.node_count}"
