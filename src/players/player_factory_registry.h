@@ -6,6 +6,7 @@
 #include "greedy/greedy_random_player_factory.h"
 #include "greedy/greedy_random_pass_player_factory.h"
 #include "greedy/greedy_no_bomb_player_factory.h"
+#include "greedy/tree_greedy_player_factory.h"
 #include "random/random_player_factory.h"
 
 #include <iostream>
@@ -21,6 +22,8 @@
 //   "greedy_random"      — greedy with prob param of playing a random move
 //   "greedy_random_pass" — greedy with prob param of passing instead
 //   "greedy_no_bomb"     — greedy; plays a bomb only with probability param
+//   "tree_greedy"        — greedy with decision-tree evaluator; param = model depth
+//                          (loads data/tree_model_d{int(param)}.txt)
 inline std::shared_ptr<PlayerFactory> make_player_factory(const std::string &name,
                                                            double param,
                                                            unsigned int seed) {
@@ -34,9 +37,12 @@ inline std::shared_ptr<PlayerFactory> make_player_factory(const std::string &nam
     return std::make_shared<GreedyRandomPassPlayerFactory>(static_cast<float>(param), seed);
   if (name == "greedy_no_bomb")
     return std::make_shared<GreedyNoBombPlayerFactory>(static_cast<float>(param), seed);
+  if (name == "tree_greedy")
+    return std::make_shared<TreeGreedyPlayerFactory>(param);
 
   std::cerr << "Error: unknown player '" << name << "'\n"
-            << "Available: random, greedy, greedy_random, greedy_random_pass, greedy_no_bomb\n";
+            << "Available: random, greedy, greedy_random, greedy_random_pass, "
+               "greedy_no_bomb, tree_greedy\n";
   return nullptr;
 }
 

@@ -18,7 +18,8 @@ jobs:
           python-version: "3.12"
 
       - name: Install Black
-        run: pip install black
+        # Pin so `black --check` matches local/dev installs (unpinned pip drifts).
+        run: pip install black==23.3.0
 
       - name: Check Python formatting
         run: python -m black --check --diff .

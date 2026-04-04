@@ -5,6 +5,7 @@
 #include "move.h"
 #include "partial_game.h"
 #include "tablebase_opp1.h"
+#include "tablebase_peek.h"
 #include "util.h"
 
 #include <array>
@@ -79,65 +80,11 @@ protected:
   // Sets last_tb_case_ when a case worth recording fires (1 or 2). Immediate
   // hand-emptying wins are not tagged — they always occur on the final turn.
   std::optional<Move> tablebase_move() {
-    // Winning move: play it but do not count as a tablebase "case" (always last turn).
-    const int hand_size = game_.num_cards();
-    for (int mid : game_.get_legal_moves()) {
-      if (mid == kPASS)
-        continue;
-      if (MOVE_TO_CARDS[mid][13] == hand_size)
-        return Move(mid);
-    }
-
-    if (game_.last_move().combination == Move::Combination::kPass) {
-
-      // Case 2 before case 1: when the opponent has exactly one card, use the
-      // specialized opp-1 endgame (singles / table / default order) first.
-      if (game_.opponent_hand_size() == 1) {
-        auto legal = game_.get_legal_moves();
-        int best_rank = -1;
-        bool all_singles = true;
-        for (int mid : legal) {
-          Move m(mid);
-          if (m.combination != Move::Combination::kSingle) {
-            all_singles = false;
-            break;
-          }
-          if (m.rank > best_rank)
-            best_rank = m.rank;
-        }
-        if (all_singles && best_rank != -1) {
-          last_tb_case_ = 2;
-          last_tb_opp1_table_straight_ = false;
-          return Move(Move::Combination::kSingle, best_rank);
-        }
-
-        Opp1Result opp1 = lookup_opp1(game_.player_hand());
-        if (opp1.first_move_id != 0) {
-          for (int mid : legal) {
-            if (mid == opp1.first_move_id) {
-              last_tb_case_ = 2;
-              last_tb_opp1_table_straight_ = true;
-              return Move(mid);
-            }
-          }
-        }
-        if (auto def = opp1_default_strategy_move(game_.player_hand())) {
-          last_tb_case_ = 2;
-          last_tb_opp1_table_straight_ = false;
-          return Move(*def);
-        }
-      }
-
-      // Case 1: from the lead, search for a guaranteed winning sequence.
-      auto seq = find_forced_win(game_.player_hand(), game_.discard_pile(),
-                                 game_.opponent_hand_size());
-      if (seq) {
-        last_tb_case_ = 1;
-        last_tb_forced_seq_len_ = static_cast<int>(seq->size());
-        return Move((*seq)[0]);
-      }
-    }
-    return std::nullopt;
+    TablebasePeekResult r = peek_tablebase_move(game_);
+    last_tb_case_ = r.tb_case;
+    last_tb_forced_seq_len_ = r.tb_forced_seq_len;
+    last_tb_opp1_table_straight_ = r.tb_opp1_table_straight;
+    return r.move;
   }
 };
 

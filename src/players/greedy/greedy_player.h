@@ -11,6 +11,8 @@
 #include <tuple>
 #include <vector>
 
+// Lexicographic hand evaluation returned by the default (tuple) greedy.
+// Higher is better. Compared via std::tie for zero-overhead tuple ordering.
 struct GreedyEval {
   int win_now;
   int bombs;
@@ -39,68 +41,82 @@ struct GreedyEval {
   }
 };
 
+// Compute the default GreedyEval from a post-move hand state.
+inline GreedyEval greedy_hand_eval(const PartialGame &sim) {
+  const auto &h = sim.player_hand();
+  int n_cards = 0, n_bombs = 0;
+  for (int i = 0; i < 13; ++i) {
+    n_cards += h[i];
+    if ((i < 11 && h[i] == 4) || (i == 11 && h[i] == 3))
+      ++n_bombs;
+  }
+
+  GreedyEval eval;
+  eval.win_now       = (n_cards == 0) ? 1 : 0;
+  eval.bombs         = n_bombs;
+  eval.neg_num_cards = -n_cards;
+  eval.num_2s        = h[12];
+  eval.num_as        = h[11];
+  eval.num_ks        = h[10];
+  eval.num_qs        = h[9];
+  eval.num_js        = h[8];
+  eval.num_10s       = h[7];
+  eval.num_9s        = h[6];
+  eval.num_8s        = h[5];
+  eval.num_7s        = h[4];
+  eval.num_6s        = h[3];
+  eval.num_5s        = h[2];
+  eval.num_4s        = h[1];
+  return eval;
+}
+
+// Generic greedy move selection.
+//
+// EvalFn: (const PartialGame& post_move_state) -> comparable
+//
+// Simulates each non-pass legal move, evaluates the resulting state with
+// eval_fn, and returns the move that maximises the score. Falls back to pass
+// if no non-pass moves are available.
+template <typename EvalFn>
+Move greedy_best(const PartialGame &game, const std::vector<int> &legal,
+                 EvalFn eval_fn) {
+  std::vector<int> nonpass_moves;
+  nonpass_moves.reserve(legal.size());
+  for (int m : legal) {
+    if (Move(m).combination != Move::Combination::kPass)
+      nonpass_moves.push_back(m);
+  }
+
+  if (nonpass_moves.empty())
+    return Move(kPASS);
+
+  auto best_it = nonpass_moves.begin();
+  PartialGame sim = game;
+  sim.apply_move(Move(*best_it));
+  auto best_val = eval_fn(sim);
+
+  for (auto it = nonpass_moves.begin() + 1; it != nonpass_moves.end(); ++it) {
+    sim = game;
+    sim.apply_move(Move(*it));
+    auto val = eval_fn(sim);
+    if (best_val < val) {
+      best_val = val;
+      best_it = it;
+    }
+  }
+  return Move(*best_it);
+}
+
+// Convenience 2-arg overload using the default GreedyEval evaluator.
+inline Move greedy_best(const PartialGame &game,
+                        const std::vector<int> &legal) {
+  return greedy_best(game, legal, greedy_hand_eval);
+}
+
 class GreedyPlayer : public Player {
 protected:
   Move select_move_impl() override {
-    return greedy_best(game_, game_.get_legal_moves());
-  }
-
-  // Selects the best non-pass move by greedy evaluation, or pass if forced.
-  // Exposed as protected so variant subclasses can reuse it.
-  static Move greedy_best(const PartialGame &game,
-                          const std::vector<int> &legal) {
-    std::vector<int> nonpass_moves;
-    nonpass_moves.reserve(legal.size());
-    for (int m : legal) {
-      if (Move(m).combination != Move::Combination::kPass)
-        nonpass_moves.push_back(m);
-    }
-
-    if (nonpass_moves.empty())
-      return Move(kPASS);
-
-    auto best_it = nonpass_moves.begin();
-    GreedyEval best_eval = evaluate_after_move(game, Move(*best_it));
-    for (auto it = nonpass_moves.begin() + 1; it != nonpass_moves.end(); ++it) {
-      GreedyEval eval = evaluate_after_move(game, Move(*it));
-      if (best_eval < eval) {
-        best_eval = eval;
-        best_it = it;
-      }
-    }
-    return Move(*best_it);
-  }
-
-  static GreedyEval evaluate_after_move(const PartialGame &base,
-                                        const Move &move) {
-    PartialGame sim = base;
-    sim.apply_move(move);
-
-    const auto &h = sim.player_hand();
-    int n_cards = 0, n_bombs = 0;
-    for (int i = 0; i < 13; ++i) {
-      n_cards += h[i];
-      if ((i < 11 && h[i] == 4) || (i == 11 && h[i] == 3))
-        ++n_bombs;
-    }
-
-    GreedyEval eval;
-    eval.win_now       = (n_cards == 0) ? 1 : 0;
-    eval.bombs         = n_bombs;
-    eval.neg_num_cards = -n_cards;
-    eval.num_2s        = h[12];
-    eval.num_as        = h[11];
-    eval.num_ks        = h[10];
-    eval.num_qs        = h[9];
-    eval.num_js        = h[8];
-    eval.num_10s       = h[7];
-    eval.num_9s        = h[6];
-    eval.num_8s        = h[5];
-    eval.num_7s        = h[4];
-    eval.num_6s        = h[3];
-    eval.num_5s        = h[2];
-    eval.num_4s        = h[1];
-    return eval;
+    return greedy_best(game_, game_.get_legal_moves(), greedy_hand_eval);
   }
 };
 
