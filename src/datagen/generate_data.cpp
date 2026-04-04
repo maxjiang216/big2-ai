@@ -1,9 +1,7 @@
 #include "feature_registry.h"
 #include "game_coordinator.h"
 #include "samples_md.h"
-#include "greedy/greedy_player_factory.h"
-#include "random/random_player_factory.h"
-#include "player_factory.h"
+#include "player_factory_registry.h"
 
 #include <atomic>
 #include <chrono>
@@ -30,13 +28,6 @@ static std::vector<std::string> split_csv(const std::string &s) {
   return tokens;
 }
 
-static std::shared_ptr<PlayerFactory> make_factory(const std::string &name,
-                                                     unsigned int seed) {
-  if (name == "random") return std::make_shared<RandomPlayerFactory>(seed);
-  if (name == "greedy") return std::make_shared<GreedyPlayerFactory>();
-  std::cerr << "Error: unknown player '" << name << "'\n";
-  return nullptr;
-}
 
 static std::string format_eta(double seconds) {
   if (seconds < 0 || !std::isfinite(seconds))
@@ -89,7 +80,8 @@ static void print_usage(const char *prog) {
       << "  --seed <S>                 RNG seed (default: random)\n"
       << "  --threads <T>              Threads (default: hardware - 2)\n"
       << "  --samples-md <path>        Markdown: anomaly games with hands + history\n"
-      << "\nAvailable players: random, greedy\n"
+      << "\nAvailable players: random, greedy, greedy_random, greedy_random_pass, greedy_no_bomb\n"
+      << "  (greedy_random, greedy_random_pass, greedy_no_bomb are only valid in eval_match)\n"
       << "\nExample:\n"
       << "  " << prog
       << " --player random --games 100000 --output data/random_100k"
@@ -168,7 +160,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  auto factory = make_factory(player_name, seed);
+  auto factory = make_player_factory(player_name, 0.0, seed);
   if (!factory) return 1;
 
   std::cout << "\n=== Data generation / self-play ===\n"

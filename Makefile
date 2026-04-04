@@ -19,7 +19,7 @@ TEST_CPP    := $(wildcard test/*.cpp)
 RESEARCH_BIN_NAMES := best_hand multi_comb play_probs
 RESEARCH_BINS      := $(addprefix $(BUILD_DIR)/research/,$(RESEARCH_BIN_NAMES))
 
-.PHONY: all clean dirs test_core coordinator generate_data benchmark tablebase_opp1_gen research help
+.PHONY: all clean dirs test_core coordinator generate_data eval_match benchmark tablebase_opp1_gen research help
 
 all: help
 
@@ -29,6 +29,7 @@ help:
 	@echo "  make benchmark            - perf benchmark binary (no Arrow)"
 	@echo "  make coordinator          - coordinator + Parquet objects (needs libarrow)"
 	@echo "  make generate_data        - self-play + Parquet + stats (needs libarrow)"
+	@echo "  make eval_match           - head-to-head evaluation binary (no Arrow)"
 	@echo "  make tablebase_opp1_gen   - build opp-1-card tablebase binary generator (no Arrow)"
 	@echo "  make research             - standalone research/*.cpp -> build/research/"
 	@echo "  make clean"
@@ -128,6 +129,23 @@ $(BIN_DIR)/generate_data: $(GENDATA_OBJS)
 	@echo "✓ $(BIN_DIR)/generate_data"
 
 generate_data: dirs $(BIN_DIR)/generate_data
+
+# ============================================================================
+# bin/eval_match — head-to-head evaluation (no Arrow)
+# ============================================================================
+
+$(BUILD_DIR)/src/datagen/eval_match.o: src/datagen/eval_match.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+EVALMATCH_OBJS := $(CORE_OBJS) \
+                  $(BUILD_DIR)/src/simulation/game_simulator.o \
+                  $(BUILD_DIR)/src/datagen/eval_match.o
+
+$(BIN_DIR)/eval_match: $(EVALMATCH_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ $(BIN_DIR)/eval_match"
+
+eval_match: dirs $(BIN_DIR)/eval_match
 
 # ============================================================================
 # bin/tablebase_opp1_gen — precompute tablebase binary (no Arrow)

@@ -1,0 +1,24 @@
+{
+  "deals_per_matchup": 5000,
+  "seed": 42,
+  "threads": 8,
+  "players": [
+    "random",
+    "greedy",
+    { "type": "greedy_random", "param": 0.1, "label": "greedy_random(0.1)" },
+    { "type": "greedy_random", "param": 0.2, "label": "greedy_random(0.2)" },
+    { "type": "greedy_random", "param": 0.3, "label": "greedy_random(0.3)" },
+    { "type": "greedy_random", "param": 0.4, "label": "greedy_random(0.4)" },
+    { "type": "greedy_random", "param": 0.5, "label": "greedy_random(0.5)" },
+    { "type": "greedy_random_pass", "param": 0.1, "label": "greedy_random_pass(0.1)" },
+    { "type": "greedy_random_pass", "param": 0.2, "label": "greedy_random_pass(0.2)" },
+    { "type": "greedy_random_pass", "param": 0.3, "label": "greedy_random_pass(0.3)" },
+    { "type": "greedy_random_pass", "param": 0.4, "label": "greedy_random_pass(0.4)" },
+    { "type": "greedy_random_pass", "param": 0.5, "label": "greedy_random_pass(0.5)" },
+    { "type": "greedy_no_bomb", "param": 0.1, "label": "greedy_no_bomb(0.1)" },
+    { "type": "greedy_no_bomb", "param": 0.2, "label": "greedy_no_bomb(0.2)" },
+    { "type": "greedy_no_bomb", "param": 0.3, "label": "greedy_no_bomb(0.3)" },
+    { "type": "greedy_no_bomb", "param": 0.4, "label": "greedy_no_bomb(0.4)" },
+    { "type": "greedy_no_bomb", "param": 0.5, "label": "greedy_no_bomb(0.5)" }
+  ]
+}
