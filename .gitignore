@@ -107,6 +107,10 @@ research/a.out
 *.backup
 
 # -------------------- Analysis Outputs --------------------
+# Feature interaction exploration outputs (feature_interaction_explore.py)
+analysis/feature_explore_out/
+analysis/feature_explore_out_test/
+
 # Tree-greedy HTML reports and CSVs (generate_tree_report.py)
 analysis/reports/tree_depth*/
 
