@@ -44,7 +44,9 @@ def _feat_columns() -> list[str]:
     return [f"f{i}" for i in range(60)]
 
 
-def load_xy(path: str, *, progress: bool = True) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+def load_xy(
+    path: str, *, progress: bool = True
+) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     cols = _feat_columns()
     try:
         from tqdm import tqdm
@@ -78,7 +80,9 @@ def load_xy(path: str, *, progress: bool = True) -> tuple[pd.DataFrame, np.ndarr
     return df, X, y
 
 
-def split_by_game(df: pd.DataFrame, val_frac: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
+def split_by_game(
+    df: pd.DataFrame, val_frac: float, seed: int
+) -> tuple[np.ndarray, np.ndarray]:
     games = np.unique(df["game_index"].values)
     if len(games) < 2:
         train_mask = np.ones(len(df), dtype=bool)
@@ -120,10 +124,16 @@ def export_weights(
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("csv", help="CSV from pass_greedy_datagen")
-    ap.add_argument("--out", default="data/pass_ridge_w.txt", help="Output weights (LinearEvaluator)")
+    ap.add_argument(
+        "--out",
+        default="data/pass_ridge_w.txt",
+        help="Output weights (LinearEvaluator)",
+    )
     ap.add_argument("--val-frac", type=float, default=0.15)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--alpha", type=float, default=1.0, help="Ridge regularization strength")
+    ap.add_argument(
+        "--alpha", type=float, default=1.0, help="Ridge regularization strength"
+    )
     ap.add_argument(
         "--no-progress",
         action="store_true",
@@ -152,7 +162,9 @@ def main() -> None:
         tqdm = None  # type: ignore
 
     if show_progress and tqdm is not None:
-        with tqdm(total=1, desc="Training Ridge", unit="fit", dynamic_ncols=True) as pbar:
+        with tqdm(
+            total=1, desc="Training Ridge", unit="fit", dynamic_ncols=True
+        ) as pbar:
             pipe.fit(X_train, y_train)
             pbar.update(1)
     else:

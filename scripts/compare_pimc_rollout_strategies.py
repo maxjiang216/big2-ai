@@ -155,7 +155,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Compare pimc vs pimc_redet vs random/greedy (eval_match matrix)"
     )
-    parser.add_argument("--deals", type=int, default=2000, help="Unique deals (games = 2*deals)")
+    parser.add_argument(
+        "--deals", type=int, default=2000, help="Unique deals (games = 2*deals)"
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument(
@@ -184,7 +186,9 @@ def main() -> None:
 
     exe = REPO_ROOT / "bin" / "eval_match"
     if not exe.is_file() or not os.access(exe, os.X_OK):
-        print(f"Missing or not executable: {exe}; run: make eval_match", file=sys.stderr)
+        print(
+            f"Missing or not executable: {exe}; run: make eval_match", file=sys.stderr
+        )
         sys.exit(1)
 
     # (label, p0, p1, p0_param, p1_param)

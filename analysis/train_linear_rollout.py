@@ -57,7 +57,9 @@ def _split_games(
 ) -> tuple[np.ndarray, np.ndarray]:
     games = np.unique(df["game_index"].values)
     if len(games) < 2:
-        raise ValueError("Need at least 2 distinct game_index values for train/val split")
+        raise ValueError(
+            "Need at least 2 distinct game_index values for train/val split"
+        )
     rng = np.random.default_rng(seed)
     rng.shuffle(games)
     n_val = max(1, int(len(games) * val_frac))
@@ -120,7 +122,9 @@ def export_weights(
 def main() -> None:
     global LINEAR_FEATURE_COLS
 
-    parser = argparse.ArgumentParser(description="Train Ridge linear rollout + export weights")
+    parser = argparse.ArgumentParser(
+        description="Train Ridge linear rollout + export weights"
+    )
     parser.add_argument("parquet", help="Path to *_turn.parquet")
     parser.add_argument(
         "--out",
@@ -134,7 +138,9 @@ def main() -> None:
         default=35,
         help="Number of features after RF screening (0 = use all 60)",
     )
-    parser.add_argument("--val-frac", type=float, default=0.2, help="Validation fraction by game")
+    parser.add_argument(
+        "--val-frac", type=float, default=0.2, help="Validation fraction by game"
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--meta-json",

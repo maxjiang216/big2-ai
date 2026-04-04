@@ -55,7 +55,9 @@ def plot_correlation_heatmap(
     df_feat: pd.DataFrame, names: list[str], out_path: Path, title: str
 ) -> None:
     c = df_feat[names].corr()
-    fig, ax = plt.subplots(figsize=(max(8, 0.25 * len(names)), max(7, 0.25 * len(names))))
+    fig, ax = plt.subplots(
+        figsize=(max(8, 0.25 * len(names)), max(7, 0.25 * len(names)))
+    )
     im = ax.imshow(c.values, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto")
     ax.set_xticks(range(len(names)))
     ax.set_yticks(range(len(names)))
@@ -233,9 +235,9 @@ def main() -> None:
         "Mutual information vs turn_outcome",
         "MI",
     )
-    pd.DataFrame({"feature": FEATURE_COLS, "mi": mi}).sort_values("mi", ascending=False).to_csv(
-        out_dir / "mutual_info_target.csv", index=False
-    )
+    pd.DataFrame({"feature": FEATURE_COLS, "mi": mi}).sort_values(
+        "mi", ascending=False
+    ).to_csv(out_dir / "mutual_info_target.csv", index=False)
 
     # --- Random Forest importances (interaction-capable model) ---
     rf = RandomForestRegressor(
@@ -293,9 +295,9 @@ def main() -> None:
 
     top_idx = mi_order[: min(args.interaction_top, len(FEATURE_COLS))].tolist()
     pairs = top_interaction_correlations(Xs, y, FEATURE_COLS, top_idx, max_pairs=120)
-    pd.DataFrame(pairs, columns=["feature_i", "feature_j", "abs_corr_y_product"]).to_csv(
-        out_dir / "interaction_product_correlations.csv", index=False
-    )
+    pd.DataFrame(
+        pairs, columns=["feature_i", "feature_j", "abs_corr_y_product"]
+    ).to_csv(out_dir / "interaction_product_correlations.csv", index=False)
 
     # --- Binned outcome plots (nonlinearity) ---
     top_b = mi_order[: args.binned_top]
