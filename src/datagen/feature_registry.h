@@ -25,6 +25,8 @@
 #include "turn_level/possible_moves_feature.h"
 #include "turn_level/possible_moves_not_bomb_feature.h"
 #include "turn_level/trick_rank_feature.h"
+#include "turn_level/tb_case_feature.h"
+#include "turn_level/only_single_feature.h"
 
 #include "feature_extractor.h"
 #include "move.h"
@@ -142,6 +144,8 @@ inline std::shared_ptr<FeatureExtractor> create_feature(const std::string &name)
   if (name == "possible_moves")       return std::make_shared<PossibleMovesFeature>();
   if (name == "possible_moves_not_bomb") return std::make_shared<PossibleMovesNotBombFeature>();
   if (name == "trick_rank")           return std::make_shared<TrickRankFeature>();
+  if (name == "tb_case")              return std::make_shared<TbCaseFeature>();
+  if (name == "only_single")          return std::make_shared<OnlySingleFeature>();
 
   std::cerr << "Warning: unknown feature '" << name << "', skipping\n";
   return nullptr;

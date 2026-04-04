@@ -19,7 +19,7 @@ TEST_CPP    := $(wildcard test/*.cpp)
 RESEARCH_BIN_NAMES := best_hand multi_comb play_probs
 RESEARCH_BINS      := $(addprefix $(BUILD_DIR)/research/,$(RESEARCH_BIN_NAMES))
 
-.PHONY: all clean dirs test_core coordinator generate_data eval_match benchmark tablebase_opp1_gen research help
+.PHONY: all clean dirs test_core coordinator generate_data eval_match move_agreement benchmark tablebase_opp1_gen research help
 
 all: help
 
@@ -30,6 +30,7 @@ help:
 	@echo "  make coordinator          - coordinator + Parquet objects (needs libarrow)"
 	@echo "  make generate_data        - self-play + Parquet + stats (needs libarrow)"
 	@echo "  make eval_match           - head-to-head evaluation binary (no Arrow)"
+	@echo "  make move_agreement       - greedy vs tree move agreement stats (no Arrow)"
 	@echo "  make tablebase_opp1_gen   - build opp-1-card tablebase binary generator (no Arrow)"
 	@echo "  make research             - standalone research/*.cpp -> build/research/"
 	@echo "  make clean"
@@ -146,6 +147,22 @@ $(BIN_DIR)/eval_match: $(EVALMATCH_OBJS)
 	@echo "✓ $(BIN_DIR)/eval_match"
 
 eval_match: dirs $(BIN_DIR)/eval_match
+
+# ============================================================================
+# bin/move_agreement — greedy vs tree move choice comparison (no Arrow)
+# ============================================================================
+
+$(BUILD_DIR)/src/datagen/move_agreement.o: src/datagen/move_agreement.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+MOVE_AGREEMENT_OBJS := $(CORE_OBJS) \
+                       $(BUILD_DIR)/src/datagen/move_agreement.o
+
+$(BIN_DIR)/move_agreement: $(MOVE_AGREEMENT_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ $(BIN_DIR)/move_agreement"
+
+move_agreement: dirs $(BIN_DIR)/move_agreement
 
 # ============================================================================
 # bin/tablebase_opp1_gen — precompute tablebase binary (no Arrow)

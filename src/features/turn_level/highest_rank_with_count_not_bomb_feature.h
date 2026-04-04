@@ -10,8 +10,8 @@ class HighestRankWithCountNotBombFeature : public FeatureExtractor {
 public:
   explicit HighestRankWithCountNotBombFeature(int count, const std::string &feature_name)
       : count_(count), feature_name_(feature_name) {
-    if (count < 2 || count > 3)
-      throw std::invalid_argument("Count must be 2 or 3");
+    if (count < 1 || count > 3)
+      throw std::invalid_argument("Count must be in [1, 3]");
   }
 
   Type type() const override { return Type::TurnLevel; }

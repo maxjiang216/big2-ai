@@ -1,0 +1,9 @@
+{
+  "deals_per_matchup": 5000,
+  "seed": 12345,
+  "players": [
+    "random",
+    "greedy",
+    {"type": "tree_greedy", "param": 18, "label": "tree_d18"}
+  ]
+}

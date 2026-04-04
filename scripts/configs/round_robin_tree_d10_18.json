@@ -1,0 +1,15 @@
+{
+  "deals_per_matchup": 3000,
+  "seed": 900001,
+  "players": [
+    {"type": "tree_greedy", "param": 10, "label": "tree_d10"},
+    {"type": "tree_greedy", "param": 11, "label": "tree_d11"},
+    {"type": "tree_greedy", "param": 12, "label": "tree_d12"},
+    {"type": "tree_greedy", "param": 13, "label": "tree_d13"},
+    {"type": "tree_greedy", "param": 14, "label": "tree_d14"},
+    {"type": "tree_greedy", "param": 15, "label": "tree_d15"},
+    {"type": "tree_greedy", "param": 16, "label": "tree_d16"},
+    {"type": "tree_greedy", "param": 17, "label": "tree_d17"},
+    {"type": "tree_greedy", "param": 18, "label": "tree_d18"}
+  ]
+}

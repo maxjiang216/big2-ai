@@ -50,6 +50,15 @@ inline constexpr int max_cards_in_deck_for_rank(int rank_index) {
   return 4;
 }
 
+// True if every rank appears at most once (no pair, triple, or bomb in hand).
+inline bool hand_is_only_singles(const std::array<int, 13> &hand) {
+  for (int i = 0; i < 13; ++i) {
+    if (hand[i] > 1)
+      return false;
+  }
+  return true;
+}
+
 char rankToChar(int rank);
 
 std::vector<int> compute_legal_moves(const std::array<int, 13> &hand,

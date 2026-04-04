@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Tree greedy — max_depth=15</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; line-height: 1.45; color: #1a1a1a; }
+    h1 { font-size: 1.5rem; }
+    h2 { font-size: 1.15rem; margin-top: 2rem; }
+    .meta { color: #444; font-size: 0.9rem; margin-bottom: 1.5rem; }
+    img { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; margin: 1rem 0; }
+    code { background: #f4f4f4; padding: 0.1em 0.35em; border-radius: 3px; }
+    a { color: #0b5; }
+  </style>
+</head>
+<body>
+  <h1>Tree greedy — max_depth=15</h1>
+  <p class="meta">
+    Generated 2026-04-04 04:02 UTC<br/>
+    Training data: <code>data/greedy_200k_turn.parquet</code><br/>
+    <code>min_samples_leaf=100</code> ·
+    tree nodes: <strong>14243</strong> ·
+    features: <strong>60</strong>
+  </p>
+  <p>
+    Importance values are the sklearn tree’s normalized Gini decrease
+    (same as <code>model.feature_importances_</code>).
+  </p>
+
+  <h2>Bar chart (all features, low → high)</h2>
+  <p><img src="feature_importance_bar.png" alt="Feature importance bar chart"/></p>
+
+  <h2>Cumulative importance (sorted high → low)</h2>
+  <p><img src="feature_importance_cumulative.png" alt="Cumulative feature importance"/></p>
+
+  <h2>Data</h2>
+  <p>CSV: <a href="feature_importances.csv">feature_importances.csv</a></p>
+</body>
+</html>
