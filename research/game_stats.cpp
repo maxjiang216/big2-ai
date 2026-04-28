@@ -38,6 +38,11 @@
 // Per-thread stats accumulator
 // ---------------------------------------------------------------------------
 
+// Per-ply hand size samples (both players at the start of each ply).
+struct PlyBucket {
+    std::vector<int> p0, p1;  // hand sizes observed at this ply
+};
+
 struct Stats {
     std::map<int, long long> legal_all;
     std::map<int, long long> legal_lead;
@@ -46,17 +51,27 @@ struct Stats {
     long long total_turns = 0;
     long long total_games = 0;
 
+    std::vector<PlyBucket> ply;  // ply[i] = samples for ply i (0-indexed)
+
     void record_game(const GameRecord &rec) {
         int len = static_cast<int>(rec.turns().size());
         game_len[len]++;
         total_games++;
-        for (const auto &t : rec.turns()) {
+
+        if (static_cast<int>(ply.size()) < len)
+            ply.resize(len);
+
+        for (int i = 0; i < len; ++i) {
+            const auto &t = rec.turns()[i];
             int n = static_cast<int>(t.legal_moves.size());
             bool is_lead = (t.game.last_move().combination == Move::Combination::kPass);
             legal_all[n]++;
             if (is_lead) legal_lead[n]++;
             else         legal_resp[n]++;
             total_turns++;
+
+            ply[i].p0.push_back(t.game.get_player_hand_size(0));
+            ply[i].p1.push_back(t.game.get_player_hand_size(1));
         }
     }
 
@@ -67,6 +82,14 @@ struct Stats {
         for (auto &[k, v] : o.game_len)   game_len[k]   += v;
         total_turns += o.total_turns;
         total_games += o.total_games;
+
+        if (ply.size() < o.ply.size()) ply.resize(o.ply.size());
+        for (int i = 0; i < static_cast<int>(o.ply.size()); ++i) {
+            auto &dst = ply[i];
+            const auto &src = o.ply[i];
+            dst.p0.insert(dst.p0.end(), src.p0.begin(), src.p0.end());
+            dst.p1.insert(dst.p1.end(), src.p1.begin(), src.p1.end());
+        }
     }
 };
 
@@ -111,6 +134,54 @@ static void print_dist(const std::string &label,
               << "  p50=" << p50 << "  p90=" << p90
               << "  p95=" << p95 << "  p99=" << p99
               << "  max=" << pmax << "\n";
+}
+
+static double median_of(std::vector<int> &v) {
+    if (v.empty()) return 0.0;
+    size_t mid = v.size() / 2;
+    std::nth_element(v.begin(), v.begin() + mid, v.end());
+    if (v.size() % 2 == 1) return v[mid];
+    // even: average of two middle elements
+    int lo = *std::max_element(v.begin(), v.begin() + mid);
+    return 0.5 * (lo + v[mid]);
+}
+
+static void print_ply_stats(const std::vector<PlyBucket> &ply) {
+    std::cout << "\n--- HAND SIZES BY PLY (at start of each ply) ---\n";
+    std::cout << std::setw(5)  << "ply"
+              << std::setw(8)  << "n"
+              << std::setw(12) << "mean_p0"
+              << std::setw(10) << "med_p0"
+              << std::setw(12) << "mean_p1"
+              << std::setw(10) << "med_p1"
+              << std::setw(14) << "mean_total"
+              << std::setw(12) << "med_total\n";
+
+    for (int i = 0; i < static_cast<int>(ply.size()); ++i) {
+        auto p0v = ply[i].p0;  // copy for nth_element
+        auto p1v = ply[i].p1;
+        if (p0v.empty()) continue;
+
+        long long n = static_cast<long long>(p0v.size());
+        double mean_p0 = 0, mean_p1 = 0;
+        for (int x : p0v) mean_p0 += x;
+        for (int x : p1v) mean_p1 += x;
+        mean_p0 /= n;
+        mean_p1 /= n;
+
+        double med_p0 = median_of(p0v);
+        double med_p1 = median_of(p1v);
+
+        std::cout << std::setw(5)  << i
+                  << std::setw(8)  << n
+                  << std::setw(12) << std::fixed << std::setprecision(2) << mean_p0
+                  << std::setw(10) << std::fixed << std::setprecision(1) << med_p0
+                  << std::setw(12) << std::fixed << std::setprecision(2) << mean_p1
+                  << std::setw(10) << std::fixed << std::setprecision(1) << med_p1
+                  << std::setw(14) << std::fixed << std::setprecision(2) << mean_p0 + mean_p1
+                  << std::setw(12) << std::fixed << std::setprecision(1) << med_p0 + med_p1
+                  << "\n";
+    }
 }
 
 static void print_usage(const char *prog) {
@@ -224,6 +295,8 @@ int main(int argc, char **argv) {
 
     print_dist("LEGAL MOVES — lead (new trick)", global.legal_lead, lead_total);
     print_dist("LEGAL MOVES — response (beat or pass)", global.legal_resp, resp_total);
+
+    print_ply_stats(global.ply);
 
     return 0;
 }
