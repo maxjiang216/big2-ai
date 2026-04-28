@@ -184,6 +184,24 @@ $(BIN_DIR)/move_agreement: $(MOVE_AGREEMENT_OBJS)
 move_agreement: dirs $(BIN_DIR)/move_agreement
 
 # ============================================================================
+# bin/game_stats — game-length + legal-move distributions for any player pair
+# ============================================================================
+
+$(BUILD_DIR)/research/game_stats.o: research/game_stats.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+GAME_STATS_OBJS := $(CORE_OBJS) \
+                   $(BUILD_DIR)/src/simulation/game_simulator.o \
+                   $(BUILD_DIR)/src/core/game_record.o \
+                   $(BUILD_DIR)/research/game_stats.o
+
+$(BIN_DIR)/game_stats: $(GAME_STATS_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ $(BIN_DIR)/game_stats"
+
+game_stats: dirs $(BIN_DIR)/game_stats
+
+# ============================================================================
 # bin/legal_move_dist — empirical legal-move-count distribution (no Arrow)
 # ============================================================================
 
