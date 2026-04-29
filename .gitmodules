@@ -1,0 +1,3 @@
+[submodule "projects/standard-linter"]
+	path = projects/standard-linter
+	url = https://github.com/maxjiang216/standard-linter.git

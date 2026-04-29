@@ -12,6 +12,9 @@ venv/
 # -------------------- Rust --------------------
 /target/
 
+# Shared linter configs (make standards_configs → projects/standard-linter)
+.code-standards/
+
 # Object files
 *.o
 *.obj

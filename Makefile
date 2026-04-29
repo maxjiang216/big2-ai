@@ -19,7 +19,7 @@ TEST_CPP    := $(wildcard test/*.cpp)
 RESEARCH_BIN_NAMES := best_hand multi_comb play_probs count_turn_states
 RESEARCH_BINS      := $(addprefix $(BUILD_DIR)/research/,$(RESEARCH_BIN_NAMES))
 
-.PHONY: all clean dirs test_core coordinator generate_data eval_match pass_greedy_datagen move_agreement benchmark tablebase_opp1_gen research help
+.PHONY: all clean dirs test_core coordinator generate_data eval_match pass_greedy_datagen move_agreement benchmark tablebase_opp1_gen research standards_init standards_configs help
 
 all: help
 
@@ -34,7 +34,19 @@ help:
 	@echo "  make move_agreement       - greedy vs tree move agreement stats (no Arrow)"
 	@echo "  make tablebase_opp1_gen   - build opp-1-card tablebase binary generator (no Arrow)"
 	@echo "  make research             - standalone research/*.cpp -> build/research/"
+	@echo "  make standards_init       - git submodule: fetch projects/standard-linter"
+	@echo "  make standards_configs    - copy configs from projects/standard-linter → .code-standards/ (for pre-commit)"
 	@echo "  make clean"
+
+# ------------------------------------------------------------------------------
+# Shared code standards (vendored git submodule: github.com/maxjiang216/standard-linter)
+# ------------------------------------------------------------------------------
+
+standards_init:
+	git submodule update --init projects/standard-linter
+
+standards_configs: standards_init
+	DEST="$(CURDIR)/.code-standards" bash projects/standard-linter/scripts/install-local-standards.sh
 
 dirs:
 	@mkdir -p $(BUILD_DIR)/src/core $(BUILD_DIR)/src/simulation $(BUILD_DIR)/src/datagen \

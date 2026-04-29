@@ -18,6 +18,8 @@ make research          # standalone research/*.cpp → build/research/
 make clean
 ```
 
+**Git submodule:** after a fresh clone, run `git submodule update --init projects/standard-linter` (or `make standards_init`). The vendored [standard-linter](https://github.com/maxjiang216/standard-linter) repo holds shared formatter/linter configs. Run `make standards_configs` to copy them into `.code-standards/` for local tooling or `pre-commit`. Optional GitHub reuse: `uses: maxjiang216/standard-linter/.github/workflows/standards.yml@<ref>` (pin a tag when publishing).
+
 Ubuntu/Debian dependencies: `sudo apt install build-essential libarrow-dev libparquet-dev`
 
 ## Running evaluations
