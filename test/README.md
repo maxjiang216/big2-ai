@@ -1,34 +1,26 @@
 # Tests
 
-Unit and integration tests for the C++ engine. Built and run from the **repository root**.
-
-## How to run
+The **active** test suite is the Rust workspace. Run it from the **repository root**:
 
 ```bash
-make test_core
-./bin/test_core
+make test
 ```
 
-CI (`.github/workflows/ci.yml`) runs the same commands on pushes and pull requests to `main`.
+This is equivalent to `cargo test --all`. CI (`.github/workflows/ci.yml`) runs `make test` on pushes and pull requests to `main`.
 
-**Not part of `test_core`:** `test/test_perf.cpp` is compiled separately as the performance benchmark (its own `main` when `BENCHMARK_MAIN` is defined):
+## Where tests live
 
-```bash
-make benchmark
-./bin/benchmark
-```
+| Area | Location | What it covers |
+|------|-----------|----------------|
+| Core engine | `crates/core/src/*` (`#[cfg(test)]` modules) | Deals, legal moves, pass rules, `PartialGame` vs `Game`, move encode/decode, tablebase hooks, move enumeration helpers |
+| Players | `crates/players/src/greedy/evaluators.rs` | Greedy evaluator ordering and tree feature vector shape |
+| Simulation | `crates/simulation/src/simulator.rs` | Random self-play completes; card conservation |
+| Golden parity | `crates/simulation/tests/greedy_exact_match.rs` | Rust greedy-vs-greedy move sequences match the C++ golden file |
 
-## What each file tests
+Add new integration tests under `crates/<crate>/tests/` or unit tests next to the code under `src/`, following existing patterns.
 
-| File | Suite label | What it covers |
-|------|----------------|----------------|
-| `test_move.cpp` | `move` | Move id encode/decode roundtrip; `MOVE_TO_CARDS` consistency and deck limits; legal move enumeration invariants. |
-| `test_game.cpp` | `game` | Deal invariants, turn order, playing moves, game completion, discard and hand conservation. |
-| `test_partial_game.cpp` | `partial` | `PartialGame` vs `Game` perspective, legal move subset on your turn, consistency across turns. |
-| `test_greedy_player.cpp` | `greedy` | Greedy vs random full games (played move ∈ legal set); greedy wins more often than random over many seeds. |
-| `test_random_games.cpp` | `random_games` | Long random simulations: card conservation, `GameRecord` integrity, `PartialGame` vs `Game` after each turn. |
-| `test_tablebase.cpp` | `tablebase` | When the opponent-has-one-card tablebase applies, the played move matches the expected highest single (and related integration cases). |
-| `test_main.cpp` | — | Invokes all of the above suites in order; prints `All tests passed.` on success. |
-| `test_perf.cpp` | *(benchmark only)* | Single-threaded throughput and tablebase-related counters over many games (not asserted in CI). |
+## Legacy C++ sources
 
-The order of suites in `test_main.cpp` matches the table above.
+The `test/*.cpp` files are **not** built by the root `Makefile`. They are the old C++ unit-test sources kept for reference (and for parity with `greedy_exact_match`, which compares against a C++-derived golden transcript). Rust tests above supersede them for day-to-day development.
+
+The former layout was: `test_main.cpp` driving suites for moves, game, partial game, greedy vs random, long random runs, tablebase, plus `test_perf.cpp` as a separate benchmark entry point. There is no `make test_core` or `bin/test_core` in the current tree.

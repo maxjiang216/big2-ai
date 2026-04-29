@@ -1,10 +1,10 @@
 # Scripts
 
-Drivers and tooling outside `src/`. Paths are relative to the **repository root**.
+Python drivers and JSON configs. Paths are relative to the **repository root**. The native CLIs they invoke live under **`target/release/`** (build with `make release` or `--compile`).
 
-## Policy names (`player_factory_registry.h`)
+## Policy names (`crates/players/src/registry.rs`)
 
-These strings work anywhere the code calls `make_player_factory` (e.g. `bin/eval_match`, `bin/generate_data` for `--player`):
+These strings are accepted by **`make_player`** and surfaced on the **`target/release/generate_data`** (`--player`) and **`target/release/eval_match`** (`--p0` / `--p1`) CLIs:
 
 | Name | Meaning |
 |------|---------|
@@ -13,9 +13,11 @@ These strings work anywhere the code calls `make_player_factory` (e.g. `bin/eval
 | `greedy_random` | Usually greedy; with probability `param`, play a random legal move |
 | `greedy_random_pass` | Usually greedy; with probability `param`, pass when legal |
 | `greedy_no_bomb` | Usually greedy; when greedy would play a bomb, only do so with probability `param` |
-| `pimc`, `pimc_linear`, `pimc_tree`, … | See `src/players/player_factory_registry.h` (e.g. `pimc_redet` = PIMC with opponent hand re-sampled each opponent turn inside rollouts) |
+| `pimc`, `pimc_linear`, `pimc_tree`, … | See **`crates/players/src/registry.rs`** (e.g. `pimc_redet` = PIMC with opponent hand re-sampled each opponent turn inside rollouts) |
 
-Parameterized variants take `--p0-param` / `--p1-param` (or `param` in JSON configs for `eval_match` / round robin). **`bin/generate_data` fixes `param` at 0** for self-play; use `eval_match` or round robin for parameter sweeps.
+Parameterized variants use `--p0-param` / `--p1-param` on `eval_match`, or `p0_param` / `p1_param` in JSON for `eval_match` / round robin.
+
+For **self-play**, `generate_data` defaults **`--player-param` to `0.0`**; set **`player_param`** in the JSON config when you need a non-zero variant parameter. Use **`eval_match`** or the round-robin scripts for systematic parameter sweeps across matchups.
 
 ## `compare_pimc_rollout_strategies.py`
 
@@ -31,17 +33,17 @@ Individual matchups are also available as JSON under `scripts/configs/eval_pimc2
 
 ## `generate_data.py`
 
-Python wrapper around `bin/generate_data`: optional compile, JSON config, Parquet self-play.
+Python wrapper around **`target/release/generate_data`**: optional **`cargo build --release -p big2-datagen`** (`--compile`), JSON config, Parquet self-play.
 
-**Prerequisites:** C++17, OpenMP, Apache Arrow / Parquet (`libarrow-dev`, `libparquet-dev` on Debian/Ubuntu).
+**Prerequisites:** **Rust / Cargo** (same as the workspace). Parquet is handled by the Rust `parquet` crate; no system Arrow install is required.
 
 ```bash
-make generate_data
+make release
 python3 scripts/generate_data.py scripts/configs/greedy.json
 python3 scripts/generate_data.py scripts/configs/greedy.json --compile
 ```
 
-**Config:** `player`, `num_games`, and (for Parquet) `output_path` plus `game_features` / `turn_features`. Optional: `threads`, `seed`, `samples_md_path`. See `scripts/configs/greedy.json`, `test.json`.
+**Config:** `player`, `num_games`, optional `player_param`, and (for Parquet) `output_path` plus `game_features` / `turn_features`. Optional: `threads`, `seed`, `samples_md_path`. See `scripts/configs/greedy.json`, `test.json`.
 
 **Output:** `<output_path>_game.parquet` and `<output_path>_turn.parquet`.
 
@@ -62,9 +64,9 @@ Set `samples_md_path` in the config if you want anomaly game histories from `gen
 
 ## `run_eval_match.sh` / `run_eval_match.py`
 
-Head-to-head evaluation via `bin/eval_match`: **paired deals** (both seats per deal), **Wilson 95% CI**, full log + optional `scripts/analyze_eval_match.py` summary.
+Head-to-head evaluation via **`target/release/eval_match`**: **paired deals** (both seats per deal), **Wilson 95% CI**, full log + optional `scripts/analyze_eval_match.py` summary.
 
-**Prerequisites:** `make eval_match` (no Arrow).
+**Prerequisites:** **`make release`** (or pass **`--compile`** so the script runs `cargo build --release -p big2-datagen`).
 
 ```bash
 ./scripts/run_eval_match.sh
@@ -78,7 +80,7 @@ python3 scripts/run_eval_match.py scripts/configs/eval_match.json --compile
 
 ```bash
 python3 scripts/analyze_eval_match.py --file analysis/eval_match_last.log
-./bin/eval_match ... 2>&1 | python3 scripts/analyze_eval_match.py
+./target/release/eval_match ... 2>&1 | python3 scripts/analyze_eval_match.py
 ```
 
 ---
@@ -91,9 +93,9 @@ Parses `eval_match` stdout and prints a short markdown-style summary (wins, CI, 
 
 ## `round_robin_eval.py` / `run_round_robin.sh`
 
-**Round robin:** for each unordered pair of players, runs `bin/eval_match` once (same fairness as a single head-to-head). Prints a **win-rate matrix** and **aggregate standings**.
+**Round robin:** for each unordered pair of players, runs **`target/release/eval_match`** once (same fairness as a single head-to-head). Prints a **win-rate matrix** and **aggregate standings**.
 
-**Prerequisites:** `make eval_match`
+**Prerequisites:** **`make release`** (or **`--compile`**).
 
 ```bash
 ./scripts/run_round_robin.sh
@@ -112,14 +114,14 @@ python3 scripts/round_robin_eval.py scripts/configs/round_robin_example.json --q
 
 ## `tablebase_opp1_gen.cpp`
 
-Source for the opponent-has-one-card tablebase **precompute** (not built by `generate_data`).
+Source for the opponent-has-one-card tablebase **precompute** (standalone C++; not part of the Rust workspace). Built from the root `Makefile`:
 
 ```bash
 make tablebase_opp1_gen
 ./bin/tablebase_opp1_gen [out.bin] [samples.txt]
 ```
 
-See root `README.md` and `src/core/tablebase_opp1.*`.
+Runtime loader: **`crates/core`** (reads `data/tablebase_opp1.bin` when present).
 
 ---
 

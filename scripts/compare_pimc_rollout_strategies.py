@@ -184,7 +184,8 @@ def main() -> None:
     if args.compile:
         subprocess.run(
             ["cargo", "build", "--release", "-p", "big2-datagen"],
-            cwd=str(REPO_ROOT), check=True,
+            cwd=str(REPO_ROOT),
+            check=True,
         )
 
     exe = REPO_ROOT / "target" / "release" / "eval_match"
