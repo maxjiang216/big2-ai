@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use big2_players::make_player;
 use big2_simulation::coordinator::{run_paired_deals, PlayerFactory};
+use rayon;
 
 struct WilsonCI { lo: f64, hi: f64 }
 
@@ -28,6 +29,7 @@ Options:
   --p1-param <f>     Parameter for player B (default: 0.0)
   --deals <N>        Number of unique deals; total games = 2*N (required)
   --seed <S>         Base RNG seed (default: 42)
+  --threads <N>      Rayon worker threads (default: auto)
 
 Example:
   {prog} --p0 greedy --p1 random --deals 10000 --seed 42"
@@ -51,6 +53,7 @@ fn main() {
     let mut p1_param = 0.0f64;
     let mut num_deals: u32 = 0;
     let mut seed: u64 = 42;
+    let mut threads: Option<usize> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -62,6 +65,7 @@ fn main() {
             "--p1-param" => { i += 1; p1_param = args[i].parse().expect("float"); }
             "--deals"    => { i += 1; num_deals = args[i].parse().expect("integer"); }
             "--seed"     => { i += 1; seed = args[i].parse().expect("integer"); }
+            "--threads"  => { i += 1; threads = Some(args[i].parse().expect("integer")); }
             other => { eprintln!("Unknown argument: {other}"); print_usage(prog); std::process::exit(1); }
         }
         i += 1;
@@ -71,6 +75,10 @@ fn main() {
         eprintln!("Error: --p0, --p1, and --deals are required");
         print_usage(prog);
         std::process::exit(1);
+    }
+
+    if let Some(n) = threads {
+        rayon::ThreadPoolBuilder::new().num_threads(n).build_global().ok();
     }
 
     let label0 = player_label(&p0_name, p0_param);

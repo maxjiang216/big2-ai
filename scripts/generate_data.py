@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate training data from self-play games (bin/generate_data → Parquet).
+Generate training data from self-play games (target/release/generate_data → Parquet).
 
 Run from anywhere; paths are resolved relative to the repository root (parent of
 this scripts/ directory).
@@ -10,7 +10,7 @@ Usage:
     python scripts/generate_data.py scripts/configs/greedy.json --compile
 
 JSON fields:
-    player_param — optional float passed to ``make_player_factory`` (e.g. pimc N=20).
+    player_param — optional float passed to make_player (e.g. pimc N=20).
 """
 
 import argparse
@@ -23,25 +23,25 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def compile_binary(verbose=True):
-    """Compile the generate_data binary (make target: generate_data)."""
+    """Build the Rust generate_data binary (cargo build --release)."""
     if verbose:
-        print("Compiling generate_data binary...")
+        print("Building generate_data binary (cargo build --release)...")
 
     result = subprocess.run(
-        ["make", "generate_data"],
+        ["cargo", "build", "--release", "-p", "big2-datagen"],
         cwd=str(REPO_ROOT),
         capture_output=not verbose,
         text=True,
     )
 
     if result.returncode != 0:
-        print("Compilation failed!")
+        print("Build failed!")
         if not verbose:
             print(result.stderr)
         sys.exit(1)
 
     if verbose:
-        print("Compilation successful.\n")
+        print("Build successful.\n")
 
 
 def load_config(config_path):
@@ -70,7 +70,7 @@ def load_config(config_path):
 def run_datagen(config, binary_path=None):
     """Run the data generation binary with the given config."""
     if binary_path is None:
-        binary_path = REPO_ROOT / "bin" / "generate_data"
+        binary_path = REPO_ROOT / "target" / "release" / "generate_data"
     else:
         binary_path = Path(binary_path)
 
@@ -114,13 +114,6 @@ def run_datagen(config, binary_path=None):
 
     if "player_param" in config:
         cmd.extend(["--player-param", str(config["player_param"])])
-
-    if "samples_md_path" in config and config["samples_md_path"]:
-        p = Path(config["samples_md_path"])
-        if not p.is_absolute():
-            p = REPO_ROOT / p
-        p.parent.mkdir(parents=True, exist_ok=True)
-        cmd.extend(["--samples-md", str(p)])
 
     if out_raw and "game_features" not in config and "turn_features" not in config:
         print(
@@ -189,7 +182,7 @@ Examples:
 
     args = parser.parse_args()
 
-    binary = REPO_ROOT / "bin" / "generate_data"
+    binary = REPO_ROOT / "target" / "release" / "generate_data"
 
     if args.compile or (not binary.exists() and not args.no_compile):
         compile_binary()

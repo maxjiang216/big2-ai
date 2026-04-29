@@ -102,14 +102,16 @@ def _run_eval_match(
 
 
 def _compile_eval_match(root: str) -> None:
-    r = subprocess.run(["make", "eval_match"], cwd=root)
+    r = subprocess.run(
+        ["cargo", "build", "--release", "-p", "big2-datagen"], cwd=root
+    )
     if r.returncode != 0:
         sys.exit(r.returncode)
 
 
 def main() -> int:
     root = _repo_root()
-    exe = os.path.join(root, "bin", "eval_match")
+    exe = os.path.join(root, "target", "release", "eval_match")
 
     ap = argparse.ArgumentParser(
         description="Compare self-play speed: greedy vs tree_greedy (d10, d15 by default).",
@@ -135,7 +137,7 @@ def main() -> int:
         help="Tree max_depth values to test (loads data/tree_model_d{N}.txt). Default: 10 15.",
     )
     ap.add_argument(
-        "--compile", action="store_true", help="Run `make eval_match` before timing."
+        "--compile", action="store_true", help="Run cargo build --release before timing."
     )
     ap.add_argument(
         "--show-eval-output",
@@ -148,7 +150,7 @@ def main() -> int:
         _compile_eval_match(root)
 
     if not os.path.isfile(exe):
-        print("error: bin/eval_match not found; run: make eval_match", file=sys.stderr)
+        print("error: target/release/eval_match not found; run: cargo build --release -p big2-datagen", file=sys.stderr)
         return 1
 
     if args.deals <= 0:

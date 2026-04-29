@@ -182,12 +182,16 @@ def main() -> None:
     n = float(args.pimc_n)
 
     if args.compile:
-        subprocess.run(["make", "eval_match"], cwd=str(REPO_ROOT), check=True)
+        subprocess.run(
+            ["cargo", "build", "--release", "-p", "big2-datagen"],
+            cwd=str(REPO_ROOT), check=True,
+        )
 
-    exe = REPO_ROOT / "bin" / "eval_match"
+    exe = REPO_ROOT / "target" / "release" / "eval_match"
     if not exe.is_file() or not os.access(exe, os.X_OK):
         print(
-            f"Missing or not executable: {exe}; run: make eval_match", file=sys.stderr
+            f"Missing or not executable: {exe}; run: cargo build --release -p big2-datagen",
+            file=sys.stderr,
         )
         sys.exit(1)
 

@@ -13,8 +13,8 @@
 #   --depth N          Tree max_depth to train/export (default: 10)
 #   --min-samples-leaf N   Passed to train_tree_greedy.py (default: 100)
 #   --cv-folds N       CV folds for training (default: 3)
-#   --compile          Run `make generate_data eval_match` first
-#   --skip-data        Skip bin/generate_data
+#   --compile          Run cargo build --release first
+#   --skip-data        Skip target/release/generate_data
 #   --skip-train       Skip train_tree_greedy.py
 #   --skip-export      Skip export_tree_cpp.py
 #   --skip-report      Skip generate_tree_report.py
@@ -99,7 +99,7 @@ Usage: pipeline_tree_greedy.sh [options]
   --depth N              Tree max_depth (default: 15)
   --min-samples-leaf N   (default: 100)
   --cv-folds N           (default: 3)
-  --compile              Run make generate_data eval_match first
+  --compile              Run cargo build --release first
   --skip-data / --skip-train / --skip-export / --skip-report
   CONDA_ENV                Default: big2. Set empty to use system python.
 
@@ -121,16 +121,16 @@ echo "  CONDA_ENV=${CONDA_ENV:-<empty: use system python>}"
 echo
 
 if [[ "$DO_COMPILE" -eq 1 ]]; then
-  echo ">>> make generate_data eval_match"
-  make generate_data eval_match
+  echo ">>> cargo build --release -p big2-datagen"
+  cargo build --release -p big2-datagen
   echo
 fi
 
 if [[ "$SKIP_DATA" -eq 0 ]]; then
   echo ">>> Turn feature list (from analysis/train_tree_greedy.py)"
   FEATS="$(run_python -c "import sys; sys.path.insert(0,'analysis'); import train_tree_greedy as t; print(t.TURN_FEATURES_FOR_DATAGEN)")"
-  echo ">>> bin/generate_data --player greedy --games $GAMES --output $OUTPUT_PREFIX"
-  bin/generate_data \
+  echo ">>> target/release/generate_data --player greedy --games $GAMES --output $OUTPUT_PREFIX"
+  target/release/generate_data \
     --player greedy \
     --games "$GAMES" \
     --output "$OUTPUT_PREFIX" \

@@ -6,6 +6,7 @@ use big2_datagen::parquet::export_parquet;
 use big2_features::registry::{create_feature, Feature};
 use big2_players::make_player;
 use big2_simulation::coordinator::{run_games_parallel, PlayerFactory};
+use rayon;
 
 fn print_usage(prog: &str) {
     eprintln!(
@@ -19,6 +20,7 @@ Options:
   --turn-features <f1,f2>  Comma-separated turn-level feature names
   --seed <S>               RNG seed (default: 42)
   --player-param <f>       Extra parameter for the player (default: 0.0)
+  --threads <N>            Rayon worker threads (default: auto)
 
 Available features (game-level):
   outcome, length, start_legal_moves, tb_hits, tb_case1, tb_case2,
@@ -59,6 +61,7 @@ fn main() {
     let mut game_feat_names: Vec<String> = Vec::new();
     let mut turn_feat_names: Vec<String> = Vec::new();
     let mut seed: u64 = 42;
+    let mut threads: Option<usize> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -71,6 +74,7 @@ fn main() {
             "--turn-features" => { i += 1; turn_feat_names = split_csv(&args[i]); }
             "--seed"          => { i += 1; seed = args[i].parse().expect("--seed: integer"); }
             "--player-param"  => { i += 1; player_param = args[i].parse().expect("--player-param: float"); }
+            "--threads"       => { i += 1; threads = Some(args[i].parse().expect("--threads: integer")); }
             other => { eprintln!("Unknown argument: {other}"); print_usage(prog); std::process::exit(1); }
         }
         i += 1;
@@ -80,6 +84,10 @@ fn main() {
         eprintln!("Error: --player and --games are required");
         print_usage(prog);
         std::process::exit(1);
+    }
+
+    if let Some(n) = threads {
+        rayon::ThreadPoolBuilder::new().num_threads(n).build_global().ok();
     }
 
     // Resolve features

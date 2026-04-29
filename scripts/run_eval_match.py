@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Run head-to-head evaluation (bin/eval_match), save a log, print raw output,
-then run analyze_eval_match on the same text.
+Run head-to-head evaluation (target/release/eval_match), save a log, print raw
+output, then run analyze_eval_match on the same text.
 
 Usage:
   python scripts/run_eval_match.py scripts/configs/eval_match.json
@@ -21,20 +21,20 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def compile_binary(verbose: bool = True) -> None:
     if verbose:
-        print("Compiling eval_match binary...")
+        print("Building eval_match binary (cargo build --release)...")
     result = subprocess.run(
-        ["make", "eval_match"],
+        ["cargo", "build", "--release", "-p", "big2-datagen"],
         cwd=str(REPO_ROOT),
         capture_output=not verbose,
         text=True,
     )
     if result.returncode != 0:
-        print("Compilation failed!", file=sys.stderr)
+        print("Build failed!", file=sys.stderr)
         if not verbose:
             print(result.stderr, file=sys.stderr)
         sys.exit(1)
     if verbose:
-        print("Compilation successful.\n")
+        print("Build successful.\n")
 
 
 def load_config(config_path: str) -> dict:
@@ -55,7 +55,7 @@ def load_config(config_path: str) -> dict:
 
 
 def build_cmd(config: dict) -> list[str]:
-    binary = REPO_ROOT / "bin" / "eval_match"
+    binary = REPO_ROOT / "target" / "release" / "eval_match"
     cmd = [
         str(binary),
         "--p0",
@@ -126,7 +126,7 @@ Example:
     )
     args = parser.parse_args()
 
-    binary = REPO_ROOT / "bin" / "eval_match"
+    binary = REPO_ROOT / "target" / "release" / "eval_match"
     if args.compile or (not binary.exists() and not args.no_compile):
         compile_binary()
     elif not binary.exists():

@@ -42,20 +42,20 @@ WINS_RE = re.compile(
 
 def compile_binary(verbose: bool = True) -> None:
     if verbose:
-        print("Compiling eval_match binary...", flush=True)
+        print("Building eval_match binary (cargo build --release)...", flush=True)
     result = subprocess.run(
-        ["make", "eval_match"],
+        ["cargo", "build", "--release", "-p", "big2-datagen"],
         cwd=str(REPO_ROOT),
         capture_output=not verbose,
         text=True,
     )
     if result.returncode != 0:
-        print("Compilation failed!", file=sys.stderr)
+        print("Build failed!", file=sys.stderr)
         if not verbose:
             print(result.stderr, file=sys.stderr)
         sys.exit(1)
     if verbose:
-        print("Compilation successful.\n", flush=True)
+        print("Build successful.\n", flush=True)
 
 
 def load_config(path: str | Path) -> dict:
@@ -114,7 +114,7 @@ def build_eval_cmd(
     threads: int | None,
 ) -> list[str]:
     cmd = [
-        str(REPO_ROOT / "bin" / "eval_match"),
+        str(REPO_ROOT / "target" / "release" / "eval_match"),
         "--p0",
         p0["type"],
         "--p1",
@@ -198,7 +198,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    binary = REPO_ROOT / "bin" / "eval_match"
+    binary = REPO_ROOT / "target" / "release" / "eval_match"
     if args.compile or (not binary.exists() and not args.no_compile):
         compile_binary()
     elif not binary.exists():
