@@ -1,0 +1,9 @@
+[package]
+name = "big2-simulation"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+big2-core = { path = "../core" }
+big2-players = { path = "../players" }
+rand = { version = "0.8", features = ["small_rng"] }

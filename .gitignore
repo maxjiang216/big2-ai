@@ -9,6 +9,9 @@ build/
 data/
 venv/
 
+# -------------------- Rust --------------------
+/target/
+
 # Object files
 *.o
 *.obj
