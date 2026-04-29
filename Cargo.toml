@@ -3,5 +3,7 @@ members = [
     "crates/core",
     "crates/players",
     "crates/simulation",
+    "crates/features",
+    "crates/datagen",
 ]
 resolver = "2"

@@ -1,0 +1,22 @@
+[package]
+name = "big2-datagen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+big2-core = { path = "../core" }
+big2-players = { path = "../players" }
+big2-simulation = { path = "../simulation" }
+big2-features = { path = "../features" }
+arrow = { version = "54", default-features = false, features = ["ipc"] }
+parquet = { version = "54", default-features = false, features = ["arrow"] }
+rand = { version = "0.8", features = ["small_rng"] }
+rayon = "1"
+
+[[bin]]
+name = "generate_data"
+path = "src/bin/generate_data.rs"
+
+[[bin]]
+name = "eval_match"
+path = "src/bin/eval_match.rs"

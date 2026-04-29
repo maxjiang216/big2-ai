@@ -19,7 +19,7 @@ TEST_CPP    := $(wildcard test/*.cpp)
 RESEARCH_BIN_NAMES := best_hand multi_comb play_probs count_turn_states
 RESEARCH_BINS      := $(addprefix $(BUILD_DIR)/research/,$(RESEARCH_BIN_NAMES))
 
-.PHONY: all clean dirs test_core coordinator generate_data eval_match pass_greedy_datagen move_agreement benchmark tablebase_opp1_gen research standards_init standards_configs help
+.PHONY: all clean dirs test_core coordinator generate_data eval_match pass_greedy_datagen move_agreement benchmark tablebase_opp1_gen research standards_init standards_configs export_greedy_games help
 
 all: help
 
@@ -161,6 +161,23 @@ $(BIN_DIR)/eval_match: $(EVALMATCH_OBJS)
 	@echo "✓ $(BIN_DIR)/eval_match"
 
 eval_match: dirs $(BIN_DIR)/eval_match
+
+# ============================================================================
+# bin/export_greedy_games — C++ golden file for Rust exact-match verification
+# ============================================================================
+
+$(BUILD_DIR)/src/datagen/export_greedy_games.o: src/datagen/export_greedy_games.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+EXPORT_GREEDY_OBJS := $(CORE_OBJS) \
+                      $(BUILD_DIR)/src/simulation/game_simulator.o \
+                      $(BUILD_DIR)/src/datagen/export_greedy_games.o
+
+$(BIN_DIR)/export_greedy_games: $(EXPORT_GREEDY_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ $(BIN_DIR)/export_greedy_games"
+
+export_greedy_games: dirs $(BIN_DIR)/export_greedy_games
 
 # ============================================================================
 # bin/pass_greedy_datagen — pass vs greedy labels from PIMC self-play (no Arrow)

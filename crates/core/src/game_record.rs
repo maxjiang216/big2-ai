@@ -74,6 +74,11 @@ impl GameRecord {
     pub fn initial_game(&self) -> &Game {
         &self.initial_game
     }
+
+    /// Player who won: the player who made the last move (emptied their hand).
+    pub fn winner(&self) -> usize {
+        self.turns.last().map(|t| t.current_player).unwrap_or(0)
+    }
 }
 
 pub fn tablebase_first_hit_stats(record: &GameRecord) -> TablebaseFirstHitStats {
