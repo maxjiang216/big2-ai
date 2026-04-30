@@ -1,0 +1,14 @@
+{
+  "initiative": {
+    "n_rows": 766,
+    "n_distinct_games": 120,
+    "turn_outcome_1": 471,
+    "turn_outcome_0": 295
+  },
+  "post_play": {
+    "n_rows": 2178,
+    "n_distinct_games": 120,
+    "turn_outcome_1": 1087,
+    "turn_outcome_0": 1091
+  }
+}

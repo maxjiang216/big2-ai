@@ -74,6 +74,8 @@ static bool label_one_turn(const TurnRecord &turn, int turn_idx, int game_idx,
   const Move last_mv = view.last_move();
 
   int pass_wins = 0, greedy_wins = 0;
+  std::vector<int> rollout_legal_scratch;
+  rollout_legal_scratch.reserve(32);
   for (int d = 0; d < num_dets; ++d) {
     const std::array<int, 13> opp_hand =
         sample_opponent_hand(my_hand, discard, opp_count, rng_det);
@@ -83,12 +85,14 @@ static bool label_one_turn(const TurnRecord &turn, int turn_idx, int game_idx,
 
     Game g_pass(hand0, hand1, discard, last_mv, cp);
     g_pass.apply_move(Move(kPASS));
-    pass_wins += policy_rollout(g_pass, cp, greedy_hand_eval, resample_redet, rng_det);
+    pass_wins += policy_rollout(g_pass, cp, greedy_hand_eval, resample_redet,
+                                rng_det, rollout_legal_scratch);
 
     Game g_gr(hand0, hand1, discard, last_mv, cp);
     g_gr.apply_move(greedy_mv);
     greedy_wins +=
-        policy_rollout(g_gr, cp, greedy_hand_eval, resample_redet, rng_det);
+        policy_rollout(g_gr, cp, greedy_hand_eval, resample_redet, rng_det,
+                       rollout_legal_scratch);
   }
 
   double pp = static_cast<double>(pass_wins) / static_cast<double>(num_dets);

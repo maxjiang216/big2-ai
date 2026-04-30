@@ -4,10 +4,18 @@
 #include "move.h"
 
 #include <array>
+#include <cstdint>
 #include <optional>
 #include <vector>
 
 #define LEGAL_MOVES_SIZE 468
+
+// kPASS precomputed legal table: set BUILD to true to populate maps at
+// MoveTables init; lookup still requires g_kpass_legal_max_cards > 0.
+inline constexpr bool KPASS_LEGAL_TABLE_BUILD = false;
+inline constexpr int KPASS_LEGAL_TABLE_MAX_CARDS_BUILT = 9;
+// Primary map holds [1, KPASS_LEGAL_PRIMARY_MAX_CARDS]; 8–9 use kpass_legal_hi.
+inline constexpr int KPASS_LEGAL_PRIMARY_MAX_CARDS = 7;
 
 const int kPASS = 0;
 const int kSINGLE_START = 1;
@@ -62,18 +70,27 @@ inline bool hand_is_only_singles(const std::array<int, 13> &hand) {
 char rankToChar(int rank);
 
 std::vector<int> compute_legal_moves(const std::array<int, 13> &hand,
-                                     const Move &last_move);
+                                     int last_move_id);
+
+// Fills `out` with the same ids as compute_legal_moves (after clear()). Reuses
+// `out` capacity to avoid per-call allocations on hot paths.
+void compute_legal_moves_into(const std::array<int, 13> &hand, int last_move_id,
+                              std::vector<int> &out);
+
+// 0 = never use kPASS table (default while KPASS_LEGAL_TABLE_BUILD is false).
+// Otherwise cap by sum(hand) <= this value (max KPASS_LEGAL_TABLE_MAX_CARDS_BUILT).
+extern int g_kpass_legal_max_cards;
+
+// kPASS straight-family move ids only: threshold bitmasks hs (>=1 card), hp (>=2),
+// ht (>=3) per rank. Clears `out` then appends ids in rolling-scan order.
+void straight_moves_for_pass_masks_into(uint16_t hs, uint16_t hp, uint16_t ht,
+                                          std::vector<int> &out);
 
 std::vector<int> compute_possible_moves(const std::array<int, 13> &player_hand,
                                         const std::array<int, 13> &discard_pile,
                                         int opponent_card_count,
-                                        const Move &last_move,
+                                        int last_move_id,
                                         bool exclude_bombs);
-
-// For each non-pass move_id, the list of move_ids that can beat it
-// (same combination type with higher rank, or any bomb).
-// Computed once on first call; O(LEGAL_MOVES_SIZE^2) pre-processing.
-const std::vector<std::vector<int>> &get_beating_moves();
 
 // True if the opponent might still hold at least one response to move_id,
 // given our hand, the discard pile, and the opponent's known card count.

@@ -12,7 +12,8 @@ Game::Game() : hands_{}, hand_size_{0, 0}, current_player_(0) {}
 Game::Game(std::array<int, 13> hand0, std::array<int, 13> hand1,
            std::array<int, 13> discard, Move last_move, int current_player)
     : hands_({hand0, hand1}), discard_pile_(discard),
-      current_player_(current_player), last_move_(last_move) {
+      current_player_(current_player), last_move_(last_move),
+      last_move_id_(encodeMove(last_move)) {
   hand_size_[0] = 0;
   for (int r = 0; r < 13; ++r) hand_size_[0] += hand0[r];
   hand_size_[1] = 0;
@@ -84,11 +85,18 @@ void Game::apply_move(int move_id) {
   assert(hand_size_[current_player_] >= 0);
 
   last_move_ = Move(move_id);
+  last_move_id_ = move_id;
   current_player_ = 1 - current_player_;
 }
 
+int Game::last_move_id() const { return last_move_id_; }
+
 std::vector<int> Game::get_legal_moves() const {
-  return compute_legal_moves(hands_[current_player_], last_move_);
+  return compute_legal_moves(hands_[current_player_], last_move_id_);
+}
+
+void Game::get_legal_moves_into(std::vector<int> &out) const {
+  compute_legal_moves_into(hands_[current_player_], last_move_id_, out);
 }
 
 std::ostream &operator<<(std::ostream &os, const Game &game) {

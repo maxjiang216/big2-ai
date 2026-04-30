@@ -27,6 +27,7 @@ help:
 	@echo "Targets:"
 	@echo "  make test_core            - unit tests (no Arrow)"
 	@echo "  make benchmark            - perf benchmark binary (no Arrow)"
+	@echo "    Tip: CXXFLAGS+='-DBIG2_PROFILE_LEGAL_MOVES_SECTIONS' for Callgrind sections"
 	@echo "  make coordinator          - coordinator + Parquet objects (needs libarrow)"
 	@echo "  make generate_data        - self-play + Parquet + stats (needs libarrow)"
 	@echo "  make eval_match           - head-to-head evaluation binary (no Arrow)"

@@ -139,7 +139,8 @@ inline bool confident_leader_hoeffding(const std::vector<int> &wins, int n, int 
 // ---------------------------------------------------------------------------
 template <typename EvalFn>
 inline int policy_rollout(Game g, int my_player, EvalFn eval_fn,
-                          bool resample_opponent_each_turn, std::mt19937 &rng) {
+                          bool resample_opponent_each_turn, std::mt19937 &rng,
+                          std::vector<int> &legal_scratch) {
   while (!g.is_over()) {
     int cp = g.current_player();
     if (resample_opponent_each_turn && cp != my_player) {
@@ -162,7 +163,8 @@ inline int policy_rollout(Game g, int my_player, EvalFn eval_fn,
     if (tb.move) {
       g.apply_move(*tb.move);
     } else {
-      Move best = greedy_best(pg, pg.get_legal_moves(), eval_fn);
+      pg.get_legal_moves_into(legal_scratch);
+      Move best = greedy_best(pg, legal_scratch, eval_fn);
       g.apply_move(best);
     }
   }
@@ -175,7 +177,8 @@ template <typename EvalFn>
 inline int policy_rollout_pass_aware(Game g, int my_player, EvalFn eval_fn,
                                      LinearEvaluator &pass_model,
                                      bool resample_opponent_each_turn,
-                                     std::mt19937 &rng) {
+                                     std::mt19937 &rng,
+                                     std::vector<int> &legal_scratch) {
   while (!g.is_over()) {
     int cp = g.current_player();
     if (resample_opponent_each_turn && cp != my_player) {
@@ -198,12 +201,12 @@ inline int policy_rollout_pass_aware(Game g, int my_player, EvalFn eval_fn,
     if (tb.move) {
       g.apply_move(*tb.move);
     } else {
-      const std::vector<int> legal = pg.get_legal_moves();
-      if (voluntary_pass_legal(legal) && pass_model.loaded() &&
+      pg.get_legal_moves_into(legal_scratch);
+      if (voluntary_pass_legal(legal_scratch) && pass_model.loaded() &&
           pass_model.predict(pg) > 0.0)
         g.apply_move(Move(kPASS));
       else
-        g.apply_move(greedy_best(pg, legal, eval_fn));
+        g.apply_move(greedy_best(pg, legal_scratch, eval_fn));
     }
   }
   return g.get_winner() == my_player ? 1 : 0;
@@ -216,43 +219,47 @@ inline int policy_rollout_pass_aware(Game g, int my_player, EvalFn eval_fn,
 // If adaptive: loop up to n_max; after n_min dets, stop early when
 // confident_leader_hoeffding fires. If not adaptive: exactly n_max dets.
 //
-// rollout_fn: (Game, my_player, eval_fn, resample_opponent_each_turn, rng) -> win {0,1}
+// rollout_fn: (Game, my_player, eval_fn, resample_opponent_each_turn, rng,
+//              legal_scratch) -> win {0,1}
 template <typename EvalFn, typename RolloutFn>
 inline Move pimc_select_move_impl(const PartialGame &game_, int player_num_,
                                   int n_max, int n_min, bool adaptive,
                                   double delta, std::mt19937 &rng_,
                                   EvalFn eval_fn, bool resample_opponent_each_turn,
-                                  RolloutFn rollout_fn) {
-  const std::vector<int> legal = game_.get_legal_moves();
+                                  RolloutFn rollout_fn,
+                                  std::vector<int> &legal_work,
+                                  std::vector<int> &candidates_work) {
+  game_.get_legal_moves_into(legal_work);
 
-  std::vector<int> candidates;
-  candidates.reserve(legal.size());
+  candidates_work.clear();
+  candidates_work.reserve(legal_work.size());
   bool has_pass = false;
-  for (int mid : legal) {
+  for (int mid : legal_work) {
     if (Move(mid).combination == Move::Combination::kPass)
       has_pass = true;
     else
-      candidates.push_back(mid);
+      candidates_work.push_back(mid);
   }
 
-  if (candidates.empty())
+  if (candidates_work.empty())
     return Move(kPASS);
 
-  [[maybe_unused]] const bool voluntary_ctx = has_pass && !candidates.empty();
+  [[maybe_unused]] const bool voluntary_ctx =
+      has_pass && !candidates_work.empty();
 #if BIG2_PIMC_STATS
   if (voluntary_ctx)
     pimc_global_stats().voluntary_pass_opportunities += 1;
 #endif
 
   if (has_pass)
-    candidates.push_back(kPASS);
+    candidates_work.push_back(kPASS);
 
   const std::array<int, 13> my_hand = game_.player_hand();
   const std::array<int, 13> discard = game_.discard_pile();
   const int opp_count = game_.opponent_hand_size();
   const Move last_mv = game_.last_move();
 
-  const int M = static_cast<int>(candidates.size());
+  const int M = static_cast<int>(candidates_work.size());
   std::vector<int> wins(M, 0);
 
 #if BIG2_PIMC_STATS
@@ -271,9 +278,9 @@ inline Move pimc_select_move_impl(const PartialGame &game_, int player_num_,
 
     for (int ci = 0; ci < M; ++ci) {
       Game g(hand0, hand1, discard, last_mv, player_num_);
-      g.apply_move(candidates[ci]);
+      g.apply_move(candidates_work[ci]);
       wins[ci] += rollout_fn(g, player_num_, eval_fn,
-                             resample_opponent_each_turn, rng_);
+                             resample_opponent_each_turn, rng_, legal_work);
     }
 
     dets_used = det + 1;
@@ -301,17 +308,18 @@ inline Move pimc_select_move_impl(const PartialGame &game_, int player_num_,
   for (int ci = 1; ci < M; ++ci) {
     if (wins[ci] > wins[best_ci])
       best_ci = ci;
-    else if (wins[ci] == wins[best_ci] && candidates[ci] < candidates[best_ci])
+    else if (wins[ci] == wins[best_ci] &&
+             candidates_work[ci] < candidates_work[best_ci])
       best_ci = ci;
   }
 
 #if BIG2_PIMC_STATS
   if (voluntary_ctx &&
-      Move(candidates[best_ci]).combination == Move::Combination::kPass)
+      Move(candidates_work[best_ci]).combination == Move::Combination::kPass)
     pimc_global_stats().voluntary_pass_chosen += 1;
 #endif
 
-  return Move(candidates[best_ci]);
+  return Move(candidates_work[best_ci]);
 }
 
 // ---------------------------------------------------------------------------
@@ -340,9 +348,11 @@ protected:
     return pimc_select_move_impl(
         game_, player_num_, n_max_, n_min_, adaptive_, delta_, rng_, greedy_hand_eval,
         resample_opponent_each_turn_,
-        [](Game g, int my_player, const auto &eval_fn, bool redet, std::mt19937 &rng) {
-          return policy_rollout(g, my_player, eval_fn, redet, rng);
-        });
+        [](Game g, int my_player, const auto &eval_fn, bool redet, std::mt19937 &rng,
+           std::vector<int> &legal_scratch) {
+          return policy_rollout(g, my_player, eval_fn, redet, rng, legal_scratch);
+        },
+        legal_work_, candidates_work_);
   }
 
 private:
@@ -353,6 +363,8 @@ private:
   bool resample_opponent_each_turn_;
   int player_num_{0};
   std::mt19937 rng_;
+  std::vector<int> legal_work_;
+  std::vector<int> candidates_work_;
 };
 
 // ---------------------------------------------------------------------------
@@ -391,9 +403,11 @@ protected:
         game_, player_num_, n_max_, n_min_, adaptive_, delta_, rng_,
         [this](const PartialGame &sim) { return evaluator_.predict(sim); },
         resample_opponent_each_turn_,
-        [](Game g, int my_player, const auto &eval_fn, bool redet, std::mt19937 &rng) {
-          return policy_rollout(g, my_player, eval_fn, redet, rng);
-        });
+        [](Game g, int my_player, const auto &eval_fn, bool redet, std::mt19937 &rng,
+           std::vector<int> &legal_scratch) {
+          return policy_rollout(g, my_player, eval_fn, redet, rng, legal_scratch);
+        },
+        legal_work_, candidates_work_);
   }
 
 private:
@@ -405,6 +419,8 @@ private:
   int player_num_{0};
   TreeEvaluator evaluator_;
   std::mt19937 rng_;
+  std::vector<int> legal_work_;
+  std::vector<int> candidates_work_;
 };
 
 // ---------------------------------------------------------------------------
@@ -443,9 +459,11 @@ protected:
         game_, player_num_, n_max_, n_min_, adaptive_, delta_, rng_,
         [this](const PartialGame &sim) { return evaluator_.predict(sim); },
         resample_opponent_each_turn_,
-        [](Game g, int my_player, const auto &eval_fn, bool redet, std::mt19937 &rng) {
-          return policy_rollout(g, my_player, eval_fn, redet, rng);
-        });
+        [](Game g, int my_player, const auto &eval_fn, bool redet, std::mt19937 &rng,
+           std::vector<int> &legal_scratch) {
+          return policy_rollout(g, my_player, eval_fn, redet, rng, legal_scratch);
+        },
+        legal_work_, candidates_work_);
   }
 
 private:
@@ -457,6 +475,8 @@ private:
   int player_num_{0};
   LinearEvaluator evaluator_;
   std::mt19937 rng_;
+  std::vector<int> legal_work_;
+  std::vector<int> candidates_work_;
 };
 
 // ---------------------------------------------------------------------------
@@ -497,10 +517,11 @@ protected:
         game_, player_num_, n_max_, n_min_, adaptive_, delta_, rng_, greedy_hand_eval,
         resample_opponent_each_turn_,
         [this](Game g, int my_player, const auto &eval_fn, bool redet,
-               std::mt19937 &rng) {
+               std::mt19937 &rng, std::vector<int> &legal_scratch) {
           return policy_rollout_pass_aware(g, my_player, eval_fn, pass_model_, redet,
-                                           rng);
-        });
+                                           rng, legal_scratch);
+        },
+        legal_work_, candidates_work_);
   }
 
 private:
@@ -512,6 +533,8 @@ private:
   int player_num_{0};
   LinearEvaluator pass_model_;
   std::mt19937 rng_;
+  std::vector<int> legal_work_;
+  std::vector<int> candidates_work_;
 };
 
 #endif

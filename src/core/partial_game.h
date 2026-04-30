@@ -18,6 +18,7 @@ public:
   void apply_move(const Move &move);
 
   std::vector<int> get_legal_moves() const;
+  void get_legal_moves_into(std::vector<int> &out) const;
   std::vector<int> get_possible_moves() const;
   std::vector<int> get_possible_moves_not_bomb() const;
 
@@ -46,6 +47,7 @@ private:
   int opponent_card_count_{16};
   std::array<int, 13> discard_pile_{};
   Move last_move_{Move::Combination::kPass};
+  int last_move_id_{0}; // 0 == kPASS
 
   friend std::ostream &operator<<(std::ostream &, const PartialGame &);
 };
