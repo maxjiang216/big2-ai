@@ -60,6 +60,18 @@ static int run_paired_deal(unsigned int deal_seed,
   return a_wins;
 }
 
+// One full game per index; RNG state starts at seed+idx (distinct deals and lines).
+static int run_independent_game(unsigned int game_seed, PlayerFactory &factory_p0,
+                                PlayerFactory &factory_p1) {
+  std::mt19937 rng(game_seed);
+  auto p0 = factory_p0.create_player();
+  auto p1 = factory_p1.create_player();
+  GameSimulator sim(std::move(p0), std::move(p1), rng);
+  GameRecord rec = sim.run();
+  int winner = rec.game().get_winner();
+  return (winner == 0) ? 1 : 0;
+}
+
 // ============================================================================
 // CLI helpers
 // ============================================================================
@@ -72,7 +84,9 @@ static void print_usage(const char *prog) {
       << "  --p0-param <f>       Parameter for player A (default: 0.0)\n"
       << "  --p1 <name>          Player B type (required)\n"
       << "  --p1-param <f>       Parameter for player B (default: 0.0)\n"
-      << "  --deals <N>          Number of unique deals (total games = 2*N) (required)\n"
+      << "  --deals <N>          Paired evaluation: unique deals (total games = 2*N)\n"
+      << "  --games <N>          Independent full games per idx (RNG seed+N each)\n"
+      << "                         Mutually exclusive with --deals (one is required).\n"
       << "  --seed <S>           Base RNG seed (default: random)\n"
       << "  --threads <T>        Worker threads (default: hardware - 2)\n"
       << "\nAvailable players: random, greedy, greedy_random, greedy_random_pass, greedy_no_bomb,\n"
@@ -115,6 +129,7 @@ int main(int argc, char **argv) {
   std::string p0_name, p1_name;
   double p0_param = 0.0, p1_param = 0.0;
   int num_deals = 0;
+  int num_independent_games = 0;
   unsigned int seed = std::random_device{}();
   int num_threads = std::max(1u, std::thread::hardware_concurrency() - 2);
 
@@ -133,6 +148,8 @@ int main(int argc, char **argv) {
       p1_param = std::stod(argv[++i]);
     else if (arg == "--deals" && i + 1 < argc)
       num_deals = std::stoi(argv[++i]);
+    else if (arg == "--games" && i + 1 < argc)
+      num_independent_games = std::stoi(argv[++i]);
     else if (arg == "--seed" && i + 1 < argc)
       seed = static_cast<unsigned int>(std::stoul(argv[++i]));
     else if (arg == "--threads" && i + 1 < argc)
@@ -144,26 +161,49 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (p0_name.empty() || p1_name.empty() || num_deals <= 0) {
-    std::cerr << "Error: --p0, --p1, and --deals are required\n\n";
+  bool paired = num_deals > 0;
+  bool independent = num_independent_games > 0;
+  if (paired && independent) {
+    std::cerr << "Error: use only one of --deals or --games\n\n";
+    print_usage(argv[0]);
+    return 1;
+  }
+  if (p0_name.empty() || p1_name.empty() || (!paired && !independent)) {
+    std::cerr << "Error: --p0, --p1, and exactly one of --deals or --games are required\n\n";
+    print_usage(argv[0]);
+    return 1;
+  }
+  if (paired && num_deals <= 0) {
+    std::cerr << "Error: --deals must be positive\n\n";
+    print_usage(argv[0]);
+    return 1;
+  }
+  if (independent && num_independent_games <= 0) {
+    std::cerr << "Error: --games must be positive\n\n";
     print_usage(argv[0]);
     return 1;
   }
 
   std::string label0 = player_label(p0_name, p0_param);
   std::string label1 = player_label(p1_name, p1_param);
-  long total_games = 2L * num_deals;
+  long total_games = paired ? (2L * num_deals) : static_cast<long>(num_independent_games);
+  const int work_units = paired ? num_deals : num_independent_games;
 
-  std::cout << "\n=== Eval Match: " << label0 << " vs " << label1 << " ===\n"
-            << "Deals:   " << num_deals << "  |  Total games: " << total_games << "\n"
-            << "Seed:    " << seed << "\n"
+  std::cout << "\n=== Eval Match: " << label0 << " vs " << label1 << " ===\n";
+  if (paired) {
+    std::cout << "Mode: paired deals — deals " << num_deals << "  |  total games " << total_games
+              << "\n";
+  } else {
+    std::cout << "Mode: independent games — games " << num_independent_games << "\n";
+  }
+  std::cout << "Seed:    " << seed << "\n"
             << "Threads: " << num_threads << "\n\n";
 
   // Each thread gets factories seeded differently to avoid seed collisions
   // across threads (factories increment seeds per player created).
   // We give thread t an offset of t * 1000003 from the base seed.
-  std::atomic<int> next_deal{0};
-  std::atomic<long> a_wins_total{0};
+  std::atomic<int> next_unit{0};
+  std::atomic<long> aggregate_wins{0};
   std::atomic<long> deals_p0_sweep{0};
   std::atomic<long> deals_split{0};
   std::atomic<long> deals_p1_sweep{0};
@@ -173,32 +213,35 @@ int main(int argc, char **argv) {
   std::vector<std::thread> workers;
   workers.reserve(num_threads);
   for (int t = 0; t < num_threads; ++t) {
-    workers.emplace_back([&, t]() {
+    workers.emplace_back([&, paired, t]() {
       // Per-thread factories with distinct seeds so player RNGs don't overlap.
       unsigned int thread_seed = seed + static_cast<unsigned int>(t) * 1000003u;
       auto fa = make_player_factory(p0_name, p0_param, thread_seed);
       auto fb = make_player_factory(p1_name, p1_param, thread_seed + 500009u);
       if (!fa || !fb) return;
 
-      int deal_idx;
-      long local_wins = 0;
+      int idx;
+      long local_aggregate = 0;
       long local_p0_sweep = 0;
       long local_split = 0;
       long local_p1_sweep = 0;
-      while ((deal_idx = next_deal.fetch_add(1)) < num_deals) {
-        // Deal seed is deterministic from the global seed + deal index so
-        // that every thread arrives at the same card distribution for deal i.
-        unsigned int deal_seed = seed + static_cast<unsigned int>(deal_idx);
-        int r = run_paired_deal(deal_seed, *fa, *fb);
-        local_wins += r;
-        if (r == 2)
-          ++local_p0_sweep;
-        else if (r == 1)
-          ++local_split;
-        else
-          ++local_p1_sweep;
+
+      while ((idx = next_unit.fetch_add(1)) < work_units) {
+        unsigned int unit_seed = seed + static_cast<unsigned int>(idx);
+        if (paired) {
+          int r = run_paired_deal(unit_seed, *fa, *fb);
+          local_aggregate += r;
+          if (r == 2)
+            ++local_p0_sweep;
+          else if (r == 1)
+            ++local_split;
+          else
+            ++local_p1_sweep;
+        } else {
+          local_aggregate += run_independent_game(unit_seed, *fa, *fb);
+        }
       }
-      a_wins_total.fetch_add(local_wins);
+      aggregate_wins.fetch_add(local_aggregate);
       deals_p0_sweep.fetch_add(local_p0_sweep);
       deals_split.fetch_add(local_split);
       deals_p1_sweep.fetch_add(local_p1_sweep);
@@ -208,18 +251,29 @@ int main(int argc, char **argv) {
   // Progress monitor
   std::atomic<bool> progress_done{false};
   auto t_prog = std::chrono::steady_clock::now();
-  std::thread progress_thread([&]() {
+  std::thread progress_thread([&, paired]() {
     while (!progress_done.load()) {
-      int done = next_deal.load();
-      if (done > num_deals) done = num_deals;
+      int done = next_unit.load();
+      if (done > work_units) done = work_units;
       auto now = std::chrono::steady_clock::now();
       double elapsed = std::chrono::duration<double>(now - t_prog).count();
-      double rate = elapsed > 0 ? (2.0 * done) / elapsed : 0;
-      int pct = num_deals > 0 ? static_cast<int>(100.0 * done / num_deals) : 0;
-      std::fprintf(stderr, "\rDeals: %d/%d (%d%%)  |  %.0f games/s   ",
-                   done, num_deals, pct, rate);
+      double rate = 0;
+      int pct =
+          work_units > 0 ? static_cast<int>(100.0 * done / static_cast<double>(work_units)) : 0;
+      if (elapsed > 0) {
+        if (paired)
+          rate = (2.0 * done) / elapsed;
+        else
+          rate = done / elapsed;
+      }
+      if (paired)
+        std::fprintf(stderr, "\rDeals: %d/%d (%d%%)  |  %.0f games/s   ", done,
+                     work_units, pct, rate);
+      else
+        std::fprintf(stderr, "\rGames: %d/%d (%d%%)  |  %.0f games/s   ", done,
+                     work_units, pct, rate);
       std::fflush(stderr);
-      if (done >= num_deals) break;
+      if (done >= work_units) break;
       std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
   });
@@ -235,7 +289,7 @@ int main(int argc, char **argv) {
   long long elapsed_ms =
       std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
 
-  long a_wins = a_wins_total.load();
+  long a_wins = aggregate_wins.load();
   double p_hat = static_cast<double>(a_wins) / static_cast<double>(total_games);
   WilsonCI ci = wilson_ci(p_hat, total_games);
   double games_per_sec = elapsed_ms > 0 ? 1000.0 * total_games / elapsed_ms : 0;
@@ -253,32 +307,35 @@ int main(int argc, char **argv) {
   else
     std::cout << "Result: no significant difference (CI includes 50%)\n";
 
-  long d0 = deals_p0_sweep.load();
-  long d1 = deals_split.load();
-  long d2 = deals_p1_sweep.load();
-  double inv_deals = num_deals > 0 ? 1.0 / static_cast<double>(num_deals) : 0.0;
+  if (paired) {
+    long d0 = deals_p0_sweep.load();
+    long d1 = deals_split.load();
+    long d2 = deals_p1_sweep.load();
+    double inv_deals =
+        num_deals > 0 ? 1.0 / static_cast<double>(num_deals) : 0.0;
 
-  std::cout << "Deals: P0_sweep=" << d0 << " split=" << d1 << " P1_sweep=" << d2
-            << " total=" << num_deals << "\n";
-  std::cout << "Deals: P0 sweep 2-0: " << d0 << " (" << std::fixed;
-  std::cout.precision(2);
-  std::cout << 100.0 * static_cast<double>(d0) * inv_deals << "%)  |  split 1-1: " << d1
-            << " (" << 100.0 * static_cast<double>(d1) * inv_deals << "%)  |  P1 sweep 0-2: "
-            << d2 << " (" << 100.0 * static_cast<double>(d2) * inv_deals << "%)\n";
+    std::cout << "Deals: P0_sweep=" << d0 << " split=" << d1 << " P1_sweep=" << d2
+              << " total=" << num_deals << "\n";
+    std::cout << "Deals: P0 sweep 2-0: " << d0 << " (" << std::fixed;
+    std::cout.precision(2);
+    std::cout << 100.0 * static_cast<double>(d0) * inv_deals << "%)  |  split 1-1: " << d1
+              << " (" << 100.0 * static_cast<double>(d1) * inv_deals << "%)  |  P1 sweep 0-2: "
+              << d2 << " (" << 100.0 * static_cast<double>(d2) * inv_deals << "%)\n";
 
-  long n_decisive = d0 + d2;
-  if (n_decisive > 0) {
-    double p_dec = static_cast<double>(d0) / static_cast<double>(n_decisive);
-    WilsonCI ci_dec = wilson_ci(p_dec, n_decisive);
-    std::cout << "Among decisive deals (non-split): P0 sweep " << d0 << " / " << n_decisive
-              << " (" << 100.0 * p_dec << "%)  95% Wilson CI: [" << 100.0 * ci_dec.lo << "%, "
-              << 100.0 * ci_dec.hi << "%]\n";
-    if (ci_dec.lo > 0.50)
-      std::cout << "Result (decisive): " << label0 << " sweeps more often (CI excludes 50%)\n";
-    else if (ci_dec.hi < 0.50)
-      std::cout << "Result (decisive): " << label1 << " sweeps more often (CI excludes 50%)\n";
-    else
-      std::cout << "Result (decisive): no significant difference (CI includes 50%)\n";
+    long n_decisive = d0 + d2;
+    if (n_decisive > 0) {
+      double p_dec = static_cast<double>(d0) / static_cast<double>(n_decisive);
+      WilsonCI ci_dec = wilson_ci(p_dec, n_decisive);
+      std::cout << "Among decisive deals (non-split): P0 sweep " << d0 << " / " << n_decisive
+                << " (" << 100.0 * p_dec << "%)  95% Wilson CI: [" << 100.0 * ci_dec.lo << "%, "
+                << 100.0 * ci_dec.hi << "%]\n";
+      if (ci_dec.lo > 0.50)
+        std::cout << "Result (decisive): " << label0 << " sweeps more often (CI excludes 50%)\n";
+      else if (ci_dec.hi < 0.50)
+        std::cout << "Result (decisive): " << label1 << " sweeps more often (CI excludes 50%)\n";
+      else
+        std::cout << "Result (decisive): no significant difference (CI includes 50%)\n";
+    }
   }
 
   std::cout << "Elapsed: " << format_elapsed(elapsed_ms)

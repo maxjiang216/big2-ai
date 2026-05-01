@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # PIMC(20) vs PIMC(20) eval_match profiling helper.
 #
-# Uses a fixed seed (default 42) so deal order and positions match across builds.
+# Default: independent games (--games) — each index uses RNG seed+N for more
+# position diversity than paired deals. Optional: --paired-deals for classical
+# eval_match paired mode (--deals, 2*N total games).
 #
 # Usage:
 #   ./scripts/profile_pimc_selfplay.sh --mode perf
 #   ./scripts/profile_pimc_selfplay.sh --mode callgrind --target-seconds 180
-#   ./scripts/profile_pimc_selfplay.sh --mode perf --mode plain --perf-record
-#   ./scripts/profile_pimc_selfplay.sh --mode perf --deals 1200    # skip calibration
+#   ./scripts/profile_pimc_selfplay.sh --mode perf --paired-deals 600   # paired mode
 #
 set -euo pipefail
 
@@ -25,7 +26,10 @@ MODES=()
 SEED="$DEFAULT_SEED"
 TARGET_SEC="$DEFAULT_TARGET_SEC"
 THREADS="$DEFAULT_THREADS"
-FIXED_DEALS=""
+# Fixed workload count (--games or --paired-deals overrides calibration)
+FIXED=""
+USE_PAIRED_DEALS=false
+WORKLOAD_CLI_COUNT=0
 PROBE_PERF="$DEFAULT_PROBE_PERF"
 PROBE_CALLGRIND="$DEFAULT_PROBE_CALLGRIND"
 DO_BUILD=true
@@ -34,32 +38,48 @@ PERF_DATA="${ROOT}/prof/perf.data"
 CALLGRIND_OUT="${ROOT}/prof/callgrind_pimc20.out"
 CALL_GRAPH="dwarf"
 
+declare -a WAL=()
+
+# eval_match workload: --games (default) or --paired-deals → --deals
+populate_workload_argv() {
+  if "$USE_PAIRED_DEALS"; then
+    WAL=(--deals "$1")
+  else
+    WAL=(--games "$1")
+  fi
+}
+
 usage() {
   cat <<'HDR'
-Symmetric PIMC(20) self-play profiler (runs bin/eval_match). Fixed default seed keeps
-deal order repeatable across optimizations.
+Symmetric PIMC(20) eval_match profiler.
+
+Default workload: independent full games (--games), seed+N per game — more move
+variety than paired deals. Fixed default seed (--seed 42) keeps work repeatable.
 
 HDR
   cat <<EOF
 Required (at least once):
   --mode perf|--mode callgrind|--mode plain
 
-Optional:
-  --seed N                   RNG base seed for eval_match (default: ${DEFAULT_SEED})
-  --target-seconds N         Calibration wall-time target seconds (default: ${DEFAULT_TARGET_SEC})
-  --threads N                Worker threads (default: ${DEFAULT_THREADS}; use 1 for profiling)
-  --deals N                  Skip calibration; run exactly N unique deals per mode
-  --probe-perf-deals N       Probe size for perf/plain calibration (default: ${DEFAULT_PROBE_PERF})
-  --probe-callgrind-deals N  Probe size for callgrind (default: ${DEFAULT_PROBE_CALLGRIND})
-  --no-build                 Skip 'make eval_match'
-  --perf-record              Run 'perf record' (-g --call-graph) instead of perf stat
-  --perf-data PATH           Output for perf.data (default: repo/prof/perf.data)
-  --callgrind-out PATH       Callgrind outfile (default: repo/prof/callgrind_pimc20.out)
-  --call-graph STYLE         dwarf|fp when using --perf-record (default: ${CALL_GRAPH})
+Workload (default independent games):
+  (no workload flag)           Calibrated --games count from probe timing
+  --games N                    Skip calibration; exactly N independent games
+  --paired-deals N             Paired-eval mode (--deals N ⇒ 2*N total games)
 
-Rebuild tip (better stacks):  make clean && CXXFLAGS='-O2 -g' make eval_match
+Additional options:
+  --seed N                     Base seed (default: ${DEFAULT_SEED})
+  --target-seconds N           Calibration target seconds (default: ${DEFAULT_TARGET_SEC})
+  --threads N                  (default: ${DEFAULT_THREADS}; use 1 when profiling)
+  --probe-perf N               Probe size for perf/plain calibration (default: ${DEFAULT_PROBE_PERF})
+  --probe-callgrind N          Probe size for callgrind (default: ${DEFAULT_PROBE_CALLGRIND})
+  --no-build                   Skip make eval_match
+  --perf-record                perf record (-g --call-graph) instead of perf stat
+  --perf-data PATH             (default: ${PERF_DATA})
+  --callgrind-out PATH         (default: ${CALLGRIND_OUT})
+  --call-graph STYLE           dwarf|fp when using --perf-record (default: ${CALL_GRAPH})
 
-perf may need:  sudo sysctl kernel.perf_event_paranoid=1
+Rebuild tip:  make clean && CXXFLAGS='-O2 -g' make eval_match
+perf sysctl:   sudo sysctl kernel.perf_event_paranoid=1
 EOF
 }
 
@@ -85,18 +105,27 @@ while [[ $# -gt 0 ]]; do
       THREADS="$2"
       shift 2
       ;;
-    --deals)
-      [[ $# -ge 2 ]] || { echo "error: --deals requires a value"; exit 1; }
-      FIXED_DEALS="$2"
+    --games)
+      [[ $# -ge 2 ]] || { echo "error: --games requires a value"; exit 1; }
+      FIXED="$2"
+      USE_PAIRED_DEALS=false
+      WORKLOAD_CLI_COUNT=$((WORKLOAD_CLI_COUNT + 1))
       shift 2
       ;;
-    --probe-perf-deals)
-      [[ $# -ge 2 ]] || { echo "error: --probe-perf-deals requires a value"; exit 1; }
+    --paired-deals)
+      [[ $# -ge 2 ]] || { echo "error: --paired-deals requires a value"; exit 1; }
+      FIXED="$2"
+      USE_PAIRED_DEALS=true
+      WORKLOAD_CLI_COUNT=$((WORKLOAD_CLI_COUNT + 1))
+      shift 2
+      ;;
+    --probe-perf|--probe-perf-deals)
+      [[ $# -ge 2 ]] || { echo "error: $1 requires a value"; exit 1; }
       PROBE_PERF="$2"
       shift 2
       ;;
-    --probe-callgrind-deals)
-      [[ $# -ge 2 ]] || { echo "error: --probe-callgrind-deals requires a value"; exit 1; }
+    --probe-callgrind|--probe-callgrind-deals)
+      [[ $# -ge 2 ]] || { echo "error: $1 requires a value"; exit 1; }
       PROBE_CALLGRIND="$2"
       shift 2
       ;;
@@ -132,23 +161,31 @@ done
   exit 1
 }
 
+if [[ "$WORKLOAD_CLI_COUNT" -gt 1 ]]; then
+  echo "error: use at most one of --games or --paired-deals" >&2
+  exit 1
+fi
+
 if "$DO_BUILD"; then
   make -C "$ROOT" eval_match
 fi
 
 if [[ ! -x "$EXE" ]]; then
-  echo "error: missing executable ${BIN_REL}; run make eval_match from repo root." >&2
+  echo "error: missing executable ${BIN_REL}; run make eval_match." >&2
   exit 1
 fi
 
 mkdir -p "${ROOT}/prof"
 
+# shellcheck disable=SC2086
 elapsed_sec_plain() {
-  local deals="$1"
+  local n="$1"
+  populate_workload_argv "$n"
+
   if [[ "${BASH_VERSINFO[0]}" -ge 5 ]]; then
     local start="$EPOCHREALTIME"
-    "$EXE" --p0 pimc --p0-param 20 --p1 pimc --p1-param 20 \
-      --deals "$deals" --seed "$SEED" --threads "$THREADS" \
+    "$EXE" --p0 pimc --p0-param 20 --p1 pimc --p1-param 20 "${WAL[@]}" \
+      --seed "$SEED" --threads "$THREADS" \
       >/dev/null 2>&1
     local end="$EPOCHREALTIME"
     awk -v a="$start" -v b="$end" 'BEGIN { printf "%f\n", (b > a ? b - a : 1e-9) }'
@@ -163,29 +200,27 @@ elapsed_sec_plain() {
       system $exe, @args and exit($? >> 8);
       open(STDOUT, ">&", $bak);
       printf "%f\n", time() - $t0;
-    ' "$EXE" --p0 pimc --p0-param 20 --p1 pimc --p1-param 20 \
-      --deals "$deals" --seed "$SEED" --threads "$THREADS"
+    ' "$EXE" --p0 pimc --p0-param 20 --p1 pimc --p1-param 20 "${WAL[@]}" \
+      --seed "$SEED" --threads "$THREADS"
   fi
 }
 
-# negligible vs plain; extrapolate perf-sized runs from plain probe time
 elapsed_sec_perf_stat() {
   elapsed_sec_plain "$1"
 }
 
 elapsed_sec_callgrind() {
-  local deals="$1"
+  local n="$1"
+  populate_workload_argv "$n"
   valgrind --tool=callgrind --instr-atstart=yes --quiet \
     --callgrind-out-file=/dev/null -- \
-    "$EXE" --p0 pimc --p0-param 20 --p1 pimc --p1-param 20 \
-      --deals "$deals" --seed "$SEED" --threads "$THREADS" \
+    "$EXE" --p0 pimc --p0-param 20 --p1 pimc --p1-param 20 "${WAL[@]}" \
+    --seed "$SEED" --threads "$THREADS" \
     >/dev/null 2>&1
 }
 
-scale_deals_from_probe() {
-  local probe="$1"
-  local t_probe="$2"
-  awk -v p="$probe" -v targ="$TARGET_SEC" -v t="$t_probe" '
+scale_from_probe() {
+  awk -v p="$1" -v targ="$TARGET_SEC" -v t="$2" '
     BEGIN {
       if (t <= 0) t = 1e-9;
       x = int(p * targ / t + 0.5);
@@ -195,35 +230,43 @@ scale_deals_from_probe() {
   ' </dev/null
 }
 
-resolve_deals() {
+workload_descr() {
+  if "$USE_PAIRED_DEALS"; then
+    echo "paired deals (total games=$((2 * $1)))"
+  else
+    echo "independent games ($(($1)))"
+  fi
+}
+
+resolve_workload_units() {
   local kind="$1"
   local probe="$2"
 
-  if [[ "$FIXED_DEALS" != "" ]]; then
-    echo "$FIXED_DEALS"
+  if [[ "$FIXED" != "" ]]; then
+    echo "$FIXED"
     return
   fi
 
   if [[ "$probe" -lt 1 ]]; then
-    echo "error: probe deals must be >= 1 ($kind)" >&2
+    echo "error: probe must be >= 1 ($kind)" >&2
     exit 1
   fi
 
-  echo "Calib ($kind): probe deals=${probe}, seed=${SEED}, threads=${THREADS}" >&2
+  echo "Calib ($kind): probe units=${probe} ($(workload_descr "$probe")), seed=${SEED}, threads=${THREADS}" >&2
   local t_probe
   case "$kind" in
     plain) t_probe="$(elapsed_sec_plain "$probe")" ;;
     perf) t_probe="$(elapsed_sec_perf_stat "$probe")" ;;
     callgrind)
       command -v valgrind >/dev/null 2>&1 || {
-        echo "error: callgrind requested but valgrind not in PATH" >&2
+        echo "error: valgrind not in PATH" >&2
         exit 1
       }
       t_probe="$(elapsed_sec_callgrind "$probe")"
       ;;
   esac
-  echo "(probe wall ${t_probe}s) -> extrapolating to ~${TARGET_SEC}s target ..." >&2
-  scale_deals_from_probe "$probe" "$t_probe"
+  echo "(probe wall ${t_probe}s) -> extrapolating to ~${TARGET_SEC}s ..." >&2
+  scale_from_probe "$probe" "$t_probe"
 }
 
 require_perf() {
@@ -233,37 +276,44 @@ require_perf() {
   }
 }
 
+populate_wald() {
+  populate_workload_argv "$1"
+}
+
 run_mode_plain() {
-  local deals="$1"
-  echo "plain: deals=$deals  total_games=$((2 * deals))  seed=$SEED  threads=$THREADS" >&2
+  local units="$1"
+  populate_wald "$units"
+  echo "plain: $(workload_descr "$units"), seed=${SEED} threads=${THREADS}" >&2
   SECONDS=0
-  "$EXE" --p0 pimc --p0-param 20 --p1 pimc --p1-param 20 \
-    --deals "$deals" --seed "$SEED" --threads "$THREADS"
+  "$EXE" --p0 pimc --p0-param 20 --p1 pimc --p1-param 20 "${WAL[@]}" \
+    --seed "$SEED" --threads "$THREADS"
   echo "(plain wall-clock ~ ${SECONDS}s via bash \$SECONDS; see eval_match games/s)" >&2
 }
 
 run_mode_perf() {
-  local deals="$1"
-  echo "perf: deals=$deals  total_games=$((2 * deals))  seed=$SEED  threads=$THREADS" >&2
+  local units="$1"
+  populate_wald "$units"
+  echo "perf: $(workload_descr "$units"), seed=${SEED} threads=${THREADS}" >&2
   mkdir -p "$(dirname "${PERF_DATA}")"
   require_perf
 
   if "$PERF_RECORD"; then
     echo "Recording to ${PERF_DATA} (--call-graph ${CALL_GRAPH})" >&2
     perf record --output="${PERF_DATA}" -g --call-graph "${CALL_GRAPH}" -- \
-      "$EXE" --p0 pimc --p0-param 20 --p1 pimc --p1-param 20 \
-      --deals "$deals" --seed "$SEED" --threads "$THREADS"
-    echo "perf report -i '${PERF_DATA}'" >&2
+      "$EXE" --p0 pimc --p0-param 20 --p1 pimc --p1-param 20 "${WAL[@]}" \
+      --seed "$SEED" --threads "$THREADS"
+    echo "Inspect: perf report -i '${PERF_DATA}'" >&2
   else
     perf stat -r 1 -- \
-      "$EXE" --p0 pimc --p0-param 20 --p1 pimc --p1-param 20 \
-      --deals "$deals" --seed "$SEED" --threads "$THREADS"
+      "$EXE" --p0 pimc --p0-param 20 --p1 pimc --p1-param 20 "${WAL[@]}" \
+      --seed "$SEED" --threads "$THREADS"
   fi
 }
 
 run_mode_callgrind() {
-  local deals="$1"
-  echo "callgrind: deals=$deals  total_games=$((2 * deals))  seed=$SEED  threads=$THREADS" >&2
+  local units="$1"
+  populate_wald "$units"
+  echo "callgrind: $(workload_descr "$units"), seed=${SEED} threads=${THREADS}" >&2
   mkdir -p "$(dirname "${CALLGRIND_OUT}")"
   command -v valgrind >/dev/null 2>&1 || {
     echo "error: valgrind not in PATH" >&2
@@ -272,9 +322,9 @@ run_mode_callgrind() {
   echo "Writing ${CALLGRIND_OUT}" >&2
   valgrind --tool=callgrind --instr-atstart=yes \
     --callgrind-out-file="${CALLGRIND_OUT}" -- \
-    "$EXE" --p0 pimc --p0-param 20 --p1 pimc --p1-param 20 \
-    --deals "$deals" --seed "$SEED" --threads "$THREADS"
-  echo "KCachegrind / qcachegrind: ${CALLGRIND_OUT}" >&2
+    "$EXE" --p0 pimc --p0-param 20 --p1 pimc --p1-param 20 "${WAL[@]}" \
+    --seed "$SEED" --threads "$THREADS"
+  echo "Open in KCachegrind: ${CALLGRIND_OUT}" >&2
 }
 
 declare -A DID=()
@@ -284,7 +334,7 @@ for m in "${MODES[@]}"; do
     perf | callgrind | plain)
       ;;
     *)
-      echo "error: unknown mode '${m}' (use perf | callgrind | plain)" >&2
+      echo "error: unknown mode '${m}'" >&2
       exit 1
       ;;
   esac
@@ -294,23 +344,21 @@ for m in "${MODES[@]}"; do
   [[ "${DID[$m]:-}" ]] && continue
   DID["$m"]=1
 
-  deals=""
   echo ""
   echo "================ ${m} ================="
   case "$m" in
     plain)
-      deals="$(resolve_deals plain "${PROBE_PERF}")"
-      run_mode_plain "$deals"
+      units="$(resolve_workload_units plain "${PROBE_PERF}")"
+      run_mode_plain "$units"
       ;;
     perf)
       require_perf
-      deals="$(resolve_deals perf "${PROBE_PERF}")"
-      run_mode_perf "$deals"
+      units="$(resolve_workload_units perf "${PROBE_PERF}")"
+      run_mode_perf "$units"
       ;;
     callgrind)
-      deals="$(resolve_deals callgrind "${PROBE_CALLGRIND}")"
-      run_mode_callgrind "$deals"
+      units="$(resolve_workload_units callgrind "${PROBE_CALLGRIND}")"
+      run_mode_callgrind "$units"
       ;;
   esac
 done
-
