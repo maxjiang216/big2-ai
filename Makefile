@@ -30,6 +30,7 @@ help:
 	@echo "  make coordinator          - coordinator + Parquet objects (needs libarrow)"
 	@echo "  make generate_data        - self-play + Parquet + stats (needs libarrow)"
 	@echo "  make eval_match           - head-to-head evaluation binary (no Arrow)"
+	@echo "  scripts/profile_pimc_selfplay.sh - PIMC(20) symmetric eval_match: perf/callgrind/plain"
 	@echo "  make pass_greedy_datagen  - CSV dataset for pass-vs-greedy logistic (no Arrow)"
 	@echo "  make move_agreement       - greedy vs tree move agreement stats (no Arrow)"
 	@echo "  make tablebase_opp1_gen   - build opp-1-card tablebase binary generator (no Arrow)"

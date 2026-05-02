@@ -9,6 +9,11 @@ build/
 data/
 venv/
 
+# profiling (perf + callgrind from scripts/profile_pimc_selfplay.sh)
+prof/
+perf.data*
+perf.data.old*
+
 # Object files
 *.o
 *.obj
