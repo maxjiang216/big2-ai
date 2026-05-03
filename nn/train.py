@@ -159,6 +159,7 @@ def train(
         # --- Train ---
         model.train()
         train_loss = 0.0
+        tr_p = tr_vi = tr_vn = 0.0
         n_batches = 0
         for batch_idx, batch in enumerate(train_loader):
             hand, opp, move, hint, flag, pass_, y_trick, y_win = (
@@ -167,13 +168,16 @@ def train(
 
             optimizer.zero_grad()
             v_init, v_no_init, p_trick = model(hand, opp, move, hint, flag, pass_)
-            loss, _ = compute_loss(v_init, v_no_init, p_trick, y_trick, y_win)
+            loss, metrics = compute_loss(v_init, v_no_init, p_trick, y_trick, y_win)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
             scheduler.step()
 
             train_loss += loss.item()
+            tr_p += metrics["loss_p_trick"]
+            tr_vi += metrics["loss_v_init"]
+            tr_vn += metrics["loss_v_no_init"]
             n_batches += 1
 
             if (batch_idx + 1) % log_every == 0:
@@ -187,6 +191,7 @@ def train(
         # --- Validate ---
         model.eval()
         val_loss = 0.0
+        val_p = val_vi = val_vn = 0.0
         val_p_brier = 0.0
         n_val = 0
         with torch.no_grad():
@@ -198,17 +203,27 @@ def train(
                 loss, metrics = compute_loss(v_init, v_no_init, p_trick, y_trick, y_win)
                 bs = len(y_trick)
                 val_loss += loss.item() * bs
+                val_p += metrics["loss_p_trick"] * bs
+                val_vi += metrics["loss_v_init"] * bs
+                val_vn += metrics["loss_v_no_init"] * bs
                 val_p_brier += ((p_trick - y_trick) ** 2).sum().item()
                 n_val += bs
 
         val_loss /= n_val
+        val_p /= n_val
+        val_vi /= n_val
+        val_vn /= n_val
         val_p_brier /= n_val
         train_avg = train_loss / n_batches
+        tr_p /= n_batches
+        tr_vi /= n_batches
+        tr_vn /= n_batches
 
         print(
             f"Epoch {epoch}/{epochs}  "
-            f"train={train_avg:.4f}  val={val_loss:.4f}  "
-            f"p_trick_brier={val_p_brier:.4f}"
+            f"train={train_avg:.4f} [p={tr_p:.3f} vi={tr_vi:.3f} vn={tr_vn:.3f}]  "
+            f"val={val_loss:.4f} [p={val_p:.3f} vi={val_vi:.3f} vn={val_vn:.3f}]  "
+            f"brier={val_p_brier:.4f}"
         )
 
         if val_loss < best_val_loss:
