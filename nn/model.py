@@ -18,7 +18,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 # ---------------------------------------------------------------------------
 # Input encoding dimensions
 # ---------------------------------------------------------------------------
@@ -36,8 +35,9 @@ def encode_exact(rank_counts: torch.Tensor) -> torch.Tensor:
     Returns float tensor [..., 48].
     """
     *batch, _ = rank_counts.shape
-    out = torch.zeros(*batch, ENCODING_DIM, dtype=torch.float32,
-                      device=rank_counts.device)
+    out = torch.zeros(
+        *batch, ENCODING_DIM, dtype=torch.float32, device=rank_counts.device
+    )
     offset = 0
     for r, max_k in enumerate(RANK_MAX_COUNTS):
         c = rank_counts[..., r].long()
@@ -54,8 +54,9 @@ def encode_upper_bound(rank_counts: torch.Tensor) -> torch.Tensor:
     Returns float tensor [..., 48].
     """
     *batch, _ = rank_counts.shape
-    out = torch.zeros(*batch, ENCODING_DIM, dtype=torch.float32,
-                      device=rank_counts.device)
+    out = torch.zeros(
+        *batch, ENCODING_DIM, dtype=torch.float32, device=rank_counts.device
+    )
     offset = 0
     for r, max_k in enumerate(RANK_MAX_COUNTS):
         c = rank_counts[..., r].clamp(0, max_k).long()
@@ -68,6 +69,7 @@ def encode_upper_bound(rank_counts: torch.Tensor) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 # Building blocks
 # ---------------------------------------------------------------------------
+
 
 def _init_swish(layer: nn.Linear) -> nn.Linear:
     nn.init.kaiming_normal_(layer.weight, mode="fan_in", nonlinearity="relu")
@@ -103,8 +105,9 @@ class Head(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(in_dim, 128)
         self.fc2 = nn.Linear(128, 1)
-        nn.init.kaiming_normal_(self.fc1.weight, mode="fan_in",
-                                nonlinearity="leaky_relu", a=0.01)
+        nn.init.kaiming_normal_(
+            self.fc1.weight, mode="fan_in", nonlinearity="leaky_relu", a=0.01
+        )
         nn.init.zeros_(self.fc1.bias)
         nn.init.xavier_uniform_(self.fc2.weight)
         nn.init.zeros_(self.fc2.bias)
@@ -117,6 +120,7 @@ class Head(nn.Module):
 # ---------------------------------------------------------------------------
 # Main model
 # ---------------------------------------------------------------------------
+
 
 class Big2Net(nn.Module):
     """Big 2 strategic engine DNN.
@@ -178,12 +182,12 @@ class Big2Net(nn.Module):
 
     def forward_with_opp(
         self,
-        hand: torch.Tensor,   # [K, 48]
-        move: torch.Tensor,   # [K, 48]
-        hint: torch.Tensor,   # [K]
-        flag: torch.Tensor,   # [K] bool
+        hand: torch.Tensor,  # [K, 48]
+        move: torch.Tensor,  # [K, 48]
+        hint: torch.Tensor,  # [K]
+        flag: torch.Tensor,  # [K] bool
         pass_: torch.Tensor,  # [K] bool
-        o: torch.Tensor,      # [B, 96] or [96] — cached opp embedding
+        o: torch.Tensor,  # [B, 96] or [96] — cached opp embedding
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass reusing a pre-computed opp embedding.
 
@@ -194,15 +198,15 @@ class Big2Net(nn.Module):
         h = F.silu(self.layer_b_hands(h))
         m = F.silu(self.layer_a(move))
         m = F.silu(self.layer_b_move(m))
-        h = F.silu(self.layer_c_player(h))            # [K, 128]
+        h = F.silu(self.layer_c_player(h))  # [K, 128]
 
         active_move = ~(pass_ | flag)
-        m = m * active_move.float().unsqueeze(-1)      # [K, 32]
+        m = m * active_move.float().unsqueeze(-1)  # [K, 32]
 
         if o.shape[0] != h.shape[0]:
             o = o.expand(h.shape[0], -1)
 
-        x = torch.cat([h, o, m], dim=-1)               # [K, 256]
+        x = torch.cat([h, o, m], dim=-1)  # [K, 256]
         gate = torch.sigmoid(self.hint_gate(hint.unsqueeze(-1)))
         x = self.junction_norm(x * gate)
         x = self.trunk(x)
@@ -217,16 +221,17 @@ class Big2Net(nn.Module):
 
     def forward(
         self,
-        hand: torch.Tensor,    # [B, 48] float
-        opp: torch.Tensor,     # [B, 48] float
-        move: torch.Tensor,    # [B, 48] float
-        hint: torch.Tensor,    # [B]     float  (0-1)
-        flag: torch.Tensor,    # [B]     bool   (opponent locked)
-        pass_: torch.Tensor,   # [B]     bool   (move is pass)
+        hand: torch.Tensor,  # [B, 48] float
+        opp: torch.Tensor,  # [B, 48] float
+        move: torch.Tensor,  # [B, 48] float
+        hint: torch.Tensor,  # [B]     float  (0-1)
+        flag: torch.Tensor,  # [B]     bool   (opponent locked)
+        pass_: torch.Tensor,  # [B]     bool   (move is pass)
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns (v_init, v_no_init, p_trick), each shape [B]."""
-        return self.forward_with_opp(hand, move, hint, flag, pass_,
-                                     self.encode_opp(opp))
+        return self.forward_with_opp(
+            hand, move, hint, flag, pass_, self.encode_opp(opp)
+        )
 
     def embedding_param_ids(self) -> set:
         """IDs of parameters in input-adjacent embedding layers (A, B, B').

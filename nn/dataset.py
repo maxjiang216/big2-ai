@@ -28,7 +28,7 @@ from torch.utils.data import Dataset
 # Rank name suffix ordering (matches C++ RankFeature naming).
 RANK_NAMES = ["3", "4", "5", "6", "7", "8", "9", "10", "j", "q", "k", "a", "2"]
 RANK_MAX_COUNTS = [4] * 11 + [3, 1]  # max cards per rank index
-ENCODING_DIM = sum(RANK_MAX_COUNTS)   # 48
+ENCODING_DIM = sum(RANK_MAX_COUNTS)  # 48
 
 
 def _rank_cols(prefix: str) -> list[str]:
@@ -86,7 +86,7 @@ def compute_trick_winners(df: pd.DataFrame) -> pd.Series:
     with NaN for observer rows (next_player == 0).
     """
     move_sum = df[MOVE_COLS].sum(axis=1)
-    is_pass = (move_sum == 0)
+    is_pass = move_sum == 0
 
     result = pd.Series(np.nan, index=df.index, dtype=float)
 
@@ -141,9 +141,9 @@ class Big2Dataset(Dataset):
       y_win     float32       1 if player won the game
     """
 
-    def __init__(self, parquet_path: str,
-                 val_game_ids: Optional[set] = None,
-                 train: bool = True) -> None:
+    def __init__(
+        self, parquet_path: str, val_game_ids: Optional[set] = None, train: bool = True
+    ) -> None:
         df = pd.read_parquet(parquet_path)
         df = df.sort_values(["game_index", "turn_idx"]).reset_index(drop=True)
 
@@ -177,16 +177,19 @@ class Big2Dataset(Dataset):
         self.move_enc = torch.from_numpy(encode_exact_np(move_cards))
 
         self.hint = torch.tensor(
-            df["hint"].to_numpy(dtype=np.float32) / 10000.0, dtype=torch.float32)
+            df["hint"].to_numpy(dtype=np.float32) / 10000.0, dtype=torch.float32
+        )
         self.flag = torch.tensor(
-            df["opp_cannot_respond"].to_numpy(dtype=bool), dtype=torch.bool)
-        self.pass_ = torch.tensor(
-            (move_cards.sum(axis=1) == 0), dtype=torch.bool)
+            df["opp_cannot_respond"].to_numpy(dtype=bool), dtype=torch.bool
+        )
+        self.pass_ = torch.tensor((move_cards.sum(axis=1) == 0), dtype=torch.bool)
 
         self.y_trick = torch.tensor(
-            df["p_win_trick"].to_numpy(dtype=np.float32), dtype=torch.float32)
+            df["p_win_trick"].to_numpy(dtype=np.float32), dtype=torch.float32
+        )
         self.y_win = torch.tensor(
-            df["turn_outcome"].to_numpy(dtype=np.float32), dtype=torch.float32)
+            df["turn_outcome"].to_numpy(dtype=np.float32), dtype=torch.float32
+        )
 
     def __len__(self) -> int:
         return len(self.y_win)
@@ -204,8 +207,9 @@ class Big2Dataset(Dataset):
         )
 
 
-def decode_handbits_np(at1: np.ndarray, at2: np.ndarray,
-                        at3: np.ndarray, at4: np.ndarray) -> np.ndarray:
+def decode_handbits_np(
+    at1: np.ndarray, at2: np.ndarray, at3: np.ndarray, at4: np.ndarray
+) -> np.ndarray:
     """Decode HandBits thermometer bitfields → rank counts [N, 13].
 
     Bit r in atK is set iff count[r] >= K (thermometer encoding).
@@ -214,10 +218,10 @@ def decode_handbits_np(at1: np.ndarray, at2: np.ndarray,
     for r in range(13):
         bit = np.int32(1 << r)
         counts[:, r] = (
-            ((at1 & bit) != 0).astype(np.int32) +
-            ((at2 & bit) != 0).astype(np.int32) +
-            ((at3 & bit) != 0).astype(np.int32) +
-            ((at4 & bit) != 0).astype(np.int32)
+            ((at1 & bit) != 0).astype(np.int32)
+            + ((at2 & bit) != 0).astype(np.int32)
+            + ((at3 & bit) != 0).astype(np.int32)
+            + ((at4 & bit) != 0).astype(np.int32)
         )
     return counts
 
@@ -257,9 +261,9 @@ class Big2SelfPlayDataset(Dataset):
              pass_ (bool), winner.
     """
 
-    def __init__(self, parquet_path: str,
-                 val_game_ids: Optional[set] = None,
-                 train: bool = True) -> None:
+    def __init__(
+        self, parquet_path: str, val_game_ids: Optional[set] = None, train: bool = True
+    ) -> None:
         df = pd.read_parquet(parquet_path)
         df = df.sort_values(["game_id", "turn_idx"]).reset_index(drop=True)
 
@@ -289,17 +293,22 @@ class Big2SelfPlayDataset(Dataset):
         move_counts = df[[f"move_at{r}" for r in range(13)]].to_numpy(dtype=np.int32)
 
         self.hand_enc = torch.from_numpy(encode_exact_np(hand_counts))
-        self.opp_enc  = torch.from_numpy(encode_upper_bound_np(opp_counts))
+        self.opp_enc = torch.from_numpy(encode_upper_bound_np(opp_counts))
         self.move_enc = torch.from_numpy(encode_exact_np(move_counts))
 
-        self.hint  = torch.tensor(df["hint"].to_numpy(dtype=np.float32), dtype=torch.float32)
-        self.flag  = torch.tensor(df["flag"].to_numpy(dtype=bool), dtype=torch.bool)
+        self.hint = torch.tensor(
+            df["hint"].to_numpy(dtype=np.float32), dtype=torch.float32
+        )
+        self.flag = torch.tensor(df["flag"].to_numpy(dtype=bool), dtype=torch.bool)
         self.pass_ = torch.tensor(df["pass_"].to_numpy(dtype=bool), dtype=torch.bool)
 
-        y_win = (df["winner"].to_numpy(dtype=np.int32) ==
-                 df["current_player"].to_numpy(dtype=np.int32)).astype(np.float32)
+        y_win = (
+            df["winner"].to_numpy(dtype=np.int32)
+            == df["current_player"].to_numpy(dtype=np.int32)
+        ).astype(np.float32)
         self.y_trick = torch.tensor(
-            df["p_win_trick"].to_numpy(dtype=np.float32), dtype=torch.float32)
+            df["p_win_trick"].to_numpy(dtype=np.float32), dtype=torch.float32
+        )
         self.y_win = torch.tensor(y_win, dtype=torch.float32)
 
     def __len__(self) -> int:
@@ -318,11 +327,12 @@ class Big2SelfPlayDataset(Dataset):
         )
 
 
-def make_train_val_split(parquet_path: str,
-                         val_frac: float = 0.1,
-                         seed: int = 0) -> tuple[Big2Dataset, Big2Dataset]:
+def make_train_val_split(
+    parquet_path: str, val_frac: float = 0.1, seed: int = 0
+) -> tuple[Big2Dataset, Big2Dataset]:
     """Return (train, val) datasets split by game ID, auto-detecting format."""
     import pyarrow.parquet as pq
+
     schema_names = set(pq.read_schema(parquet_path).names)
     is_selfplay = "game_id" in schema_names
 
@@ -335,5 +345,5 @@ def make_train_val_split(parquet_path: str,
 
     DatasetClass = Big2SelfPlayDataset if is_selfplay else Big2Dataset
     train_ds = DatasetClass(parquet_path, val_game_ids=val_ids, train=True)
-    val_ds   = DatasetClass(parquet_path, val_game_ids=val_ids, train=False)
+    val_ds = DatasetClass(parquet_path, val_game_ids=val_ids, train=False)
     return train_ds, val_ds
