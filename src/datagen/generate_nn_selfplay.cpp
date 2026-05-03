@@ -382,6 +382,7 @@ static void print_usage(const char* prog) {
         << "  --out <path>      Output .parquet file (required)\n"
         << "  --pool <P>        Games per pool (default: 900, total 2P in flight)\n"
         << "  --seed <S>        RNG seed (default: random)\n"
+        << "  --temp <T>        Softmax temperature for move selection (default: 0 = argmax)\n"
         << "  --device <d>      cuda or cpu (default: cuda if available)\n"
         << "\nRuns NN self-play with double-buffer CPU/GPU pipeline.\n"
         << "Two independent pools of P games each; while GPU runs inference\n"
@@ -391,6 +392,7 @@ static void print_usage(const char* prog) {
 int main(int argc, char** argv) {
     int         num_games  = 0;
     int         pool_size  = 900;
+    float       temp       = 0.0f;
     std::string out_path;
     std::string model_path;
     std::string device_str = "auto";
@@ -404,6 +406,7 @@ int main(int argc, char** argv) {
         else if (arg=="--out"    && i+1<argc) out_path    = argv[++i];
         else if (arg=="--pool"   && i+1<argc) pool_size   = std::stoi(argv[++i]);
         else if (arg=="--seed"   && i+1<argc) seed        = std::stoul(argv[++i]);
+        else if (arg=="--temp"   && i+1<argc) temp        = std::stof(argv[++i]);
         else if (arg=="--device" && i+1<argc) device_str  = argv[++i];
         else { std::cerr << "Unknown: " << arg << "\n"; print_usage(argv[0]); return 1; }
     }
@@ -423,6 +426,7 @@ int main(int argc, char** argv) {
               << "Out:     " << out_path    << "\n"
               << "Seed:    " << seed        << "\n"
               << "Pool:    " << pool_size   << " per pool (" << 2*pool_size << " total in flight)\n"
+              << "Temp:    " << temp        << (temp==0?"  (argmax)":"") << "\n"
               << "Device:  " << (dev==torch::kCUDA ? "cuda" : "cpu") << "\n\n";
 
     torch::jit::Module model = torch::jit::load(model_path);
@@ -490,16 +494,35 @@ int main(int argc, char** argv) {
                 auto& slot = pool[g];
                 if (!slot.active) continue;
 
-                // Find best move for this slot
-                float best_w = -1e9f;
+                // Select move: argmax when temp==0, softmax sampling otherwise
                 int   best_row = -1;
                 const float* vi = buf.v_init.data_ptr<float>();
                 const float* vn = buf.v_no_init.data_ptr<float>();
                 const float* pt = buf.p_trick.data_ptr<float>();
+                const int row0  = buf.game_row_start[g];
+                const int row1  = buf.game_row_end[g];
 
-                for (int row = buf.game_row_start[g]; row < buf.game_row_end[g]; ++row) {
-                    float w = pt[row]*vi[row] + (1.0f-pt[row])*vn[row];
-                    if (w > best_w) { best_w = w; best_row = row; }
+                if (temp == 0.0f) {
+                    float best_w = -1e9f;
+                    for (int row = row0; row < row1; ++row) {
+                        float w = pt[row]*vi[row] + (1.0f-pt[row])*vn[row];
+                        if (w > best_w) { best_w = w; best_row = row; }
+                    }
+                } else {
+                    // Softmax sampling: exp((w - max_w) / temp), then sample
+                    float max_w = -1e9f;
+                    for (int row = row0; row < row1; ++row) {
+                        float w = pt[row]*vi[row] + (1.0f-pt[row])*vn[row];
+                        if (w > max_w) max_w = w;
+                    }
+                    std::vector<float> probs;
+                    probs.reserve(row1 - row0);
+                    for (int row = row0; row < row1; ++row) {
+                        float w = pt[row]*vi[row] + (1.0f-pt[row])*vn[row];
+                        probs.push_back(std::exp((w - max_w) / temp));
+                    }
+                    std::discrete_distribution<int> dist(probs.begin(), probs.end());
+                    best_row = row0 + dist(rng);
                 }
                 if (best_row < 0) continue;
 
