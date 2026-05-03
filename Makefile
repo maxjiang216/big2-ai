@@ -29,12 +29,13 @@ TEST_CPP    := $(wildcard test/*.cpp)
 RESEARCH_BIN_NAMES := best_hand multi_comb play_probs count_turn_states
 RESEARCH_BINS      := $(addprefix $(BUILD_DIR)/research/,$(RESEARCH_BIN_NAMES))
 
-.PHONY: all clean dirs test_core coordinator generate_data generate_nn_data eval_match pass_greedy_datagen move_agreement benchmark tablebase_opp1_gen research help
+.PHONY: all clean dirs test_core coordinator generate_data generate_nn_data eval_match eval_nn_match pass_greedy_datagen move_agreement benchmark tablebase_opp1_gen research help
 
 all: help
 
 help:
 	@echo "  make generate_nn_selfplay - NN self-play data gen (needs libarrow + LibTorch)"
+	@echo "  make eval_nn_match        - head-to-head NN model eval (needs LibTorch)"
 	@echo "Targets:"
 	@echo "  make test_core            - unit tests (no Arrow)"
 	@echo "  make benchmark            - perf benchmark binary (no Arrow)"
@@ -184,6 +185,23 @@ $(BIN_DIR)/generate_nn_selfplay: $(GENNN_SELFPLAY_OBJS)
 	@echo "✓ $(BIN_DIR)/generate_nn_selfplay"
 
 generate_nn_selfplay: dirs $(BIN_DIR)/generate_nn_selfplay
+
+# ============================================================================
+# bin/eval_nn_match — head-to-head NN model evaluation (needs LibTorch)
+# ============================================================================
+
+$(BUILD_DIR)/src/datagen/eval_nn_match.o: src/datagen/eval_nn_match.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -c $< -o $@
+
+EVALNNMATCH_OBJS := $(CORE_OBJS) \
+                    $(BUILD_DIR)/src/simulation/nn_game_runner.o \
+                    $(BUILD_DIR)/src/datagen/eval_nn_match.o
+
+$(BIN_DIR)/eval_nn_match: $(EVALNNMATCH_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS_TORCH)
+	@echo "✓ $(BIN_DIR)/eval_nn_match"
+
+eval_nn_match: dirs $(BIN_DIR)/eval_nn_match
 
 # ============================================================================
 # bin/eval_match — head-to-head evaluation (no Arrow)

@@ -9,6 +9,7 @@
 // Output format: identical to generate_nn_data (same Parquet schema).
 
 #include "nn_game_runner.h"
+#include "nn_encode.h"
 #include "parquet_export.hpp"
 
 #include "game.h"
@@ -42,36 +43,8 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-static constexpr int ENCODING_DIM = 48;  // one-hot floats per hand/opp/move
 static constexpr int MAX_BATCH    = 200000;  // upper bound on positions per round
 static const char* kAtNames[4]    = { "at1", "at2", "at3", "at4" };
-
-// RANK_MAX_COUNTS[r] = max cards of rank r in deck
-static constexpr int RANK_MAX[13] = {4,4,4,4,4,4,4,4,4,4,4,3,1};
-
-// ---------------------------------------------------------------------------
-// Encoding helpers
-// ---------------------------------------------------------------------------
-
-// Write exact one-hot encoding for rank counts into buf (48 floats).
-static void encode_exact(const std::array<int,13>& counts, float* buf) {
-    int off = 0;
-    for (int r = 0; r < 13; ++r) {
-        int c = counts[r], mx = RANK_MAX[r];
-        for (int k = 1; k <= mx; ++k)
-            buf[off++] = (c == k) ? 1.0f : 0.0f;
-    }
-}
-
-// Write thermometer (upper-bound) encoding for max possible counts.
-static void encode_thermo(const std::array<int,13>& counts, float* buf) {
-    int off = 0;
-    for (int r = 0; r < 13; ++r) {
-        int c = std::min(counts[r], RANK_MAX[r]), mx = RANK_MAX[r];
-        for (int k = 1; k <= mx; ++k)
-            buf[off++] = (c >= k) ? 1.0f : 0.0f;
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Tablebase detection (mirror of nn_game_runner.cpp)
@@ -239,7 +212,10 @@ static void encode_pool(const std::vector<GameSlot>& pool, InferBuf& buf) {
             std::array<int,13> mc{};
             for (int r = 0; r < 13; ++r) mc[r] = MOVE_TO_CARDS[move_id][r];
 
-            encode_exact(hand_counts,  h_hand + row*ENCODING_DIM);
+            // Post-move hand (model was trained with hand-after-playing-move as input)
+            std::array<int,13> hand_after{};
+            for (int r = 0; r < 13; ++r) hand_after[r] = hand_counts[r] - mc[r];
+            encode_exact(hand_after,   h_hand + row*ENCODING_DIM);
             encode_thermo(opp_counts,  h_opp  + row*ENCODING_DIM);
             encode_exact(mc,           h_move + row*ENCODING_DIM);
 
