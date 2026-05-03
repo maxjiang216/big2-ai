@@ -221,11 +221,17 @@ static void encode_pool(const std::vector<GameSlot>& pool, InferBuf& buf) {
         auto discard     = slot.game.discard_pile();
         int  opp_count   = slot.game.get_player_hand_size(1 - cp);
 
-        // Opponent upper-bound counts
+        // Opponent upper-bound counts + HandBits (constant across all moves for this slot)
         std::array<int,13> opp_counts{};
+        HandBits opp_bits{};
         for (int r = 0; r < 13; ++r) {
             int hand_r = ((hb.at1>>r)&1)+((hb.at2>>r)&1)+((hb.at3>>r)&1)+((hb.at4>>r)&1);
-            opp_counts[r] = max_cards_in_deck_for_rank(r) - hand_r - discard[r];
+            int om = max_cards_in_deck_for_rank(r) - hand_r - discard[r];
+            opp_counts[r] = om;
+            if (om >= 1) opp_bits.at1 |= static_cast<uint16_t>(1u << r);
+            if (om >= 2) opp_bits.at2 |= static_cast<uint16_t>(1u << r);
+            if (om >= 3) opp_bits.at3 |= static_cast<uint16_t>(1u << r);
+            if (om >= 4) opp_bits.at4 |= static_cast<uint16_t>(1u << r);
         }
 
         for (int mi = 0; mi < (int)slot.legal.size(); ++mi) {
@@ -238,8 +244,7 @@ static void encode_pool(const std::vector<GameSlot>& pool, InferBuf& buf) {
             encode_exact(mc,           h_move + row*ENCODING_DIM);
 
             bool is_pass = (move_id == kPASS);
-            bool is_flag = !is_pass && !opponent_can_respond(
-                move_id, hand_counts, discard, opp_count);
+            bool is_flag = !is_pass && !opponent_can_respond(move_id, opp_bits, opp_count);
             float hint_val = is_pass ? 0.0f
                            : (is_flag ? 1.0f : (1.0f - kHintTable[move_id]));
 
@@ -247,26 +252,13 @@ static void encode_pool(const std::vector<GameSlot>& pool, InferBuf& buf) {
             h_flag[row] = is_flag;
             h_pass[row] = is_pass;
 
-            // Build opp_bits for recording
-            HandBits opp_bits{};
-            for (int r = 0; r < 13; ++r) {
-                int om = opp_counts[r];
-                if (om >= 1) opp_bits.at1 |= 1u<<r;
-                if (om >= 2) opp_bits.at2 |= 1u<<r;
-                if (om >= 3) opp_bits.at3 |= 1u<<r;
-                if (om >= 4) opp_bits.at4 |= 1u<<r;
-            }
-
             // Post-move hand bits (after applying this move)
             HandBits post_hb = hb;
             for (int r = 0; r < 13; ++r)
                 if (mc[r]) hand_bits_remove(post_hb, r, mc[r]);
 
-            std::array<int,13> move_enc{};
-            for (int r = 0; r < 13; ++r) move_enc[r] = mc[r];
-
             buf.pos_map[row] = {g, mi, cp, hint_val, is_flag, is_pass,
-                                move_enc,
+                                mc,
                                 {post_hb.at1, post_hb.at2, post_hb.at3, post_hb.at4},
                                 {opp_bits.at1, opp_bits.at2, opp_bits.at3, opp_bits.at4}};
             ++row;

@@ -159,8 +159,7 @@ NNGameData NNGameRunner::run_game(std::mt19937& rng) const {
             move_enc[r] = MOVE_TO_CARDS[move_id][r];
 
         const bool pass_ = (move_id == kPASS);
-        const auto hand_after = hand_bits_to_counts(hb);
-        const bool flag = !pass_ && !opponent_can_respond(move_id, hand_after, discard_after, opp_count);
+        const bool flag = !pass_ && !opponent_can_respond(move_id, opp_bits, opp_count);
         const float hint = pass_ ? 0.0f : (flag ? 1.0f : (1.0f - kHintTable[move_id]));
 
         turns.push_back({cp, move_enc,

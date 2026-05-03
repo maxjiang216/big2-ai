@@ -311,31 +311,53 @@ const std::vector<std::vector<int>> &get_beating_moves() {
   return table;
 }
 
+const std::vector<std::vector<BeatEntry>> &get_beat_entries() {
+  static const std::vector<std::vector<BeatEntry>> table = [] {
+    const auto &moves = all_moves();
+    std::vector<std::vector<BeatEntry>> t(LEGAL_MOVES_SIZE);
+    for (int mid = kSINGLE_START; mid < LEGAL_MOVES_SIZE; ++mid) {
+      for (int mid2 : get_beating_moves()[mid]) {
+        const Move &m2 = moves[mid2];
+        if (m2.combination == Move::Combination::kBomb && m2.auxiliary != 0)
+          continue;
+        const auto &cost = MOVE_TO_CARDS[mid2];
+        HandBits needs{};
+        for (int r = 0; r < 13; ++r) {
+          if (cost[r] >= 1) needs.at1 |= static_cast<uint16_t>(1u << r);
+          if (cost[r] >= 2) needs.at2 |= static_cast<uint16_t>(1u << r);
+          if (cost[r] >= 3) needs.at3 |= static_cast<uint16_t>(1u << r);
+          if (cost[r] >= 4) needs.at4 |= static_cast<uint16_t>(1u << r);
+        }
+        t[mid].push_back({needs, cost[13]});
+      }
+    }
+    return t;
+  }();
+  return table;
+}
+
 bool opponent_can_respond(int move_id,
                           const std::array<int, 13> &hand,
                           const std::array<int, 13> &discard,
                           int opp_count) {
-  const auto &moves = all_moves();
-  for (int mid2 : get_beating_moves()[move_id]) {
-    const Move &m2 = moves[mid2];
-    // Bombs with an auxiliary card beat the same things as the bare (no-kicker)
-    // bomb of the same rank but use more cards. For "can the opponent
-    // possibly respond?" it is enough to check bare bombs: if they cannot play
-    // the minimal-card beating bomb, they cannot play the aux version either.
-    if (m2.combination == Move::Combination::kBomb && m2.auxiliary != 0)
-      continue;
-    const auto &cost = MOVE_TO_CARDS[mid2];
-    if (opp_count < cost[13])
-      continue;
-    bool feasible = true;
-    for (int r = 0; r < 13; ++r) {
-      int unseen = max_cards_in_deck_for_rank(r) - hand[r] - discard[r];
-      if (unseen < cost[r]) {
-        feasible = false;
-        break;
-      }
-    }
-    if (feasible)
+  HandBits opp_bits{};
+  for (int r = 0; r < 13; ++r) {
+    int om = max_cards_in_deck_for_rank(r) - hand[r] - discard[r];
+    if (om >= 1) opp_bits.at1 |= static_cast<uint16_t>(1u << r);
+    if (om >= 2) opp_bits.at2 |= static_cast<uint16_t>(1u << r);
+    if (om >= 3) opp_bits.at3 |= static_cast<uint16_t>(1u << r);
+    if (om >= 4) opp_bits.at4 |= static_cast<uint16_t>(1u << r);
+  }
+  return opponent_can_respond(move_id, opp_bits, opp_count);
+}
+
+bool opponent_can_respond(int move_id, const HandBits &opp_bits, int opp_count) {
+  for (const auto &e : get_beat_entries()[move_id]) {
+    if (opp_count < e.count) continue;
+    if ((e.needs.at1 & opp_bits.at1) == e.needs.at1 &&
+        (e.needs.at2 & opp_bits.at2) == e.needs.at2 &&
+        (e.needs.at3 & opp_bits.at3) == e.needs.at3 &&
+        (e.needs.at4 & opp_bits.at4) == e.needs.at4)
       return true;
   }
   return false;

@@ -138,6 +138,14 @@ std::vector<int> compute_possible_moves(const std::array<int, 13> &player_hand,
 // Computed once on first call; O(LEGAL_MOVES_SIZE^2) pre-processing.
 const std::vector<std::vector<int>> &get_beating_moves();
 
+// Precomputed per-move card requirements as HandBits masks (thermometer
+// encoding), with aux-bomb variants excluded. Used by the fast overload below.
+struct BeatEntry {
+    HandBits needs;  // atN has bit r set iff move uses >= N cards of rank r
+    int count;       // total cards in move (for opp_count pre-check)
+};
+const std::vector<std::vector<BeatEntry>> &get_beat_entries();
+
 // True if the opponent might still hold at least one response to move_id,
 // given our hand, the discard pile, and the opponent's known card count.
 // Bomb responses are checked using bare bombs only (no auxiliary / kicker):
@@ -146,6 +154,12 @@ bool opponent_can_respond(int move_id,
                           const std::array<int, 13> &hand,
                           const std::array<int, 13> &discard,
                           int opp_count);
+
+// Fast overload: takes the precomputed opp upper-bound HandBits directly,
+// replacing the 13-rank inner loop with 4 bitwise ops per beating move.
+// opp_bits.atN has bit r set iff the opponent could hold >= N cards of rank r
+// (i.e. max_cards[r] - player_hand[r] - discard[r] >= N).
+bool opponent_can_respond(int move_id, const HandBits &opp_bits, int opp_count);
 
 // From a new-trick (we have the lead) position, search for a sequence of
 // moves that guarantees we empty our hand:
