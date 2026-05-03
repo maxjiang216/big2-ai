@@ -14,8 +14,6 @@ Outputs (all probabilities in [0, 1]):
   p_trick   - probability player wins this trick
 """
 
-import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -71,7 +69,7 @@ def encode_upper_bound(rank_counts: torch.Tensor) -> torch.Tensor:
 # Building blocks
 # ---------------------------------------------------------------------------
 
-def _init_mish(layer: nn.Linear) -> nn.Linear:
+def _init_swish(layer: nn.Linear) -> nn.Linear:
     nn.init.kaiming_normal_(layer.weight, mode="fan_in", nonlinearity="relu")
     nn.init.zeros_(layer.bias)
     return layer
@@ -124,14 +122,13 @@ class Big2Net(nn.Module):
     """Big 2 strategic engine DNN.
 
     Architecture:
-      A  (48→64, Mish, shared across hand/opp/move)
-      B  (64→64, Mish, shared across player/opp hands)
-      B' (64→64, Mish, independent for move)
-      C  (64→128, Mish, independent, player hand only)
-      C' (64→64,  Mish, independent, opponent only)
-      move keeps 64-dim output of B'
+      A  (48→64, Swish, shared across hand/opp/move)
+      B  (64→64, Swish, shared across player/opp hands)
+      B' (64→32, Swish, independent for move — compressed: move is sparse/info-light)
+      C  (64→128, Swish, independent, player hand only)
+      C' (64→96,  Swish, independent, opponent only)
 
-      Junction: cat([C:128, C':64, B':64]) → 256
+      Junction: cat([C:128, C':96, B':32]) → 256
       Gating: sigmoid(Linear(1,256)(hint)) element-wise scale
       Hard mask: zero move dims if pass or flag
       LayerNorm(256)
@@ -146,13 +143,15 @@ class Big2Net(nn.Module):
         super().__init__()
 
         # Shared embedding layers
-        self.layer_a = _init_mish(nn.Linear(ENCODING_DIM, 64))
-        self.layer_b_hands = _init_mish(nn.Linear(64, 64))
-        self.layer_b_move = _init_mish(nn.Linear(64, 64))
+        self.layer_a = _init_swish(nn.Linear(ENCODING_DIM, 64))
+        self.layer_b_hands = _init_swish(nn.Linear(64, 64))
 
-        # Per-role refinement layers
-        self.layer_c_player = _init_mish(nn.Linear(64, 128))
-        self.layer_c_opp = _init_mish(nn.Linear(64, 64))
+        # Move embedding: compressed to 32 — moves are sparse and information-light
+        self.layer_b_move = _init_swish(nn.Linear(64, 32))
+
+        # Per-role refinement layers (128 + 96 + 32 = 256 at junction)
+        self.layer_c_player = _init_swish(nn.Linear(64, 128))
+        self.layer_c_opp = _init_swish(nn.Linear(64, 96))
 
         # Hint gate: projects scalar hint to 256-dim element-wise gate
         self.hint_gate = nn.Linear(1, 256)
@@ -178,24 +177,24 @@ class Big2Net(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns (v_init, v_no_init, p_trick), each shape [B]."""
         # --- Shared Layer A ---
-        h = F.mish(self.layer_a(hand))
-        o = F.mish(self.layer_a(opp))
-        m = F.mish(self.layer_a(move))
+        h = F.silu(self.layer_a(hand))
+        o = F.silu(self.layer_a(opp))
+        m = F.silu(self.layer_a(move))
 
         # --- Shared Layer B (hands only) ---
-        h = F.mish(self.layer_b_hands(h))
-        o = F.mish(self.layer_b_hands(o))
+        h = F.silu(self.layer_b_hands(h))
+        o = F.silu(self.layer_b_hands(o))
 
-        # --- Independent Layer B' (move) ---
-        m = F.mish(self.layer_b_move(m))
+        # --- Independent Layer B' (move, compressed to 32) ---
+        m = F.silu(self.layer_b_move(m))
 
         # --- Independent refinement ---
-        h = F.mish(self.layer_c_player(h))   # [B, 128]
-        o = F.mish(self.layer_c_opp(o))       # [B, 64]
+        h = F.silu(self.layer_c_player(h))   # [B, 128]
+        o = F.silu(self.layer_c_opp(o))       # [B, 96]
 
         # Hard mask: zero move embedding when pass or flag
         active_move = ~(pass_ | flag)
-        m = m * active_move.float().unsqueeze(-1)   # [B, 64]
+        m = m * active_move.float().unsqueeze(-1)   # [B, 32]
 
         # --- Junction ---
         x = torch.cat([h, o, m], dim=-1)             # [B, 256]
@@ -221,9 +220,10 @@ class Big2Net(nn.Module):
         return v_init, v_no_init, p_trick
 
     def embedding_param_ids(self) -> set:
-        """IDs of parameters in shared embedding layers (A, B, B').
+        """IDs of parameters in input-adjacent embedding layers (A, B, B').
 
-        Used by train.py to exclude them from weight decay.
+        These layers are excluded from weight decay in train.py: input-adjacent
+        layers are less prone to overfitting and benefit from less regularization.
         """
         ids = set()
         for layer in (self.layer_a, self.layer_b_hands, self.layer_b_move):
