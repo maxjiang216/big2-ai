@@ -27,6 +27,7 @@
 #include "turn_level/trick_rank_feature.h"
 #include "turn_level/tb_case_feature.h"
 #include "turn_level/only_single_feature.h"
+#include "turn_level/hand_structure_features.h"
 
 #include "feature_extractor.h"
 #include "move.h"
@@ -146,6 +147,92 @@ inline std::shared_ptr<FeatureExtractor> create_feature(const std::string &name)
   if (name == "trick_rank")           return std::make_shared<TrickRankFeature>();
   if (name == "tb_case")              return std::make_shared<TbCaseFeature>();
   if (name == "only_single")          return std::make_shared<OnlySingleFeature>();
+
+  // --- intrinsic hand combos on fresh trick (compute_legal_moves with Pass lead) ---
+  if (name == "pass_sr5_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_SR5, "pass_sr5_best_rank");
+  if (name == "pass_sr6_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_SR6, "pass_sr6_best_rank");
+  if (name == "pass_sr7_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_SR7, "pass_sr7_best_rank");
+  if (name == "pass_sr8_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_SR8, "pass_sr8_best_rank");
+  if (name == "pass_sr9_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_SR9, "pass_sr9_best_rank");
+  if (name == "pass_sr10_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_SR10, "pass_sr10_best_rank");
+  if (name == "pass_sr11_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_SR11, "pass_sr11_best_rank");
+  if (name == "pass_sr12_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_SR12, "pass_sr12_best_rank");
+  if (name == "pass_sr13_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_SR13, "pass_sr13_best_rank");
+  if (name == "pass_best_score_single_straight")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_SCORE_SINGLE_STR, "pass_best_score_single_straight");
+  if (name == "pass_ds2_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_DS2, "pass_ds2_best_rank");
+  if (name == "pass_ds3_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_DS3, "pass_ds3_best_rank");
+  if (name == "pass_ds4_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_DS4, "pass_ds4_best_rank");
+  if (name == "pass_ds5_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_DS5, "pass_ds5_best_rank");
+  if (name == "pass_ds6_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_DS6, "pass_ds6_best_rank");
+  if (name == "pass_ds7_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_DS7, "pass_ds7_best_rank");
+  if (name == "pass_ds8_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_DS8, "pass_ds8_best_rank");
+  if (name == "pass_best_score_double_straight")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_SCORE_DOUBLE_STR, "pass_best_score_double_straight");
+  if (name == "pass_ts2_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_TS2, "pass_ts2_best_rank");
+  if (name == "pass_ts3_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_TS3, "pass_ts3_best_rank");
+  if (name == "pass_ts4_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_TS4, "pass_ts4_best_rank");
+  if (name == "pass_ts5_best_rank")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_TS5, "pass_ts5_best_rank");
+  if (name == "pass_best_score_triple_straight")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_SCORE_TRIPLE_STR, "pass_best_score_triple_straight");
+  if (name == "pass_has_full_house")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_HAS_FULL_HOUSE, "pass_has_full_house");
+  if (name == "pass_has_straight5p")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_HAS_STRAIGHT5P, "pass_has_straight5p");
+  if (name == "pass_has_double_straight")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_HAS_DOUBLE_STR, "pass_has_double_straight");
+  if (name == "pass_has_triple_straight")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_HAS_TRIPLE_STR, "pass_has_triple_straight");
+  if (name == "pass_has_bomb")
+    return std::make_shared<PassLegalColumnFeature>(
+        PL_COL_HAS_BOMB_PASS, "pass_has_bomb");
 
   std::cerr << "Warning: unknown feature '" << name << "', skipping\n";
   return nullptr;

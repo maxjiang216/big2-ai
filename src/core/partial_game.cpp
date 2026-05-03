@@ -16,7 +16,8 @@ PartialGame::PartialGame(const Game &game, int player_num)
     : turn_(game.current_player() == player_num ? 0 : 1),
       player_hand_(game.player_hand(player_num)),
       opponent_card_count_(game.get_player_hand_size(1 - player_num)),
-      discard_pile_(game.discard_pile()), last_move_(game.last_move()) {}
+      discard_pile_(game.discard_pile()), last_move_(game.last_move()),
+      last_move_id_(game.last_move_id()) {}
 
 void PartialGame::apply_move(const Move &move) {
   int move_id = encodeMove(move);
@@ -37,21 +38,26 @@ void PartialGame::apply_move(const Move &move) {
   }
 
   last_move_ = move;
+  last_move_id_ = move_id;
   turn_ = 1 - turn_;
 }
 
 std::vector<int> PartialGame::get_legal_moves() const {
-  return compute_legal_moves(player_hand_, last_move_);
+  return compute_legal_moves(player_hand_, last_move_id_);
+}
+
+void PartialGame::get_legal_moves_into(std::vector<int> &out) const {
+  compute_legal_moves_into(player_hand_, last_move_id_, out);
 }
 
 std::vector<int> PartialGame::get_possible_moves() const {
   return compute_possible_moves(player_hand_, discard_pile_, opponent_card_count_,
-                                last_move_, false);
+                                last_move_id_, false);
 }
 
 std::vector<int> PartialGame::get_possible_moves_not_bomb() const {
   return compute_possible_moves(player_hand_, discard_pile_, opponent_card_count_,
-                                last_move_, true);
+                                last_move_id_, true);
 }
 
 int PartialGame::count_bombs() const {

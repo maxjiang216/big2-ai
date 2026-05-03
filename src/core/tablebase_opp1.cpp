@@ -67,8 +67,7 @@ Opp1Result lookup_opp1(const std::array<int, 13> &hand) {
 }
 
 std::optional<int> opp1_default_strategy_move(const std::array<int, 13> &hand) {
-  Move pass(Move::Combination::kPass);
-  auto legal = compute_legal_moves(hand, pass);
+  auto legal = compute_legal_moves(hand, kPASS);
 
   std::optional<int> best_bomb;
   for (int mid : legal) {

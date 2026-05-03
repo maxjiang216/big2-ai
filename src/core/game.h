@@ -34,8 +34,10 @@ public:
   std::array<int, 13> discard_pile() const;
 
   Move last_move() const;
+  int last_move_id() const;
 
   std::vector<int> get_legal_moves() const;
+  void get_legal_moves_into(std::vector<int> &out) const;
 
 private:
   std::array<std::array<int, 13>, 2> hands_{};
@@ -43,6 +45,7 @@ private:
   int hand_size_[2]{0, 0};
   int current_player_{0};
   Move last_move_{Move::Combination::kPass};
+  int last_move_id_{0}; // 0 == kPASS
 
   friend std::ostream &operator<<(std::ostream &os, const Game &game);
 };
