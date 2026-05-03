@@ -1,4 +1,5 @@
 # Build from repository root (directory containing this Makefile).
+comma := ,
 CXX         = g++
 CXXFLAGS    = -O2 -std=c++17 -Wall -Wextra -march=native -fopenmp
 DEPFLAGS    = -MMD -MP
@@ -9,8 +10,10 @@ LDFLAGS_PARQUET = -lparquet -larrow -pthread
 # LibTorch (from project venv) — used only for generate_nn_selfplay
 TORCH_BASE      := $(shell .venv/bin/python -c "import torch,os; print(os.path.dirname(torch.__file__))" 2>/dev/null)
 TORCH_INCLUDES  := -I$(TORCH_BASE)/include -I$(TORCH_BASE)/include/torch/csrc/api/include
+CUDA_LIB_BASE   := $(shell .venv/bin/python -c "import os; p=os.path.abspath('.venv/lib/python3.13/site-packages/nvidia/cu13/lib'); print(p) if os.path.isdir(p) else print('')" 2>/dev/null)
 TORCH_LDFLAGS   := -L$(TORCH_BASE)/lib -ltorch -ltorch_cpu -lc10 \
-                   -Wl,-rpath,$(TORCH_BASE)/lib
+                   -Wl,-rpath,$(TORCH_BASE)/lib \
+                   $(if $(CUDA_LIB_BASE),-Wl$(comma)-rpath$(comma)$(CUDA_LIB_BASE))
 LDFLAGS_TORCH   := $(LDFLAGS_PARQUET) $(TORCH_LDFLAGS)
 
 BUILD_DIR   = build
