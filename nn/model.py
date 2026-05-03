@@ -166,6 +166,55 @@ class Big2Net(nn.Module):
         self.head_v_no_init = Head(256)
         self.head_p_trick = Head(257)  # trunk + hint scalar
 
+    def encode_opp(self, opp: torch.Tensor) -> torch.Tensor:
+        """Opp-only path: layer_a → layer_b_hands → layer_c_opp.
+
+        Call once per decision point and reuse across all K legal move evals.
+        opp: [B, 48] → returns [B, 96]
+        """
+        o = F.silu(self.layer_a(opp))
+        o = F.silu(self.layer_b_hands(o))
+        return F.silu(self.layer_c_opp(o))
+
+    def forward_with_opp(
+        self,
+        hand: torch.Tensor,   # [K, 48]
+        move: torch.Tensor,   # [K, 48]
+        hint: torch.Tensor,   # [K]
+        flag: torch.Tensor,   # [K] bool
+        pass_: torch.Tensor,  # [K] bool
+        o: torch.Tensor,      # [B, 96] or [96] — cached opp embedding
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Forward pass reusing a pre-computed opp embedding.
+
+        o may be shape [96] (single game, broadcast over K) or [K, 96].
+        Returns (v_init, v_no_init, p_trick), each shape [K].
+        """
+        h = F.silu(self.layer_a(hand))
+        h = F.silu(self.layer_b_hands(h))
+        m = F.silu(self.layer_a(move))
+        m = F.silu(self.layer_b_move(m))
+        h = F.silu(self.layer_c_player(h))            # [K, 128]
+
+        active_move = ~(pass_ | flag)
+        m = m * active_move.float().unsqueeze(-1)      # [K, 32]
+
+        if o.shape[0] != h.shape[0]:
+            o = o.expand(h.shape[0], -1)
+
+        x = torch.cat([h, o, m], dim=-1)               # [K, 256]
+        gate = torch.sigmoid(self.hint_gate(hint.unsqueeze(-1)))
+        x = self.junction_norm(x * gate)
+        x = self.trunk(x)
+
+        v_init = self.head_v_init(x)
+        v_no_init = self.head_v_no_init(x)
+        p_raw = self.head_p_trick(torch.cat([x, hint.unsqueeze(-1)], dim=-1))
+        p_trick = torch.where(flag, torch.ones_like(p_raw), p_raw)
+        p_trick = torch.where(pass_, torch.zeros_like(p_trick), p_trick)
+
+        return v_init, v_no_init, p_trick
+
     def forward(
         self,
         hand: torch.Tensor,    # [B, 48] float
@@ -176,48 +225,8 @@ class Big2Net(nn.Module):
         pass_: torch.Tensor,   # [B]     bool   (move is pass)
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns (v_init, v_no_init, p_trick), each shape [B]."""
-        # --- Shared Layer A ---
-        h = F.silu(self.layer_a(hand))
-        o = F.silu(self.layer_a(opp))
-        m = F.silu(self.layer_a(move))
-
-        # --- Shared Layer B (hands only) ---
-        h = F.silu(self.layer_b_hands(h))
-        o = F.silu(self.layer_b_hands(o))
-
-        # --- Independent Layer B' (move, compressed to 32) ---
-        m = F.silu(self.layer_b_move(m))
-
-        # --- Independent refinement ---
-        h = F.silu(self.layer_c_player(h))   # [B, 128]
-        o = F.silu(self.layer_c_opp(o))       # [B, 96]
-
-        # Hard mask: zero move embedding when pass or flag
-        active_move = ~(pass_ | flag)
-        m = m * active_move.float().unsqueeze(-1)   # [B, 32]
-
-        # --- Junction ---
-        x = torch.cat([h, o, m], dim=-1)             # [B, 256]
-
-        # Hint-derived gate
-        gate = torch.sigmoid(self.hint_gate(hint.unsqueeze(-1)))  # [B, 256]
-        x = x * gate
-
-        x = self.junction_norm(x)
-        x = self.trunk(x)                             # [B, 256]
-
-        # --- Output heads ---
-        v_init = self.head_v_init(x)
-        v_no_init = self.head_v_no_init(x)
-
-        x_hint = torch.cat([x, hint.unsqueeze(-1)], dim=-1)  # [B, 257]
-        p_trick_raw = self.head_p_trick(x_hint)
-
-        # Post-process p_trick: flag → 1.0, pass → 0.0
-        p_trick = torch.where(flag, torch.ones_like(p_trick_raw), p_trick_raw)
-        p_trick = torch.where(pass_, torch.zeros_like(p_trick), p_trick)
-
-        return v_init, v_no_init, p_trick
+        return self.forward_with_opp(hand, move, hint, flag, pass_,
+                                     self.encode_opp(opp))
 
     def embedding_param_ids(self) -> set:
         """IDs of parameters in input-adjacent embedding layers (A, B, B').
