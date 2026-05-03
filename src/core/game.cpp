@@ -7,11 +7,12 @@
 #include <random>
 #include <vector>
 
-Game::Game() : hands_{}, hand_size_{0, 0}, current_player_(0) {}
+Game::Game() : hand_bits_{}, hand_size_{0, 0}, current_player_(0) {}
 
 Game::Game(std::array<int, 13> hand0, std::array<int, 13> hand1,
            std::array<int, 13> discard, Move last_move, int current_player)
-    : hands_({hand0, hand1}), discard_pile_(discard),
+    : hand_bits_{hand_bits_from_counts(hand0), hand_bits_from_counts(hand1)},
+      discard_pile_(discard),
       current_player_(current_player), last_move_(last_move) {
   hand_size_[0] = 0;
   for (int r = 0; r < 13; ++r) hand_size_[0] += hand0[r];
@@ -28,21 +29,15 @@ void Game::shuffle_deal(std::mt19937 &rng) {
   }
   std::shuffle(deck.begin(), deck.end(), rng);
 
-  for (auto &h : hands_)
-    h.fill(0);
+  std::array<int, 13> counts0{}, counts1{};
+  for (int i = 0; i < 16; ++i) counts0[deck[i]]++;
+  for (int i = 16; i < 32; ++i) counts1[deck[i]]++;
+  hand_bits_[0] = hand_bits_from_counts(counts0);
+  hand_bits_[1] = hand_bits_from_counts(counts1);
 
-  for (int i = 0; i < 16; ++i)
-    hands_[0][deck[i]]++;
-  for (int i = 16; i < 32; ++i)
-    hands_[1][deck[i]]++;
-
-  for (int i = 0; i < 13; ++i) {
-    discard_pile_[i] = 0;
-  }
-
+  discard_pile_.fill(0);
   hand_size_[0] = 16;
   hand_size_[1] = 16;
-  // TODO: first player by lowest card / house rules; fixed for now.
   current_player_ = 0;
 }
 
@@ -59,7 +54,11 @@ int Game::get_winner() const {
 }
 
 std::array<int, 13> Game::player_hand(int player) const {
-  return hands_[player];
+  return hand_bits_to_counts(hand_bits_[player]);
+}
+
+HandBits Game::player_hand_bits(int player) const {
+  return hand_bits_[player];
 }
 
 int Game::get_player_hand_size(int player) const { return hand_size_[player]; }
@@ -67,6 +66,7 @@ int Game::get_player_hand_size(int player) const { return hand_size_[player]; }
 std::array<int, 13> Game::discard_pile() const { return discard_pile_; }
 
 Move Game::last_move() const { return last_move_; }
+int  Game::last_move_id() const { return encodeMove(last_move_); }
 
 void Game::apply_move(const Move &move) { apply_move(encodeMove(move)); }
 
@@ -75,8 +75,7 @@ void Game::apply_move(int move_id) {
   const auto &cost = MOVE_TO_CARDS[move_id];
 
   for (int rank = 0; rank < 13; ++rank) {
-    hands_[current_player_][rank] -= cost[rank];
-    assert(hands_[current_player_][rank] >= 0);
+    if (cost[rank]) hand_bits_remove(hand_bits_[current_player_], rank, cost[rank]);
     discard_pile_[rank] += cost[rank];
     assert(discard_pile_[rank] <= max_cards_in_deck_for_rank(rank));
   }
@@ -88,7 +87,7 @@ void Game::apply_move(int move_id) {
 }
 
 std::vector<int> Game::get_legal_moves() const {
-  return compute_legal_moves(hands_[current_player_], last_move_);
+  return compute_legal_moves(hand_bits_[current_player_], last_move_);
 }
 
 std::ostream &operator<<(std::ostream &os, const Game &game) {
@@ -97,8 +96,9 @@ std::ostream &operator<<(std::ostream &os, const Game &game) {
   for (int p = 0; p < 2; ++p) {
     os << "Player " << p << " hand (" << game.get_player_hand_size(p)
        << "): [";
+    const auto counts = hand_bits_to_counts(game.hand_bits_[p]);
     for (int i = 0; i < 13; ++i) {
-      for (int c = 0; c < game.hands_[p][i]; ++c) {
+      for (int c = 0; c < counts[i]; ++c) {
         os << rankToChar(i + 3);
       }
     }

@@ -6,6 +6,7 @@ void run_partial_game_tests();
 void run_greedy_player_tests();
 void run_random_game_tests();
 void run_tablebase_tests();
+void run_legal_moves_tests();
 
 int main() {
   std::cout << "[ move        ] ";
@@ -30,6 +31,10 @@ int main() {
 
   std::cout << "[ tablebase   ] ";
   run_tablebase_tests();
+  std::cout << "PASS\n";
+
+  std::cout << "[ legal_moves ] ";
+  run_legal_moves_tests();
   std::cout << "PASS\n";
 
   std::cout << "All tests passed.\n";

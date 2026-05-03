@@ -4,6 +4,7 @@
 #include "move.h"
 
 #include <array>
+#include <cstdint>
 #include <optional>
 #include <vector>
 
@@ -50,6 +51,46 @@ inline constexpr int max_cards_in_deck_for_rank(int rank_index) {
   return 4;
 }
 
+// ---------------------------------------------------------------------------
+// HandBits — cumulative bitmask representation of a player's hand.
+// at_n: bit r is set iff the player holds ≥n cards of rank r (0-based).
+// Invariant: at4 ⊆ at3 ⊆ at2 ⊆ at1 (bits 0-12 used; bits 13-15 always 0).
+// ---------------------------------------------------------------------------
+struct HandBits {
+    uint16_t at1{}, at2{}, at3{}, at4{};
+};
+
+inline HandBits hand_bits_from_counts(const std::array<int, 13> &c) {
+    HandBits h;
+    for (int r = 0; r < 13; ++r) {
+        if (c[r] >= 1) h.at1 |= static_cast<uint16_t>(1u << r);
+        if (c[r] >= 2) h.at2 |= static_cast<uint16_t>(1u << r);
+        if (c[r] >= 3) h.at3 |= static_cast<uint16_t>(1u << r);
+        if (c[r] >= 4) h.at4 |= static_cast<uint16_t>(1u << r);
+    }
+    return h;
+}
+
+inline std::array<int, 13> hand_bits_to_counts(const HandBits &h) {
+    std::array<int, 13> c{};
+    for (int r = 0; r < 13; ++r)
+        c[r] = ((h.at1 >> r) & 1) + ((h.at2 >> r) & 1) +
+               ((h.at3 >> r) & 1) + ((h.at4 >> r) & 1);
+    return c;
+}
+
+// Remove `cost` cards of rank r (modifies h in place; called from apply_move).
+inline void hand_bits_remove(HandBits &h, int r, int cost) {
+    const int old_c = ((h.at1 >> r) & 1) + ((h.at2 >> r) & 1) +
+                      ((h.at3 >> r) & 1) + ((h.at4 >> r) & 1);
+    const int new_c = old_c - cost;
+    const uint16_t bit = static_cast<uint16_t>(1u << r);
+    if (new_c < 4) h.at4 &= static_cast<uint16_t>(~bit);
+    if (new_c < 3) h.at3 &= static_cast<uint16_t>(~bit);
+    if (new_c < 2) h.at2 &= static_cast<uint16_t>(~bit);
+    if (new_c < 1) h.at1 &= static_cast<uint16_t>(~bit);
+}
+
 // True if every rank appears at most once (no pair, triple, or bomb in hand).
 inline bool hand_is_only_singles(const std::array<int, 13> &hand) {
   for (int i = 0; i < 13; ++i) {
@@ -61,8 +102,30 @@ inline bool hand_is_only_singles(const std::array<int, 13> &hand) {
 
 char rankToChar(int rank);
 
+// Precomputed table of all 468 Move objects, indexed by legal move ID.
+// Eliminates repeated Move(int) construction in hot loops.
+const std::array<Move, LEGAL_MOVES_SIZE> &all_moves();
+
+std::vector<int> compute_legal_moves(const HandBits &hand,
+                                     const Move &last_move);
+// Compatibility shim: constructs HandBits from count array, then delegates.
 std::vector<int> compute_legal_moves(const std::array<int, 13> &hand,
                                      const Move &last_move);
+// Integer-move-id overload (convenience; used by tests and find_forced_win callers).
+std::vector<int> compute_legal_moves(const std::array<int, 13> &hand, int move_id);
+
+// Fills `out` in place (avoids vector reallocation at call sites that already hold a buf).
+void compute_legal_moves_into(const std::array<int, 13> &hand, int move_id,
+                              std::vector<int> &out);
+
+// Fill `out` with the straight move IDs playable from the given single/double/triple
+// presence bitmasks. Exposed for testing equivalence against brute-force reference.
+void straight_moves_for_pass_masks_into(uint16_t hs, uint16_t hp, uint16_t ht,
+                                        std::vector<int> &out);
+
+// kPASS lookup table for small hands — not implemented (set to 0 to skip table path).
+extern int g_kpass_legal_max_cards;
+constexpr int KPASS_LEGAL_TABLE_MAX_CARDS_BUILT = 0;
 
 std::vector<int> compute_possible_moves(const std::array<int, 13> &player_hand,
                                         const std::array<int, 13> &discard_pile,

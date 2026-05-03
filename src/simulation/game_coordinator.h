@@ -99,6 +99,9 @@ private:
   std::vector<std::pair<int, GameRecord>> _anomaly_indexed;
 
   long long _run_elapsed_ms = 0;
+  long long _sim_elapsed_ms = 0;
+  long long _extract_elapsed_ms = 0;
+  long long _parquet_elapsed_ms = 0;
 
   GameRecord simulate_single_game(std::mt19937 &rng);
 };

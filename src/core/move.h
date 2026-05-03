@@ -39,6 +39,7 @@ public:
   int rank{0};
   int auxiliary{0};
 
+  Move() = default;
   Move(Combination comb, int r = 0, int aux = 0)
       : combination(comb), rank(r), auxiliary(aux) {}
   Move(int encoded_move);

@@ -19,7 +19,7 @@ TEST_CPP    := $(wildcard test/*.cpp)
 RESEARCH_BIN_NAMES := best_hand multi_comb play_probs count_turn_states
 RESEARCH_BINS      := $(addprefix $(BUILD_DIR)/research/,$(RESEARCH_BIN_NAMES))
 
-.PHONY: all clean dirs test_core coordinator generate_data eval_match pass_greedy_datagen move_agreement benchmark tablebase_opp1_gen research help
+.PHONY: all clean dirs test_core coordinator generate_data generate_nn_data eval_match pass_greedy_datagen move_agreement benchmark tablebase_opp1_gen research help
 
 all: help
 
@@ -29,11 +29,13 @@ help:
 	@echo "  make benchmark            - perf benchmark binary (no Arrow)"
 	@echo "  make coordinator          - coordinator + Parquet objects (needs libarrow)"
 	@echo "  make generate_data        - self-play + Parquet + stats (needs libarrow)"
+	@echo "  make generate_nn_data     - NN training data (random self-play, needs libarrow)"
 	@echo "  make eval_match           - head-to-head evaluation binary (no Arrow)"
 	@echo "  scripts/profile_pimc_selfplay.sh - PIMC(20) symmetric eval_match: perf/callgrind/plain"
 	@echo "  make pass_greedy_datagen  - CSV dataset for pass-vs-greedy logistic (no Arrow)"
 	@echo "  make move_agreement       - greedy vs tree move agreement stats (no Arrow)"
 	@echo "  make tablebase_opp1_gen   - build opp-1-card tablebase binary generator (no Arrow)"
+	@echo "  make exact_hint           - exact P(beat) for each single move via exhaustive enum"
 	@echo "  make research             - standalone research/*.cpp -> build/research/"
 	@echo "  make clean"
 
@@ -54,6 +56,9 @@ $(BUILD_DIR)/src/simulation/game_simulator.o: src/simulation/game_simulator.cpp 
 $(BUILD_DIR)/src/simulation/game_coordinator.o: src/simulation/game_coordinator.cpp | dirs
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
+$(BUILD_DIR)/src/simulation/nn_game_runner.o: src/simulation/nn_game_runner.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
 $(BUILD_DIR)/src/datagen/parquet_export.o: src/datagen/parquet_export.cpp | dirs
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
@@ -61,6 +66,9 @@ $(BUILD_DIR)/src/datagen/samples_md.o: src/datagen/samples_md.cpp | dirs
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
 $(BUILD_DIR)/src/datagen/generate_data.o: src/datagen/generate_data.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/src/datagen/generate_nn_data.o: src/datagen/generate_nn_data.cpp | dirs
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
 $(BUILD_DIR)/test/%.o: test/%.cpp | dirs
@@ -132,6 +140,21 @@ $(BIN_DIR)/generate_data: $(GENDATA_OBJS)
 	@echo "✓ $(BIN_DIR)/generate_data"
 
 generate_data: dirs $(BIN_DIR)/generate_data
+
+# ============================================================================
+# bin/generate_nn_data — NN training data (random self-play, needs libarrow)
+# ============================================================================
+
+GENNNDATA_OBJS := $(CORE_OBJS) \
+                  $(BUILD_DIR)/src/simulation/nn_game_runner.o \
+                  $(BUILD_DIR)/src/datagen/parquet_export.o \
+                  $(BUILD_DIR)/src/datagen/generate_nn_data.o
+
+$(BIN_DIR)/generate_nn_data: $(GENNNDATA_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS_PARQUET)
+	@echo "✓ $(BIN_DIR)/generate_nn_data"
+
+generate_nn_data: dirs $(BIN_DIR)/generate_nn_data
 
 # ============================================================================
 # bin/eval_match — head-to-head evaluation (no Arrow)
@@ -218,6 +241,22 @@ $(BIN_DIR)/legal_move_dist: $(LEGAL_MOVE_DIST_OBJS)
 	@echo "✓ $(BIN_DIR)/legal_move_dist"
 
 legal_move_dist: dirs $(BIN_DIR)/legal_move_dist
+
+# ============================================================================
+# bin/exact_hint — exact P(opponent beats move) via exhaustive enumeration
+# ============================================================================
+
+$(BUILD_DIR)/research/exact_hint.o: research/exact_hint.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+EXACT_HINT_OBJS := $(CORE_OBJS) \
+                   $(BUILD_DIR)/research/exact_hint.o
+
+$(BIN_DIR)/exact_hint: $(EXACT_HINT_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ $(BIN_DIR)/exact_hint"
+
+exact_hint: dirs $(BIN_DIR)/exact_hint
 
 # ============================================================================
 # bin/tablebase_opp1_gen — precompute tablebase binary (no Arrow)
