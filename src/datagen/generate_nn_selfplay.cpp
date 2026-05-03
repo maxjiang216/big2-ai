@@ -50,123 +50,6 @@ static const char* kAtNames[4]    = { "at1", "at2", "at3", "at4" };
 static constexpr int RANK_MAX[13] = {4,4,4,4,4,4,4,4,4,4,4,3,1};
 
 // ---------------------------------------------------------------------------
-// Big2Net — C++ eager forward pass (no TorchScript interpreter overhead).
-// Weights are extracted from the loaded TorchScript module at startup.
-// Logically identical to nn/model.py Big2Net.forward_with_opp().
-// ---------------------------------------------------------------------------
-
-struct Big2Net {
-    // Shared embedding layers (SILU)
-    torch::Tensor la_w,  la_b;      // layer_a:       [64, 48]
-    torch::Tensor lbh_w, lbh_b;    // layer_b_hands: [64, 64]
-    torch::Tensor lbm_w, lbm_b;    // layer_b_move:  [32, 64]
-    torch::Tensor lcp_w, lcp_b;    // layer_c_player:[128, 64]
-    torch::Tensor lco_w, lco_b;    // layer_c_opp:   [96, 64]
-    // Hint gate + junction norm
-    torch::Tensor hg_w,  hg_b;     // hint_gate:     [256, 1]
-    torch::Tensor jn_w,  jn_b;     // junction_norm: [256]
-    // Trunk ResBlocks (SELU), 0 and 1
-    torch::Tensor t0_fc1_w, t0_fc1_b, t0_fc2_w, t0_fc2_b;  // [256, 256]
-    torch::Tensor t1_fc1_w, t1_fc1_b, t1_fc2_w, t1_fc2_b;
-    // Output heads (LeakyReLU → sigmoid): vi, vn use [128,256]+[1,128]; pt [128,257]
-    torch::Tensor vi_fc1_w, vi_fc1_b, vi_fc2_w, vi_fc2_b;
-    torch::Tensor vn_fc1_w, vn_fc1_b, vn_fc2_w, vn_fc2_b;
-    torch::Tensor pt_fc1_w, pt_fc1_b, pt_fc2_w, pt_fc2_b;
-
-    // Load all weights from a TorchScript module, move to dev.
-    static Big2Net load(torch::jit::Module& m, torch::Device dev) {
-        // Navigate dot-separated path (e.g. "trunk.0.fc1.weight")
-        auto get = [&](const std::string& path) -> torch::Tensor {
-            auto cur = m;
-            size_t pos = 0;
-            while (true) {
-                size_t dot = path.find('.', pos);
-                if (dot == std::string::npos)
-                    return cur.attr(path.substr(pos)).toTensor().to(dev).contiguous();
-                cur = cur.attr(path.substr(pos, dot-pos)).toModule();
-                pos = dot + 1;
-            }
-        };
-        Big2Net n;
-        n.la_w  = get("layer_a.weight");       n.la_b  = get("layer_a.bias");
-        n.lbh_w = get("layer_b_hands.weight");  n.lbh_b = get("layer_b_hands.bias");
-        n.lbm_w = get("layer_b_move.weight");   n.lbm_b = get("layer_b_move.bias");
-        n.lcp_w = get("layer_c_player.weight"); n.lcp_b = get("layer_c_player.bias");
-        n.lco_w = get("layer_c_opp.weight");    n.lco_b = get("layer_c_opp.bias");
-        n.hg_w  = get("hint_gate.weight");      n.hg_b  = get("hint_gate.bias");
-        n.jn_w  = get("junction_norm.weight");  n.jn_b  = get("junction_norm.bias");
-        n.t0_fc1_w = get("trunk.0.fc1.weight"); n.t0_fc1_b = get("trunk.0.fc1.bias");
-        n.t0_fc2_w = get("trunk.0.fc2.weight"); n.t0_fc2_b = get("trunk.0.fc2.bias");
-        n.t1_fc1_w = get("trunk.1.fc1.weight"); n.t1_fc1_b = get("trunk.1.fc1.bias");
-        n.t1_fc2_w = get("trunk.1.fc2.weight"); n.t1_fc2_b = get("trunk.1.fc2.bias");
-        n.vi_fc1_w = get("head_v_init.fc1.weight");    n.vi_fc1_b = get("head_v_init.fc1.bias");
-        n.vi_fc2_w = get("head_v_init.fc2.weight");    n.vi_fc2_b = get("head_v_init.fc2.bias");
-        n.vn_fc1_w = get("head_v_no_init.fc1.weight"); n.vn_fc1_b = get("head_v_no_init.fc1.bias");
-        n.vn_fc2_w = get("head_v_no_init.fc2.weight"); n.vn_fc2_b = get("head_v_no_init.fc2.bias");
-        n.pt_fc1_w = get("head_p_trick.fc1.weight");   n.pt_fc1_b = get("head_p_trick.fc1.bias");
-        n.pt_fc2_w = get("head_p_trick.fc2.weight");   n.pt_fc2_b = get("head_p_trick.fc2.bias");
-        return n;
-    }
-
-    // Forward: mirrors Big2Net.forward() in nn/model.py exactly.
-    // Inputs already on device; returns (v_init, v_no_init, p_trick) on device.
-    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
-    forward(const torch::Tensor& hand,  const torch::Tensor& opp,
-            const torch::Tensor& move_t, const torch::Tensor& hint,
-            const torch::Tensor& flag,  const torch::Tensor& pass_t) const {
-        torch::NoGradGuard ng;
-
-        // Hand: layer_a → silu → layer_b_hands → silu → layer_c_player → silu
-        auto h = at::silu(at::linear(hand, la_w, la_b));
-        h = at::silu(at::linear(h, lbh_w, lbh_b));
-        h = at::silu(at::linear(h, lcp_w, lcp_b));            // [K, 128]
-
-        // Opp: layer_a → silu → layer_b_hands → silu → layer_c_opp → silu
-        auto o = at::silu(at::linear(opp, la_w, la_b));
-        o = at::silu(at::linear(o, lbh_w, lbh_b));
-        o = at::silu(at::linear(o, lco_w, lco_b));            // [K, 96]
-
-        // Move: layer_a → silu → layer_b_move → silu; zero out if pass/flag
-        auto mv = at::silu(at::linear(move_t, la_w, la_b));
-        mv = at::silu(at::linear(mv, lbm_w, lbm_b));          // [K, 32]
-        auto active = ~(pass_t | flag);
-        mv = mv * active.to(torch::kFloat32).unsqueeze(-1);
-
-        // Junction: cat → hint gate (element-wise scale) → LayerNorm
-        auto x = at::cat({h, o, mv}, -1);                     // [K, 256]
-        auto gate = at::sigmoid(at::linear(hint.unsqueeze(-1), hg_w, hg_b));
-        x = at::layer_norm(x * gate, {256}, jn_w, jn_b);
-
-        // Trunk: 2 × ResBlock (SELU; residual added before outer SELU)
-        auto res = [](const torch::Tensor& in,
-                      const torch::Tensor& w1, const torch::Tensor& b1,
-                      const torch::Tensor& w2, const torch::Tensor& b2) {
-            return at::selu(at::linear(at::selu(at::linear(in, w1, b1)), w2, b2) + in);
-        };
-        x = res(x, t0_fc1_w, t0_fc1_b, t0_fc2_w, t0_fc2_b);
-        x = res(x, t1_fc1_w, t1_fc1_b, t1_fc2_w, t1_fc2_b);
-
-        // Heads: LeakyReLU(fc1) → fc2 → sigmoid; squeeze trailing dim
-        auto head = [](const torch::Tensor& in,
-                       const torch::Tensor& w1, const torch::Tensor& b1,
-                       const torch::Tensor& w2, const torch::Tensor& b2) {
-            return at::sigmoid(at::linear(
-                at::leaky_relu(at::linear(in, w1, b1), 0.01), w2, b2)).squeeze(-1);
-        };
-        auto v_init    = head(x, vi_fc1_w, vi_fc1_b, vi_fc2_w, vi_fc2_b);
-        auto v_no_init = head(x, vn_fc1_w, vn_fc1_b, vn_fc2_w, vn_fc2_b);
-        auto x_pt = at::cat({x, hint.unsqueeze(-1)}, -1);     // [K, 257]
-        auto p_raw = head(x_pt, pt_fc1_w, pt_fc1_b, pt_fc2_w, pt_fc2_b);
-
-        // p_trick post-processing: flag → 1.0, pass → 0.0
-        auto p_trick = at::where(flag, torch::ones_like(p_raw), p_raw);
-        p_trick      = at::where(pass_t, torch::zeros_like(p_trick), p_trick);
-
-        return {v_init, v_no_init, p_trick};
-    }
-};
-
-// ---------------------------------------------------------------------------
 // Encoding helpers
 // ---------------------------------------------------------------------------
 
@@ -389,51 +272,26 @@ static void encode_pool(const std::vector<GameSlot>& pool, InferBuf& buf) {
 // Run inference and dispatch best moves back to pool
 // ---------------------------------------------------------------------------
 
-static void run_inference(const Big2Net& net,
+static void run_inference(torch::jit::Module& model,
                           InferBuf& buf,
                           const torch::Device& dev) {
     if (buf.n_pos == 0) return;
 
-    static std::atomic<int>  s_calls{0};
-    static std::atomic<long> s_h2d_us{0}, s_fwd_us{0}, s_d2h_us{0};
-    bool is_cuda = (dev.type() == torch::kCUDA);
-    auto sync = [&]{ if (is_cuda) torch::cuda::synchronize(); };
-    auto now  = []{ return std::chrono::high_resolution_clock::now(); };
-
     auto slice = [&](torch::Tensor& t) {
         return t.slice(0, 0, buf.n_pos).to(dev, /*non_blocking=*/true);
     };
-
-    auto t0 = now();
     auto d_hand  = slice(buf.hand);
     auto d_opp   = slice(buf.opp);
     auto d_move  = slice(buf.move_t);
     auto d_hint  = slice(buf.hint);
     auto d_flag  = slice(buf.flag);
     auto d_pass  = slice(buf.pass_);
-    sync();
-    auto t1 = now();
 
-    auto [vi, vn, pt] = net.forward(d_hand, d_opp, d_move, d_hint, d_flag, d_pass);
-    sync();
-    auto t2 = now();
-
-    buf.v_init    = vi.to(torch::kCPU);
-    buf.v_no_init = vn.to(torch::kCPU);
-    buf.p_trick   = pt.to(torch::kCPU);
-    auto t3 = now();
-
-    auto us = [](auto a, auto b){
-        return std::chrono::duration_cast<std::chrono::microseconds>(b-a).count(); };
-    s_h2d_us += us(t0,t1); s_fwd_us += us(t1,t2); s_d2h_us += us(t2,t3);
-    int c = ++s_calls;
-    if (c == 50) {
-        std::fprintf(stderr, "\n[inference timing over %d calls, n_pos~%d]\n"
-            "  H2D: %.2f ms   forward: %.2f ms   D2H: %.2f ms   total: %.2f ms\n",
-            c, buf.n_pos,
-            s_h2d_us/1e3/c, s_fwd_us/1e3/c, s_d2h_us/1e3/c,
-            (s_h2d_us+s_fwd_us+s_d2h_us)/1e3/c);
-    }
+    torch::NoGradGuard ng;
+    auto out = model.forward({d_hand, d_opp, d_move, d_hint, d_flag, d_pass}).toTuple();
+    buf.v_init    = out->elements()[0].toTensor().to(torch::kCPU);
+    buf.v_no_init = out->elements()[1].toTensor().to(torch::kCPU);
+    buf.p_trick   = out->elements()[2].toTensor().to(torch::kCPU);
 }
 
 // ---------------------------------------------------------------------------
@@ -591,47 +449,9 @@ int main(int argc, char** argv) {
               << "Pool:    " << pool_size   << " per pool (" << 2*pool_size << " total in flight)\n"
               << "Device:  " << (dev==torch::kCUDA ? "cuda" : "cpu") << "\n\n";
 
-    // Load model weights and build eager C++ forward
-    torch::jit::Module jit_model = torch::jit::load(model_path);
-    jit_model.eval();
-    jit_model.to(dev);
-    Big2Net net = Big2Net::load(jit_model, dev);
-
-    // Smoke test: verify eager C++ forward matches TorchScript for random inputs
-    {
-        torch::manual_seed(0);
-        int N = 32;
-        auto opts_f = torch::TensorOptions().dtype(torch::kFloat32).device(dev);
-        auto opts_b = torch::TensorOptions().dtype(torch::kBool).device(dev);
-        auto hand  = torch::rand({N, ENCODING_DIM}, opts_f);
-        auto opp   = torch::rand({N, ENCODING_DIM}, opts_f);
-        auto move_ = torch::rand({N, ENCODING_DIM}, opts_f);
-        auto hint  = torch::rand({N}, opts_f);
-        auto flag  = torch::zeros({N}, opts_b);
-        auto pass_ = torch::zeros({N}, opts_b);
-
-        torch::NoGradGuard ng;
-        auto jit_out = jit_model.forward({hand, opp, move_, hint, flag, pass_}).toTuple();
-        auto [vi_jit, vn_jit, pt_jit] = std::tuple{
-            jit_out->elements()[0].toTensor(),
-            jit_out->elements()[1].toTensor(),
-            jit_out->elements()[2].toTensor()};
-        auto [vi_cpp, vn_cpp, pt_cpp] = net.forward(hand, opp, move_, hint, flag, pass_);
-
-        float tol = 1e-4f;
-        auto check = [&](const char* name, const torch::Tensor& a, const torch::Tensor& b) {
-            float diff = (a - b).abs().max().item<float>();
-            if (diff > tol) {
-                std::fprintf(stderr, "SMOKE TEST FAILED: %s max_diff=%.2e (tol=%.0e)\n",
-                             name, diff, (double)tol);
-                std::exit(1);
-            }
-        };
-        check("v_init",    vi_jit, vi_cpp);
-        check("v_no_init", vn_jit, vn_cpp);
-        check("p_trick",   pt_jit, pt_cpp);
-        std::cout << "Smoke test passed (eager C++ == TorchScript, max_diff < " << tol << ")\n";
-    }
+    torch::jit::Module model = torch::jit::load(model_path);
+    model.eval();
+    model.to(dev);
 
     std::atomic<int> games_done{0};
     auto t_start = std::chrono::high_resolution_clock::now();
@@ -686,7 +506,7 @@ int main(int argc, char** argv) {
             // Run inference (serialised through GPU mutex)
             {
                 std::lock_guard<std::mutex> lock(gpu_mutex);
-                run_inference(net, buf, dev);
+                run_inference(model, buf, dev);
             }
 
             // Dispatch results: apply best move, advance games
