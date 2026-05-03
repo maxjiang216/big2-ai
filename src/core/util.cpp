@@ -211,22 +211,34 @@ std::vector<int> compute_legal_moves(const HandBits &hand,
   const int lr = last_move.rank;
   const int bc = static_cast<int>(Move::Combination::kBomb);
 
+  // Bug fix: Move::rank uses card face values (3=three, 13=K, 14=A, 2=two),
+  // but HandBits bit positions are rank indices (0=three, 10=K, 11=A, 12=two).
+  // Convert rank → rank_idx before using as a bit shift.
+  // The "two" card has face rank 2 but is the highest (rank_idx 12).
+  auto rank_to_idx = [](int rank) -> int {
+      return (rank == 2) ? 12 : (rank - 3);
+  };
+
   if (lc == static_cast<int>(Move::Combination::kSingle)) {
-      for (uint16_t b = static_cast<uint16_t>(hand.at1 >> (lr + 1)); b;
+      const int li = rank_to_idx(lr);
+      for (uint16_t b = static_cast<uint16_t>(hand.at1 >> (li + 1)); b;
            b &= static_cast<uint16_t>(b - 1))
-          legal.push_back(kSINGLE_START + lr + 1 + __builtin_ctz(b));
+          legal.push_back(kSINGLE_START + li + 1 + __builtin_ctz(b));
   } else if (lc == static_cast<int>(Move::Combination::kDouble)) {
-      for (uint16_t b = static_cast<uint16_t>(hand.at2 >> (lr + 1)); b;
+      const int li = rank_to_idx(lr);
+      for (uint16_t b = static_cast<uint16_t>(hand.at2 >> (li + 1)); b;
            b &= static_cast<uint16_t>(b - 1))
-          legal.push_back(kDOUBLE_START + lr + 1 + __builtin_ctz(b));
+          legal.push_back(kDOUBLE_START + li + 1 + __builtin_ctz(b));
   } else if (lc == static_cast<int>(Move::Combination::kTriple)) {
-      for (uint16_t b = static_cast<uint16_t>((hand.at3 & 0x07FFu) >> (lr + 1)); b;
+      const int li = rank_to_idx(lr);
+      for (uint16_t b = static_cast<uint16_t>((hand.at3 & 0x07FFu) >> (li + 1)); b;
            b &= static_cast<uint16_t>(b - 1))
-          legal.push_back(kTRIPLE_START + lr + 1 + __builtin_ctz(b));
+          legal.push_back(kTRIPLE_START + li + 1 + __builtin_ctz(b));
   } else if (lc == static_cast<int>(Move::Combination::kFullHouse)) {
-      for (uint16_t tb = static_cast<uint16_t>(hand.at3 >> (lr + 1)); tb;
+      const int li = rank_to_idx(lr);
+      for (uint16_t tb = static_cast<uint16_t>(hand.at3 >> (li + 1)); tb;
            tb &= static_cast<uint16_t>(tb - 1)) {
-          const int t = lr + 1 + __builtin_ctz(tb);
+          const int t = li + 1 + __builtin_ctz(tb);
           for (uint16_t kb = static_cast<uint16_t>(hand.at2 & ~(1u << t)); kb;
                kb &= static_cast<uint16_t>(kb - 1)) {
               const int16_t fh = tbl.fh[t][__builtin_ctz(kb)];
@@ -234,14 +246,16 @@ std::vector<int> compute_legal_moves(const HandBits &hand,
           }
       }
   } else if (lc != bc) {
-      // Straight response: table lookup + filter by rank > lr
+      // Straight response: same width AND same length, higher rank.
       const int level = combo_to_straight_level(lc);
       if (level >= 0) {
           const uint16_t at = (level == 0) ? hand.at1 :
                               (level == 1) ? hand.at2 : hand.at3;
           const auto &mvs = all_moves();
+          const Move::Combination last_combo = last_move.combination;
           for (uint16_t mid : tbl.straight[level][at & 0x1FFFu])
-              if (mvs[mid].rank > lr) legal.push_back(mid);
+              if (mvs[mid].combination == last_combo && mvs[mid].rank > lr)
+                  legal.push_back(mid);
       }
   }
 
