@@ -2,6 +2,7 @@
 #define GAME_H
 
 #include "move.h"
+#include "util.h"
 
 #include <array>
 #include <random>
@@ -28,17 +29,19 @@ public:
   int get_winner() const;
 
   std::array<int, 13> player_hand(int player) const;
+  HandBits player_hand_bits(int player) const;
 
   int get_player_hand_size(int player) const;
 
   std::array<int, 13> discard_pile() const;
 
   Move last_move() const;
+  int  last_move_id() const;
 
   std::vector<int> get_legal_moves() const;
 
 private:
-  std::array<std::array<int, 13>, 2> hands_{};
+  HandBits hand_bits_[2]{};
   std::array<int, 13> discard_pile_{};
   int hand_size_[2]{0, 0};
   int current_player_{0};

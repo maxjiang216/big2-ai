@@ -9,6 +9,10 @@
 #include "game_level/start_legal_moves_feature.h"
 
 // Turn-level features
+#include "turn_level/hint_feature.h"
+#include "turn_level/move_card_count_feature.h"
+#include "turn_level/opp_cannot_respond_feature.h"
+#include "turn_level/opp_max_possible_feature.h"
 #include "turn_level/turn_outcome_feature.h"
 #include "turn_level/next_player_feature.h"
 #include "turn_level/player_hand_size_feature.h"
@@ -146,6 +150,40 @@ inline std::shared_ptr<FeatureExtractor> create_feature(const std::string &name)
   if (name == "trick_rank")           return std::make_shared<TrickRankFeature>();
   if (name == "tb_case")              return std::make_shared<TbCaseFeature>();
   if (name == "only_single")          return std::make_shared<OnlySingleFeature>();
+
+  // --- DNN training features ---
+  if (name == "hint")               return std::make_shared<HintFeature>();
+  if (name == "opp_cannot_respond") return std::make_shared<OppCannotRespondFeature>();
+
+  // move card counts per rank (move_3 .. move_2)
+  if (name == "move_3")  return std::make_shared<MoveCardCountFeature>(0,  "3");
+  if (name == "move_4")  return std::make_shared<MoveCardCountFeature>(1,  "4");
+  if (name == "move_5")  return std::make_shared<MoveCardCountFeature>(2,  "5");
+  if (name == "move_6")  return std::make_shared<MoveCardCountFeature>(3,  "6");
+  if (name == "move_7")  return std::make_shared<MoveCardCountFeature>(4,  "7");
+  if (name == "move_8")  return std::make_shared<MoveCardCountFeature>(5,  "8");
+  if (name == "move_9")  return std::make_shared<MoveCardCountFeature>(6,  "9");
+  if (name == "move_10") return std::make_shared<MoveCardCountFeature>(7,  "10");
+  if (name == "move_j")  return std::make_shared<MoveCardCountFeature>(8,  "j");
+  if (name == "move_q")  return std::make_shared<MoveCardCountFeature>(9,  "q");
+  if (name == "move_k")  return std::make_shared<MoveCardCountFeature>(10, "k");
+  if (name == "move_a")  return std::make_shared<MoveCardCountFeature>(11, "a");
+  if (name == "move_2")  return std::make_shared<MoveCardCountFeature>(12, "2");
+
+  // opponent max possible per rank (opp_max_3 .. opp_max_2)
+  if (name == "opp_max_3")  return std::make_shared<OppMaxPossibleFeature>(0,  "3");
+  if (name == "opp_max_4")  return std::make_shared<OppMaxPossibleFeature>(1,  "4");
+  if (name == "opp_max_5")  return std::make_shared<OppMaxPossibleFeature>(2,  "5");
+  if (name == "opp_max_6")  return std::make_shared<OppMaxPossibleFeature>(3,  "6");
+  if (name == "opp_max_7")  return std::make_shared<OppMaxPossibleFeature>(4,  "7");
+  if (name == "opp_max_8")  return std::make_shared<OppMaxPossibleFeature>(5,  "8");
+  if (name == "opp_max_9")  return std::make_shared<OppMaxPossibleFeature>(6,  "9");
+  if (name == "opp_max_10") return std::make_shared<OppMaxPossibleFeature>(7,  "10");
+  if (name == "opp_max_j")  return std::make_shared<OppMaxPossibleFeature>(8,  "j");
+  if (name == "opp_max_q")  return std::make_shared<OppMaxPossibleFeature>(9,  "q");
+  if (name == "opp_max_k")  return std::make_shared<OppMaxPossibleFeature>(10, "k");
+  if (name == "opp_max_a")  return std::make_shared<OppMaxPossibleFeature>(11, "a");
+  if (name == "opp_max_2")  return std::make_shared<OppMaxPossibleFeature>(12, "2");
 
   std::cerr << "Warning: unknown feature '" << name << "', skipping\n";
   return nullptr;

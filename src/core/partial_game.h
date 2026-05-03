@@ -18,6 +18,7 @@ public:
   void apply_move(const Move &move);
 
   std::vector<int> get_legal_moves() const;
+  void get_legal_moves_into(std::vector<int> &out) const { out = get_legal_moves(); }
   std::vector<int> get_possible_moves() const;
   std::vector<int> get_possible_moves_not_bomb() const;
 

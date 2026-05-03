@@ -177,7 +177,10 @@ void GameCoordinator::print_run_summary(std::ostream &os) const {
   double games_per_sec =
       _run_elapsed_ms > 0 ? 1000.0 * num_games / _run_elapsed_ms : 0.0;
   os << "\nElapsed: " << _run_elapsed_ms << " ms  (" << static_cast<long>(games_per_sec)
-     << " games/s)\n\n";
+     << " games/s)\n"
+     << "  simulation:          " << _sim_elapsed_ms << " ms\n"
+     << "  feature extract:     " << _extract_elapsed_ms << " ms\n"
+     << "  parquet write:       " << _parquet_elapsed_ms << " ms\n\n";
 }
 
 void GameCoordinator::export_features(
@@ -204,6 +207,9 @@ void GameCoordinator::run_all(const std::string &game_feature_out,
   _games_with_case1 = 0;
   _games_with_case2 = 0;
   _run_elapsed_ms = 0;
+  _sim_elapsed_ms = 0;
+  _extract_elapsed_ms = 0;
+  _parquet_elapsed_ms = 0;
   _best_long.reset();
   _best_short.reset();
   _best_start.reset();
@@ -237,6 +243,7 @@ void GameCoordinator::run_all(const std::string &game_feature_out,
     std::vector<std::vector<std::pair<int, GameRecord>>> local_batch(_num_threads);
     workers.reserve(_num_threads);
 
+    auto t_sim0 = std::chrono::high_resolution_clock::now();
     for (int t = 0; t < _num_threads; ++t) {
       workers.emplace_back([&, t]() {
         std::mt19937 rng(_rng_seed + static_cast<unsigned>(t) +
@@ -253,6 +260,8 @@ void GameCoordinator::run_all(const std::string &game_feature_out,
     for (auto &th : workers)
       if (th.joinable())
         th.join();
+    _sim_elapsed_ms += std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::high_resolution_clock::now() - t_sim0).count();
 
     std::vector<std::pair<int, GameRecord>> sorted_batch;
     sorted_batch.reserve(static_cast<size_t>(this_batch));
@@ -263,15 +272,21 @@ void GameCoordinator::run_all(const std::string &game_feature_out,
     std::sort(sorted_batch.begin(), sorted_batch.end(),
               [](const auto &a, const auto &b) { return a.first < b.first; });
 
+    auto t_ext0 = std::chrono::high_resolution_clock::now();
     merge_batch_stats(sorted_batch);
     update_anomaly_candidates(sorted_batch);
+    _extract_elapsed_ms += std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::high_resolution_clock::now() - t_ext0).count();
 
     if (!skip_parquet) {
+      auto t_pq0 = std::chrono::high_resolution_clock::now();
       std::string gfile = game_tmp_prefix + std::to_string(batch_idx) + ".parquet";
       std::string tfile = turn_tmp_prefix + std::to_string(batch_idx) + ".parquet";
       export_features(sorted_batch, gfile, tfile);
       tmp_game_files.push_back(gfile);
       tmp_turn_files.push_back(tfile);
+      _parquet_elapsed_ms += std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::high_resolution_clock::now() - t_pq0).count();
     }
 
     games_remaining -= this_batch;

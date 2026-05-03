@@ -1,131 +1,105 @@
 #include "move.h"
 #include "util.h"
 
+#include <array>
 #include <iostream>
 #include <stdexcept>
 
 using namespace std;
 
-Move::Move(int encoded_move) {
+// ---------------------------------------------------------------------------
+// Decode logic — used only once at static-table init time.
+// Uses Move(Combination, int, int) to avoid recursion.
+// ---------------------------------------------------------------------------
+static Move decode_move_impl(int encoded_move) {
+  using C = Move::Combination;
   if (encoded_move == kPASS) {
-    combination = Combination::kPass;
+    return Move(C::kPass);
   } else if (encoded_move < kDOUBLE_START) {
-    int r = encoded_move - kSINGLE_START + 3;
-    combination = Combination::kSingle;
-    rank = r;
+    return Move(C::kSingle, encoded_move - kSINGLE_START + 3);
   } else if (encoded_move < kTRIPLE_START) {
-    int r = encoded_move - kDOUBLE_START + 3;
-    combination = Combination::kDouble;
-    rank = r;
+    return Move(C::kDouble, encoded_move - kDOUBLE_START + 3);
   } else if (encoded_move < kFULL_HOUSE_START) {
-    int r = encoded_move - kTRIPLE_START + 3;
-    combination = Combination::kTriple;
-    rank = r;
+    return Move(C::kTriple, encoded_move - kTRIPLE_START + 3);
   } else if (encoded_move < kBOMB_START) {
     int x = encoded_move - kFULL_HOUSE_START;
     int tripleRank = x / 11 + 3;
     int rem = x % 11;
     int aux = (rem < (tripleRank - 3)) ? (rem + 3) : (rem + 4);
-    combination = Combination::kFullHouse;
-    rank = tripleRank;
-    auxiliary = aux;
+    return Move(C::kFullHouse, tripleRank, aux);
   } else if (encoded_move < kSTRAIGHT5_START) {
     int x = encoded_move - kBOMB_START;
     int bombRank = x / 13 + 3;
     int rem = x % 13;
     int aux;
     if (rem == 0)
-      aux = 0; // no extra card
+      aux = 0;
     else if (rem + 2 < bombRank)
       aux = rem + 2;
     else
       aux = rem + 3;
-    combination = Combination::kBomb;
-    rank = bombRank;
-    auxiliary = aux;
+    return Move(C::kBomb, bombRank, aux);
   } else if (encoded_move < kSTRAIGHT6_START) {
-    int r = encoded_move - kSTRAIGHT5_START + 6;
-    combination = Combination::kStraight5;
-    rank = r;
+    return Move(C::kStraight5, encoded_move - kSTRAIGHT5_START + 6);
   } else if (encoded_move < kSTRAIGHT7_START) {
-    int r = encoded_move - kSTRAIGHT6_START + 7;
-    combination = Combination::kStraight6;
-    rank = r;
+    return Move(C::kStraight6, encoded_move - kSTRAIGHT6_START + 7);
   } else if (encoded_move < kSTRAIGHT8_START) {
-    int r = encoded_move - kSTRAIGHT7_START + 8;
-    combination = Combination::kStraight7;
-    rank = r;
+    return Move(C::kStraight7, encoded_move - kSTRAIGHT7_START + 8);
   } else if (encoded_move < kSTRAIGHT9_START) {
-    int r = encoded_move - kSTRAIGHT8_START + 9;
-    combination = Combination::kStraight8;
-    rank = r;
+    return Move(C::kStraight8, encoded_move - kSTRAIGHT8_START + 9);
   } else if (encoded_move < kSTRAIGHT10_START) {
-    int r = encoded_move - kSTRAIGHT9_START + 10;
-    combination = Combination::kStraight9;
-    rank = r;
+    return Move(C::kStraight9, encoded_move - kSTRAIGHT9_START + 10);
   } else if (encoded_move < kSTRAIGHT11_START) {
-    int r = encoded_move - kSTRAIGHT10_START + 11;
-    combination = Combination::kStraight10;
-    rank = r;
+    return Move(C::kStraight10, encoded_move - kSTRAIGHT10_START + 11);
   } else if (encoded_move < kSTRAIGHT12_START) {
-    int r = encoded_move - kSTRAIGHT11_START + 12;
-    combination = Combination::kStraight11;
-    rank = r;
+    return Move(C::kStraight11, encoded_move - kSTRAIGHT11_START + 12);
   } else if (encoded_move < kSTRAIGHT13_START) {
-    int r = encoded_move - kSTRAIGHT12_START + 13;
-    combination = Combination::kStraight12;
-    rank = r;
+    return Move(C::kStraight12, encoded_move - kSTRAIGHT12_START + 13);
   } else if (encoded_move < kDOUBLESTRAIGHT2_START) {
-    // There is only one legal straight of length 13.
-    // (In Big 2 this corresponds to the unique 13-card straight 3,4,...,A,2,
-    // which by convention has highest card 2.)
-    combination = Combination::kStraight13;
-    rank = 15;
+    return Move(C::kStraight13, 15);
   } else if (encoded_move < kDOUBLESTRAIGHT3_START) {
-    int r = encoded_move - kDOUBLESTRAIGHT2_START + 4;
-    combination = Combination::kDoubleStraight2;
-    rank = r;
+    return Move(C::kDoubleStraight2, encoded_move - kDOUBLESTRAIGHT2_START + 4);
   } else if (encoded_move < kDOUBLESTRAIGHT4_START) {
-    int r = encoded_move - kDOUBLESTRAIGHT3_START + 5;
-    combination = Combination::kDoubleStraight3;
-    rank = r;
+    return Move(C::kDoubleStraight3, encoded_move - kDOUBLESTRAIGHT3_START + 5);
   } else if (encoded_move < kDOUBLESTRAIGHT5_START) {
-    int r = encoded_move - kDOUBLESTRAIGHT4_START + 6;
-    combination = Combination::kDoubleStraight4;
-    rank = r;
+    return Move(C::kDoubleStraight4, encoded_move - kDOUBLESTRAIGHT4_START + 6);
   } else if (encoded_move < kDOUBLESTRAIGHT6_START) {
-    int r = encoded_move - kDOUBLESTRAIGHT5_START + 7;
-    combination = Combination::kDoubleStraight5;
-    rank = r;
+    return Move(C::kDoubleStraight5, encoded_move - kDOUBLESTRAIGHT5_START + 7);
   } else if (encoded_move < kDOUBLESTRAIGHT7_START) {
-    int r = encoded_move - kDOUBLESTRAIGHT6_START + 8;
-    combination = Combination::kDoubleStraight6;
-    rank = r;
+    return Move(C::kDoubleStraight6, encoded_move - kDOUBLESTRAIGHT6_START + 8);
   } else if (encoded_move < kTRIPLESTRAIGHT2_START) {
-    int r = encoded_move - kDOUBLESTRAIGHT7_START + 9;
-    combination = Combination::kDoubleStraight7;
-    rank = r;
+    return Move(C::kDoubleStraight7, encoded_move - kDOUBLESTRAIGHT7_START + 9);
   } else if (encoded_move < kTRIPLESTRAIGHT3_START) {
-    int r = encoded_move - kTRIPLESTRAIGHT2_START + 4;
-    combination = Combination::kTripleStraight2;
-    rank = r;
+    return Move(C::kTripleStraight2, encoded_move - kTRIPLESTRAIGHT2_START + 4);
   } else if (encoded_move < kTRIPLESTRAIGHT4_START) {
-    int r = encoded_move - kTRIPLESTRAIGHT3_START + 5;
-    combination = Combination::kTripleStraight3;
-    rank = r;
+    return Move(C::kTripleStraight3, encoded_move - kTRIPLESTRAIGHT3_START + 5);
   } else if (encoded_move < kTRIPLESTRAIGHT5_START) {
-    int r = encoded_move - kTRIPLESTRAIGHT4_START + 6;
-    combination = Combination::kTripleStraight4;
-    rank = r;
+    return Move(C::kTripleStraight4, encoded_move - kTRIPLESTRAIGHT4_START + 6);
   } else if (encoded_move < kDOUBLESTRAIGHT8_START) {
-    int r = encoded_move - kTRIPLESTRAIGHT5_START + 7;
-    combination = Combination::kTripleStraight5;
-    rank = r;
+    return Move(C::kTripleStraight5, encoded_move - kTRIPLESTRAIGHT5_START + 7);
   } else {
-    int r = encoded_move - kDOUBLESTRAIGHT8_START + 10;
-    combination = Combination::kDoubleStraight8;
-    rank = r;
+    return Move(C::kDoubleStraight8, encoded_move - kDOUBLESTRAIGHT8_START + 10);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Static precomputed table — one Move per legal move ID.
+// ---------------------------------------------------------------------------
+const std::array<Move, LEGAL_MOVES_SIZE> &all_moves() {
+  static const std::array<Move, LEGAL_MOVES_SIZE> table = [] {
+    std::array<Move, LEGAL_MOVES_SIZE> t;
+    for (int i = 0; i < LEGAL_MOVES_SIZE; ++i)
+      t[i] = decode_move_impl(i);
+    return t;
+  }();
+  return table;
+}
+
+// ---------------------------------------------------------------------------
+// Move(int) — one-line table lookup (O(1), no branches).
+// ---------------------------------------------------------------------------
+Move::Move(int encoded_move) {
+  *this = all_moves()[encoded_move];
 }
 
 int Move::numCards() const {
@@ -223,16 +197,12 @@ int encodeMove(const Move &move) {
   case Move::Combination::kTriple:
     return kTRIPLE_START + (move.rank - 3);
   case Move::Combination::kFullHouse: {
-    // In a full house the move.rank is the triple’s rank.
-    // There are 11 possible second ranks (the pair), but note that if auxiliary
-    // < rank we use one formula.
     int base = (move.rank - 3) * 11;
     int offset = (move.auxiliary < move.rank) ? (move.auxiliary - 3)
                                               : (move.auxiliary - 4);
     return kFULL_HOUSE_START + base + offset;
   }
   case Move::Combination::kBomb: {
-    // For bombs the auxiliary card is optional.
     if (move.auxiliary == 0) {
       return kBOMB_START + (move.rank - 3) * 13;
     }
