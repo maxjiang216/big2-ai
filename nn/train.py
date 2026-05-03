@@ -87,7 +87,7 @@ def train(
     lr: float = 3e-4,
     weight_decay: float = 1e-5,
     grad_clip: float = 0.5,
-    num_workers: int = 4,
+    num_workers: int = 8,
     seed: int = 0,
     device_str: str = "auto",
 ) -> None:
@@ -212,7 +212,7 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--grad-clip", type=float, default=0.5)
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="auto")
     args = parser.parse_args()

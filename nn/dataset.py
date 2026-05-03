@@ -204,17 +204,136 @@ class Big2Dataset(Dataset):
         )
 
 
+def decode_handbits_np(at1: np.ndarray, at2: np.ndarray,
+                        at3: np.ndarray, at4: np.ndarray) -> np.ndarray:
+    """Decode HandBits thermometer bitfields → rank counts [N, 13].
+
+    Bit r in atK is set iff count[r] >= K (thermometer encoding).
+    """
+    counts = np.zeros((len(at1), 13), dtype=np.int32)
+    for r in range(13):
+        bit = np.int32(1 << r)
+        counts[:, r] = (
+            ((at1 & bit) != 0).astype(np.int32) +
+            ((at2 & bit) != 0).astype(np.int32) +
+            ((at3 & bit) != 0).astype(np.int32) +
+            ((at4 & bit) != 0).astype(np.int32)
+        )
+    return counts
+
+
+def compute_trick_winners_selfplay(df: pd.DataFrame) -> pd.Series:
+    """Trick winner labels for nn_selfplay format (all rows are movers).
+
+    Uses game_id, turn_idx, current_player, pass_ columns.
+    """
+    result = pd.Series(np.nan, index=df.index, dtype=float)
+    for _, gdf in df.groupby("game_id", sort=False):
+        gdf = gdf.sort_values("turn_idx")
+        players = gdf["current_player"].to_numpy()
+        passes = gdf["pass_"].to_numpy()
+        n = len(gdf)
+        trick_winner = np.full(n, -1, dtype=np.int8)
+        trick_start = 0
+        for i in range(n):
+            if passes[i]:
+                winner = players[i - 1] if i > trick_start else -1
+                for j in range(trick_start, i + 1):
+                    trick_winner[j] = int(players[j] == winner)
+                trick_start = i + 1
+        if trick_start < n:
+            last_mover = players[n - 1]
+            for j in range(trick_start, n):
+                trick_winner[j] = int(players[j] == last_mover)
+        result.loc[gdf.index] = trick_winner.astype(float)
+    return result
+
+
+class Big2SelfPlayDataset(Dataset):
+    """Dataset for generate_nn_selfplay parquet output.
+
+    Columns: game_id, turn_idx, current_player, move_at0..12,
+             hand_at1..4, opp_at1..4, hint (float), flag (bool),
+             pass_ (bool), winner.
+    """
+
+    def __init__(self, parquet_path: str,
+                 val_game_ids: Optional[set] = None,
+                 train: bool = True) -> None:
+        df = pd.read_parquet(parquet_path)
+        df = df.sort_values(["game_id", "turn_idx"]).reset_index(drop=True)
+
+        trick_labels = compute_trick_winners_selfplay(df)
+        df["p_win_trick"] = trick_labels
+
+        if val_game_ids is not None:
+            if train:
+                df = df[~df["game_id"].isin(val_game_ids)]
+            else:
+                df = df[df["game_id"].isin(val_game_ids)]
+
+        df = df.dropna(subset=["p_win_trick"]).reset_index(drop=True)
+
+        hand_counts = decode_handbits_np(
+            df["hand_at1"].to_numpy(dtype=np.int32),
+            df["hand_at2"].to_numpy(dtype=np.int32),
+            df["hand_at3"].to_numpy(dtype=np.int32),
+            df["hand_at4"].to_numpy(dtype=np.int32),
+        )
+        opp_counts = decode_handbits_np(
+            df["opp_at1"].to_numpy(dtype=np.int32),
+            df["opp_at2"].to_numpy(dtype=np.int32),
+            df["opp_at3"].to_numpy(dtype=np.int32),
+            df["opp_at4"].to_numpy(dtype=np.int32),
+        )
+        move_counts = df[[f"move_at{r}" for r in range(13)]].to_numpy(dtype=np.int32)
+
+        self.hand_enc = torch.from_numpy(encode_exact_np(hand_counts))
+        self.opp_enc  = torch.from_numpy(encode_upper_bound_np(opp_counts))
+        self.move_enc = torch.from_numpy(encode_exact_np(move_counts))
+
+        self.hint  = torch.tensor(df["hint"].to_numpy(dtype=np.float32), dtype=torch.float32)
+        self.flag  = torch.tensor(df["flag"].to_numpy(dtype=bool), dtype=torch.bool)
+        self.pass_ = torch.tensor(df["pass_"].to_numpy(dtype=bool), dtype=torch.bool)
+
+        y_win = (df["winner"].to_numpy(dtype=np.int32) ==
+                 df["current_player"].to_numpy(dtype=np.int32)).astype(np.float32)
+        self.y_trick = torch.tensor(
+            df["p_win_trick"].to_numpy(dtype=np.float32), dtype=torch.float32)
+        self.y_win = torch.tensor(y_win, dtype=torch.float32)
+
+    def __len__(self) -> int:
+        return len(self.y_win)
+
+    def __getitem__(self, idx: int):
+        return (
+            self.hand_enc[idx],
+            self.opp_enc[idx],
+            self.move_enc[idx],
+            self.hint[idx],
+            self.flag[idx],
+            self.pass_[idx],
+            self.y_trick[idx],
+            self.y_win[idx],
+        )
+
+
 def make_train_val_split(parquet_path: str,
                          val_frac: float = 0.1,
                          seed: int = 0) -> tuple[Big2Dataset, Big2Dataset]:
-    """Return stratified (train, val) datasets split by game_index."""
-    df_meta = pd.read_parquet(parquet_path, columns=["game_index"])
-    game_ids = df_meta["game_index"].unique()
+    """Return (train, val) datasets split by game ID, auto-detecting format."""
+    import pyarrow.parquet as pq
+    schema_names = set(pq.read_schema(parquet_path).names)
+    is_selfplay = "game_id" in schema_names
+
+    id_col = "game_id" if is_selfplay else "game_index"
+    game_ids = pd.read_parquet(parquet_path, columns=[id_col])[id_col].unique()
     rng = np.random.default_rng(seed)
     rng.shuffle(game_ids)
     n_val = max(1, int(len(game_ids) * val_frac))
     val_ids = set(game_ids[:n_val].tolist())
 
-    train_ds = Big2Dataset(parquet_path, val_game_ids=val_ids, train=True)
-    val_ds = Big2Dataset(parquet_path, val_game_ids=val_ids, train=False)
+    DatasetClass = Big2SelfPlayDataset if is_selfplay else Big2Dataset
+    train_ds = DatasetClass(parquet_path, val_game_ids=val_ids, train=True)
+    val_ds   = DatasetClass(parquet_path, val_game_ids=val_ids, train=False)
     return train_ds, val_ds
