@@ -6,6 +6,13 @@ INCLUDES    = -Isrc/core -Isrc/simulation -Isrc/players -Isrc/datagen -Isrc/feat
 LDFLAGS     = -pthread
 LDFLAGS_PARQUET = -lparquet -larrow -pthread
 
+# LibTorch (from project venv) — used only for generate_nn_selfplay
+TORCH_BASE      := $(shell .venv/bin/python -c "import torch,os; print(os.path.dirname(torch.__file__))" 2>/dev/null)
+TORCH_INCLUDES  := -I$(TORCH_BASE)/include -I$(TORCH_BASE)/include/torch/csrc/api/include
+TORCH_LDFLAGS   := -L$(TORCH_BASE)/lib -ltorch -ltorch_cpu -lc10 \
+                   -Wl,-rpath,$(TORCH_BASE)/lib
+LDFLAGS_TORCH   := $(LDFLAGS_PARQUET) $(TORCH_LDFLAGS)
+
 BUILD_DIR   = build
 BIN_DIR     = bin
 
@@ -24,6 +31,7 @@ RESEARCH_BINS      := $(addprefix $(BUILD_DIR)/research/,$(RESEARCH_BIN_NAMES))
 all: help
 
 help:
+	@echo "  make generate_nn_selfplay - NN self-play data gen (needs libarrow + LibTorch)"
 	@echo "Targets:"
 	@echo "  make test_core            - unit tests (no Arrow)"
 	@echo "  make benchmark            - perf benchmark binary (no Arrow)"
@@ -70,6 +78,9 @@ $(BUILD_DIR)/src/datagen/generate_data.o: src/datagen/generate_data.cpp | dirs
 
 $(BUILD_DIR)/src/datagen/generate_nn_data.o: src/datagen/generate_nn_data.cpp | dirs
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/src/datagen/generate_nn_selfplay.o: src/datagen/generate_nn_selfplay.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -c $< -o $@
 
 $(BUILD_DIR)/test/%.o: test/%.cpp | dirs
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
@@ -155,6 +166,21 @@ $(BIN_DIR)/generate_nn_data: $(GENNNDATA_OBJS)
 	@echo "✓ $(BIN_DIR)/generate_nn_data"
 
 generate_nn_data: dirs $(BIN_DIR)/generate_nn_data
+
+# ============================================================================
+# bin/generate_nn_selfplay — NN self-play data (needs libarrow + LibTorch)
+# ============================================================================
+
+GENNN_SELFPLAY_OBJS := $(CORE_OBJS) \
+                       $(BUILD_DIR)/src/simulation/nn_game_runner.o \
+                       $(BUILD_DIR)/src/datagen/parquet_export.o \
+                       $(BUILD_DIR)/src/datagen/generate_nn_selfplay.o
+
+$(BIN_DIR)/generate_nn_selfplay: $(GENNN_SELFPLAY_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS_TORCH)
+	@echo "✓ $(BIN_DIR)/generate_nn_selfplay"
+
+generate_nn_selfplay: dirs $(BIN_DIR)/generate_nn_selfplay
 
 # ============================================================================
 # bin/eval_match — head-to-head evaluation (no Arrow)
