@@ -213,34 +213,33 @@ static void play_and_print_game(torch::jit::Module& model, torch::Device device,
         lines.push_back("  Opp:  " + std::to_string(opp_sz) + " cards   Disc: " + disc_s);
 
         int chosen_mid;
-        std::vector<ScoredMove> top2;
+        std::vector<ScoredMove> topN;
 
         if (forced) {
             chosen_mid = legal[0];
         } else {
             auto scored = score_moves(model, device, game, cp, legal);
             chosen_mid  = scored[0].mid;
-            int n = std::min((int)scored.size(), 2);
-            for (int i = 0; i < n; ++i) top2.push_back(scored[i]);
+            int n = std::min((int)scored.size(), 10);
+            for (int i = 0; i < n; ++i) topN.push_back(scored[i]);
         }
 
         if (forced) {
             std::string mv = fmt_move(chosen_mid);
-            // pad to kMoveWidth
             while ((int)mv.size() < kMoveWidth) mv += ' ';
             lines.push_back("  ** " + mv + "  [forced]");
         } else {
-            for (int i = 0; i < (int)top2.size(); ++i) {
-                const auto& sm = top2[i];
-                std::string label = (i == 0) ? "#1" : "#2";
-                std::string mv    = fmt_move(sm.mid);
+            for (int i = 0; i < (int)topN.size(); ++i) {
+                const auto& sm = topN[i];
+                char label[8]; std::snprintf(label, sizeof(label), "#%-2d", i + 1);
+                std::string mv = fmt_move(sm.mid);
                 while ((int)mv.size() < kMoveWidth) mv += ' ';
                 char score_buf[64];
                 std::snprintf(score_buf, sizeof(score_buf),
                               "pt=%.2f vi=%.2f vn=%.2f w=%.2f",
                               sm.pt, sm.vi, sm.vn, sm.w);
                 std::string chosen_mark = (sm.mid == chosen_mid) ? "  ←" : "   ";
-                lines.push_back("  " + label + " " + mv + "  " + score_buf + chosen_mark);
+                lines.push_back("  " + std::string(label) + " " + mv + "  " + score_buf + chosen_mark);
             }
         }
 

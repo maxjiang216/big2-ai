@@ -1,165 +1,154 @@
 // eval_nn_vs_classic: head-to-head evaluation, NN model vs classic player.
 //
-// Uses paired deals (same shuffle, seats swapped) and reports Wilson 95% CI.
-// Single-threaded; use --deals 500-1000 for reliable estimates.
+// Pool-based batched NN inference: all 2*n_deals games run concurrently.
+// Classic (random/greedy) moves are applied inline per slot; NN decisions
+// are batched across all active slots into a single forward pass per round.
+//
+// For PIMC: a per-slot Player object keeps the classic player's PartialGame
+// in sync. PIMC moves are applied sequentially (CPU-bound) between NN batches.
 //
 // Usage:
 //   eval_nn_vs_classic --model PATH --vs PLAYER [--vs-param F]
 //                      --deals N [--seed S] [--device auto|cpu|cuda]
 
 // LibTorch must come first to avoid macro conflicts.
-#include <torch/script.h>
 #include <torch/cuda.h>
+#include <torch/script.h>
 
-#include "nn_encode.h"
+#include "eval_helpers.h"
 
-#include "game_simulator.h"
-#include "hint_table.h"
+#include "greedy/greedy_player.h"
+#include "player.h"
 #include "player_factory_registry.h"
-#include "util.h"
 
-#include <algorithm>
-#include <array>
 #include <chrono>
-#include <cmath>
 #include <cstdio>
 #include <iostream>
 #include <memory>
 #include <random>
 #include <string>
+#include <vector>
 
 // ============================================================================
-// NNPlayer: wraps a TorchScript model using PartialGame for feature encoding
+// Classic policy types
 // ============================================================================
 
-class NNPlayer : public Player {
-public:
-    NNPlayer(torch::jit::Module& model, torch::Device device)
-        : model_(model), device_(device) {}
+enum class ClassicType { Random, Greedy, Other };
 
-protected:
-    Move select_move_impl() override {
-        auto legal      = game_.get_legal_moves();
-        const int K     = (int)legal.size();
-        auto player_hand = game_.player_hand();
-        auto discard    = game_.discard_pile();
-        int  opp_count  = game_.opponent_hand_size();
-
-        std::array<int,13> opp_counts{};
-        HandBits opp_bits{};
-        for (int r = 0; r < 13; ++r) {
-            int om = std::max(0, max_cards_in_deck_for_rank(r) - player_hand[r] - discard[r]);
-            opp_counts[r] = om;
-            if (om >= 1) opp_bits.at1 |= static_cast<uint16_t>(1u << r);
-            if (om >= 2) opp_bits.at2 |= static_cast<uint16_t>(1u << r);
-            if (om >= 3) opp_bits.at3 |= static_cast<uint16_t>(1u << r);
-            if (om >= 4) opp_bits.at4 |= static_cast<uint16_t>(1u << r);
-        }
-
-        auto float_opts = torch::TensorOptions().dtype(torch::kFloat32);
-        auto bool_opts  = torch::TensorOptions().dtype(torch::kBool);
-        torch::Tensor t_hand = torch::zeros({K, ENCODING_DIM}, float_opts);
-        torch::Tensor t_opp  = torch::zeros({K, ENCODING_DIM}, float_opts);
-        torch::Tensor t_move = torch::zeros({K, ENCODING_DIM}, float_opts);
-        torch::Tensor t_hint = torch::zeros({K}, float_opts);
-        torch::Tensor t_flag = torch::zeros({K}, bool_opts);
-        torch::Tensor t_pass = torch::zeros({K}, bool_opts);
-
-        float* h_hand = t_hand.data_ptr<float>();
-        float* h_opp  = t_opp.data_ptr<float>();
-        float* h_move = t_move.data_ptr<float>();
-        float* h_hint = t_hint.data_ptr<float>();
-        bool*  h_flag = t_flag.data_ptr<bool>();
-        bool*  h_pass = t_pass.data_ptr<bool>();
-
-        for (int i = 0; i < K; ++i) {
-            int mid = legal[i];
-            bool is_pass_move = (mid == kPASS);
-            std::array<int,13> mc{};
-            if (!is_pass_move)
-                for (int r = 0; r < 13; ++r) mc[r] = MOVE_TO_CARDS[mid][r];
-            std::array<int,13> hand_after{};
-            for (int r = 0; r < 13; ++r) hand_after[r] = player_hand[r] - mc[r];
-
-            encode_exact(hand_after,  h_hand + i * ENCODING_DIM);
-            encode_thermo(opp_counts, h_opp  + i * ENCODING_DIM);
-            encode_exact(mc,          h_move + i * ENCODING_DIM);
-
-            bool flag_val = !is_pass_move && !opponent_can_respond(mid, opp_bits, opp_count);
-            h_hint[i] = is_pass_move ? 0.0f : (flag_val ? 1.0f : (1.0f - kHintTable[mid]));
-            h_flag[i] = flag_val;
-            h_pass[i] = is_pass_move;
-        }
-
-        torch::NoGradGuard no_grad;
-        auto out = model_.forward({
-            t_hand.to(device_), t_opp.to(device_), t_move.to(device_),
-            t_hint.to(device_), t_flag.to(device_), t_pass.to(device_)
-        }).toTuple();
-
-        auto vi  = out->elements()[0].toTensor().to(torch::kCPU);
-        auto vn  = out->elements()[1].toTensor().to(torch::kCPU);
-        auto pt  = out->elements()[2].toTensor().to(torch::kCPU);
-        auto* vi_p = vi.data_ptr<float>();
-        auto* vn_p = vn.data_ptr<float>();
-        auto* pt_p = pt.data_ptr<float>();
-
-        int   best   = 0;
-        float best_w = -1.0f;
-        for (int i = 0; i < K; ++i) {
-            float w = pt_p[i] * vi_p[i] + (1.0f - pt_p[i]) * vn_p[i];
-            if (w > best_w) { best_w = w; best = i; }
-        }
-        return Move(legal[best]);
-    }
-
-private:
-    torch::jit::Module& model_;
-    torch::Device device_;
-};
-
-class NNPlayerFactory : public PlayerFactory {
-public:
-    NNPlayerFactory(torch::jit::Module& model, torch::Device device)
-        : model_(model), device_(device) {}
-
-    std::unique_ptr<Player> create_player() override {
-        return std::make_unique<NNPlayer>(model_, device_);
-    }
-
-private:
-    torch::jit::Module& model_;
-    torch::Device device_;
-};
-
-// ============================================================================
-// Wilson score 95% CI
-// ============================================================================
-
-struct WilsonCI { double lo, hi; };
-static WilsonCI wilson_ci(double p_hat, long n, double z = 1.96) {
-    double z2 = z*z, n_inv = 1.0/(double)n;
-    double center = (p_hat + z2*n_inv/2.0) / (1.0 + z2*n_inv);
-    double half = z * std::sqrt(p_hat*(1.0-p_hat)*n_inv + z2*n_inv*n_inv/4.0) /
-                  (1.0 + z2*n_inv);
-    return {center - half, center + half};
+static ClassicType classify(const std::string& name) {
+    if (name == "random") return ClassicType::Random;
+    if (name == "greedy") return ClassicType::Greedy;
+    return ClassicType::Other;
 }
 
-static std::string format_elapsed(long long ms) {
-    if (ms < 1000) { char b[32]; std::snprintf(b, sizeof(b), "%lld ms", ms); return b; }
-    double s = ms/1000.0; char b[64];
-    if (s < 60) std::snprintf(b, sizeof(b), "%.1f s", s);
-    else        std::snprintf(b, sizeof(b), "%dm %ds", (int)(s/60), (int)s%60);
-    return b;
+// ============================================================================
+// Inline classic move selection (no Player object needed)
+// ============================================================================
+
+static int select_random(const std::vector<int>& legal, std::mt19937& rng) {
+    int idx = std::uniform_int_distribution<int>(0, (int)legal.size()-1)(rng);
+    return legal[idx];
 }
+
+// Greedy: maximise GreedyEval of post-move hand; pass only if no non-pass move.
+static int select_greedy(const Game& game, int cp, const std::vector<int>& legal) {
+    auto hand = game.player_hand(cp);
+
+    int best_mid = -1;
+    GreedyEval best_eval{};
+
+    for (int mid : legal) {
+        if (mid == kPASS) continue;
+        std::array<int,13> hand_after{};
+        for (int r = 0; r < 13; ++r)
+            hand_after[r] = hand[r] - MOVE_TO_CARDS[mid][r];
+
+        int n_cards = 0, n_bombs = 0;
+        for (int i = 0; i < 13; ++i) {
+            n_cards += hand_after[i];
+            if ((i < 11 && hand_after[i] == 4) || (i == 11 && hand_after[i] == 3)) ++n_bombs;
+        }
+        GreedyEval ev;
+        ev.win_now       = (n_cards == 0) ? 1 : 0;
+        ev.bombs         = n_bombs;
+        ev.neg_num_cards = -n_cards;
+        ev.num_2s        = hand_after[12]; ev.num_as  = hand_after[11]; ev.num_ks  = hand_after[10];
+        ev.num_qs        = hand_after[9];  ev.num_js  = hand_after[8];  ev.num_10s = hand_after[7];
+        ev.num_9s        = hand_after[6];  ev.num_8s  = hand_after[5];  ev.num_7s  = hand_after[4];
+        ev.num_6s        = hand_after[3];  ev.num_5s  = hand_after[2];  ev.num_4s  = hand_after[1];
+
+        if (best_mid == -1 || best_eval < ev) { best_eval = ev; best_mid = mid; }
+    }
+    return (best_mid != -1) ? best_mid : kPASS;
+}
+
+// ============================================================================
+// Eval slot
+// ============================================================================
+
+struct EvalSlot {
+    Game game;
+    int  deal_id;
+    int  nn_player;          // seat (0 or 1) occupied by NN
+    std::vector<int> legal;  // cached when NN decision is needed
+    std::unique_ptr<Player> classic;  // non-null for Other (e.g. PIMC)
+    std::mt19937 slot_rng;            // for random classic moves
+    bool done{false};
+    int  nn_wins{0};
+};
+
+// Apply an NN move to the game and keep classic Player (PIMC) in sync.
+static void apply_and_sync_nn_move(EvalSlot& sl, int move_id) {
+    sl.game.apply_move(move_id);
+    if (sl.classic) sl.classic->accept_opponent_move(Move(move_id));
+}
+
+// Advance slot until game over or NN decision is needed.
+// Classic moves (random/greedy/Player) are consumed inline.
+static void advance_to_nn_decision(EvalSlot& sl, ClassicType ctype) {
+    while (!sl.game.is_over()) {
+        int cp = sl.game.current_player();
+        sl.legal = sl.game.get_legal_moves();
+
+        // ── NN side ──────────────────────────────────────────────────────────
+        if (cp == sl.nn_player) {
+            int tb = tablebase_move_id(sl.game, cp, sl.legal);
+            if (tb >= 0) { apply_and_sync_nn_move(sl, tb); continue; }
+            if ((int)sl.legal.size() == 1) { apply_and_sync_nn_move(sl, sl.legal[0]); continue; }
+            return;  // NN decision needed
+        }
+
+        // ── Classic side ─────────────────────────────────────────────────────
+        if (sl.classic) {
+            // Player-managed (PIMC): delegate all move selection to select_move(),
+            // which handles tablebase/forced/policy; applies to classic's game_ internally.
+            // Apply the same move to the authoritative Game state.
+            Move m = sl.classic->select_move();
+            sl.game.apply_move(encodeMove(m));
+        } else {
+            // Inline (random/greedy): handle tablebase/forced here for consistency.
+            int tb = tablebase_move_id(sl.game, cp, sl.legal);
+            if (tb >= 0) { sl.game.apply_move(tb); continue; }
+            if ((int)sl.legal.size() == 1) { sl.game.apply_move(sl.legal[0]); continue; }
+            int mid = (ctype == ClassicType::Random) ?
+                      select_random(sl.legal, sl.slot_rng) :
+                      select_greedy(sl.game, cp, sl.legal);
+            sl.game.apply_move(mid);
+        }
+    }
+}
+
+// ============================================================================
+// Reporting
+// ============================================================================
 
 static void print_usage(const char* prog) {
     std::cout << "Usage: " << prog
-              << " --model PATH --vs PLAYER [--vs-param F] --deals N [--seed S] [--device auto|cpu|cuda]\n"
+              << " --model PATH --vs PLAYER [--vs-param F] --deals N [--seed S] [--device D]\n"
               << "Options:\n"
-              << "  --model PATH     NN model (TorchScript .pt); plays as model0\n"
-              << "  --vs PLAYER      Classic opponent: random, greedy, pimc, etc.\n"
-              << "  --vs-param F     Parameter for classic player (default: 0.0)\n"
+              << "  --model PATH     NN model (TorchScript .pt)\n"
+              << "  --vs PLAYER      Classic opponent: random, greedy, pimc, ...\n"
+              << "  --vs-param F     Parameter for classic player (default: 0)\n"
               << "  --deals N        Paired deals; total games = 2*N\n"
               << "  --seed S         RNG seed (default: random)\n"
               << "  --device D       auto|cpu|cuda (default: auto)\n";
@@ -177,13 +166,13 @@ int main(int argc, char** argv) {
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--help"     || a == "-h")  { print_usage(argv[0]); return 0; }
-        else if (a == "--model"    && i+1 < argc)  model_path = argv[++i];
-        else if (a == "--vs"       && i+1 < argc)  vs_name    = argv[++i];
-        else if (a == "--vs-param" && i+1 < argc)  vs_param   = std::stod(argv[++i]);
-        else if (a == "--deals"    && i+1 < argc)  n_deals    = std::stoi(argv[++i]);
-        else if (a == "--seed"     && i+1 < argc)  seed       = (unsigned)std::stoul(argv[++i]);
-        else if (a == "--device"   && i+1 < argc)  device_str = argv[++i];
+        if      (a == "--help"     || a == "-h") { print_usage(argv[0]); return 0; }
+        else if (a == "--model"    && i+1 < argc) model_path = argv[++i];
+        else if (a == "--vs"       && i+1 < argc) vs_name    = argv[++i];
+        else if (a == "--vs-param" && i+1 < argc) vs_param   = std::stod(argv[++i]);
+        else if (a == "--deals"    && i+1 < argc) n_deals    = std::stoi(argv[++i]);
+        else if (a == "--seed"     && i+1 < argc) seed       = (unsigned)std::stoul(argv[++i]);
+        else if (a == "--device"   && i+1 < argc) device_str = argv[++i];
         else { std::cerr << "Unknown arg: " << a << "\n"; print_usage(argv[0]); return 1; }
     }
     if (model_path.empty() || vs_name.empty() || n_deals <= 0) {
@@ -191,21 +180,26 @@ int main(int argc, char** argv) {
         print_usage(argv[0]); return 1;
     }
 
+    ClassicType ctype = classify(vs_name);
+
+    // For non-inline classic players we need a factory to create per-slot players.
+    std::shared_ptr<PlayerFactory> classic_factory;
+    if (ctype == ClassicType::Other) {
+        classic_factory = make_player_factory(vs_name, vs_param, seed);
+        if (!classic_factory) {
+            std::cerr << "Unknown player: " << vs_name << "\n"; return 1;
+        }
+    }
+
     torch::Device device = torch::kCPU;
-    if      (device_str == "auto")  device = torch::cuda::is_available() ? torch::kCUDA : torch::kCPU;
-    else if (device_str == "cuda")  device = torch::kCUDA;
+    if      (device_str == "auto") device = torch::cuda::is_available() ? torch::kCUDA : torch::kCPU;
+    else if (device_str == "cuda") device = torch::kCUDA;
     else if (device_str != "cpu") { std::cerr << "Unknown device: " << device_str << "\n"; return 1; }
     std::cout << "Device: " << (device == torch::kCUDA ? "cuda" : "cpu") << "\n";
 
     std::cout << "Loading model: " << model_path << "\n";
     torch::jit::Module model = torch::jit::load(model_path);
     model.eval(); model.to(device);
-
-    NNPlayerFactory nn_factory(model, device);
-    auto classic_factory = make_player_factory(vs_name, vs_param, seed);
-    if (!classic_factory) {
-        std::cerr << "Unknown player: " << vs_name << "\n"; return 1;
-    }
 
     std::string vs_label = vs_name;
     if (vs_param != 0.0) {
@@ -214,55 +208,85 @@ int main(int argc, char** argv) {
     }
 
     long total_games = 2L * n_deals;
-    std::cout << "\n=== NN vs Classic: model0 vs " << vs_label << " ===\n"
+    std::cout << "\n=== NN vs Classic: NN vs " << vs_label << " ===\n"
               << "Deals: " << n_deals << "  |  Games: " << total_games << "\n"
               << "Seed: " << seed << "\n\n";
 
-    long nn_wins = 0;
-    long p0_sweep = 0, split_count = 0, p1_sweep = 0;
+    // ── Initialise pool ───────────────────────────────────────────────────────
+    std::vector<EvalSlot> pool(2 * n_deals);
+    std::vector<int> deal_nn_wins(n_deals, 0);
 
-    auto t_start = std::chrono::high_resolution_clock::now();
+    for (int d = 0; d < n_deals; ++d) {
+        for (int seat = 0; seat < 2; ++seat) {
+            EvalSlot& sl = pool[2*d + seat];
+            std::mt19937 rng(seed + (unsigned)d);
+            sl.game.shuffle_deal(rng);
+            sl.deal_id   = d;
+            sl.nn_player = seat;  // seat 0: NN is player 0; seat 1: NN is player 1
+            sl.slot_rng  = std::mt19937(seed + (unsigned)(d * 1000 + seat));
 
-    for (int deal = 0; deal < n_deals; ++deal) {
-        unsigned int unit_seed = seed + (unsigned int)deal;
-        int deal_nn_wins = 0;
-
-        // Game 1: NN=p0, classic=p1
-        {
-            std::mt19937 rng(unit_seed);
-            auto p0 = nn_factory.create_player();
-            auto p1 = classic_factory->create_player();
-            GameSimulator sim(std::move(p0), std::move(p1), rng);
-            if (sim.run().game().get_winner() == 0) ++deal_nn_wins;
-        }
-        // Game 2: classic=p0, NN=p1 (same seed = same deal)
-        {
-            std::mt19937 rng(unit_seed);
-            auto p0 = classic_factory->create_player();
-            auto p1 = nn_factory.create_player();
-            GameSimulator sim(std::move(p0), std::move(p1), rng);
-            if (sim.run().game().get_winner() == 1) ++deal_nn_wins;
-        }
-
-        nn_wins += deal_nn_wins;
-        if      (deal_nn_wins == 2) ++p0_sweep;
-        else if (deal_nn_wins == 0) ++p1_sweep;
-        else                        ++split_count;
-
-        if ((deal + 1) % 50 == 0 || deal + 1 == n_deals) {
-            auto now = std::chrono::high_resolution_clock::now();
-            double elapsed = std::chrono::duration<double>(now - t_start).count();
-            double rate = elapsed > 0 ? 2.0 * (deal + 1) / elapsed : 0;
-            std::fprintf(stderr, "\rDeals: %d/%d  |  %.0f games/s   ",
-                         deal + 1, n_deals, rate);
-            std::fflush(stderr);
+            if (classic_factory) {
+                sl.classic = classic_factory->create_player();
+                sl.classic->accept_deal(sl.game, 1 - seat);  // classic is the other seat
+            }
         }
     }
-    std::fprintf(stderr, "\n");
+
+    auto t_start = std::chrono::high_resolution_clock::now();
+    int n_done = 0;
+
+    // ── Pool-based eval loop ──────────────────────────────────────────────────
+    while (n_done < (int)pool.size()) {
+
+        // 1. Advance all active slots to NN decision points (classic moves inline).
+        std::vector<int> nn_idx;
+
+        for (int si = 0; si < (int)pool.size(); ++si) {
+            EvalSlot& sl = pool[si];
+            if (sl.done) continue;
+
+            advance_to_nn_decision(sl, ctype);
+
+            if (sl.game.is_over()) {
+                sl.done = true;
+                ++n_done;
+                if (sl.game.get_winner() == sl.nn_player) ++deal_nn_wins[sl.deal_id];
+            } else {
+                nn_idx.push_back(si);
+            }
+        }
+
+        if (n_done == (int)pool.size()) break;
+
+        // 2. Batch forward pass for NN positions.
+        if (!nn_idx.empty()) {
+            std::vector<NNPosition> pos;
+            pos.reserve(nn_idx.size());
+            for (int si : nn_idx)
+                pos.emplace_back(&pool[si].game, pool[si].game.current_player(), &pool[si].legal);
+            auto best = batch_nn_select(model, device, pos);
+            for (int i = 0; i < (int)nn_idx.size(); ++i) {
+                EvalSlot& sl = pool[nn_idx[i]];
+                int move_id = sl.legal[best[i]];
+                apply_and_sync_nn_move(sl, move_id);
+            }
+        }
+    }
 
     auto t_end = std::chrono::high_resolution_clock::now();
     long long elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         t_end - t_start).count();
+
+    // ── Aggregate results ─────────────────────────────────────────────────────
+    long nn_wins = 0;
+    long p0_sweep = 0, split_count = 0, p1_sweep = 0;
+    for (int d = 0; d < n_deals; ++d) {
+        int w = deal_nn_wins[d];
+        nn_wins += w;
+        if      (w == 2) ++p0_sweep;
+        else if (w == 0) ++p1_sweep;
+        else             ++split_count;
+    }
 
     double p_hat = (double)nn_wins / (double)total_games;
     WilsonCI ci  = wilson_ci(p_hat, total_games);
@@ -277,24 +301,18 @@ int main(int argc, char** argv) {
     else                   std::cout << "Result: no significant difference (CI includes 50%)\n";
 
     double inv = 1.0 / n_deals;
-    std::cout << "Deals: nn_sweep=" << p0_sweep << " split=" << split_count
-              << " classic_sweep=" << p1_sweep << "\n";
-    std::cout.precision(2);
-    std::cout << "Deals: nn 2-0: " << p0_sweep
-              << " (" << 100.0 * p0_sweep * inv << "%)  split 1-1: " << split_count
-              << " (" << 100.0 * split_count * inv << "%)  classic 2-0: " << p1_sweep
+    std::cout << "Deals: WW=" << p0_sweep
+              << " (" << 100.0 * p0_sweep * inv << "%)  split=" << split_count
+              << " (" << 100.0 * split_count * inv << "%)  LL=" << p1_sweep
               << " (" << 100.0 * p1_sweep * inv << "%)\n";
 
     long n_decisive = p0_sweep + p1_sweep;
     if (n_decisive > 0) {
         double p_dec = (double)p0_sweep / (double)n_decisive;
         WilsonCI ci_dec = wilson_ci(p_dec, n_decisive);
-        std::cout << "Among decisive: nn " << p0_sweep << " / " << n_decisive
+        std::cout << "Among decisive: NN " << p0_sweep << " / " << n_decisive
                   << " (" << 100.0 * p_dec << "%)  CI: ["
                   << 100.0 * ci_dec.lo << "%, " << 100.0 * ci_dec.hi << "%]\n";
-        if      (ci_dec.lo > 0.50) std::cout << "Result (decisive): NN sweeps more\n";
-        else if (ci_dec.hi < 0.50) std::cout << "Result (decisive): " << vs_label << " sweeps more\n";
-        else                        std::cout << "Result (decisive): no significant difference\n";
     }
 
     std::cout << "Elapsed: " << format_elapsed(elapsed_ms)

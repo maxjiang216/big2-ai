@@ -35,13 +35,17 @@ def compute_loss(
     p_trick: torch.Tensor,
     y_trick: torch.Tensor,
     y_win: torch.Tensor,
+    vi_forced: torch.Tensor,
+    vn_forced: torch.Tensor,
 ) -> tuple[torch.Tensor, dict]:
     """Three-headed BCE loss with per-head masking.
 
     p_trick is trained on all normal moves (pass/flag rows contribute zero
     gradient via the post-processing in model.forward).
     v_init is trained only on rows where the player won the trick (y_trick=1).
+      When vi_forced=True, the target is overridden to 1.0 (tablebase-proven win).
     v_no_init is trained only on rows where the player lost the trick (y_trick=0).
+      When vn_forced=True, the target is overridden to 0.0 (can't win w/o initiative).
     """
     eps = 1e-7
     p_trick_c = p_trick.clamp(eps, 1 - eps)
@@ -54,14 +58,20 @@ def compute_loss(
     no_trick_mask = ~trick_mask
 
     if trick_mask.any():
-        loss_vi = F.binary_cross_entropy(v_init_c[trick_mask], y_win[trick_mask])
+        vi_target = y_win[trick_mask]
+        vi_f = vi_forced[trick_mask]
+        if vi_f.any():
+            vi_target = torch.where(vi_f, torch.ones_like(vi_target), vi_target)
+        loss_vi = F.binary_cross_entropy(v_init_c[trick_mask], vi_target)
     else:
         loss_vi = torch.tensor(0.0, device=p_trick.device)
 
     if no_trick_mask.any():
-        loss_vn = F.binary_cross_entropy(
-            v_no_init_c[no_trick_mask], y_win[no_trick_mask]
-        )
+        vn_target = y_win[no_trick_mask]
+        vn_f = vn_forced[no_trick_mask]
+        if vn_f.any():
+            vn_target = torch.where(vn_f, torch.zeros_like(vn_target), vn_target)
+        loss_vn = F.binary_cross_entropy(v_no_init_c[no_trick_mask], vn_target)
     else:
         loss_vn = torch.tensor(0.0, device=p_trick.device)
 
@@ -80,12 +90,15 @@ def compute_loss(
 
 
 def train(
-    parquet_path: str,
+    parquet_paths: list[str],
     out_path: str,
-    epochs: int = 20,
+    epochs: int = 10,
     batch_size: int = 2048,
     val_frac: float = 0.1,
     lr: float = 3e-4,
+    lr_warmup: float = 0.05,
+    final_div_factor: float = 100.0,
+    mix_decay: float = 1.0,
     weight_decay: float = 1e-5,
     grad_clip: float = 0.5,
     num_workers: int = 8,
@@ -100,9 +113,12 @@ def train(
         device = torch.device(device_str)
     print(f"Device: {device}")
 
-    print("Loading dataset...")
+    if len(parquet_paths) > 1:
+        print(f"Loading dataset ({len(parquet_paths)} files)...")
+    else:
+        print("Loading dataset...")
     t0 = time.time()
-    train_ds, val_ds = make_train_val_split(parquet_path, val_frac=val_frac, seed=seed)
+    train_ds, val_ds = make_train_val_split(parquet_paths, val_frac=val_frac, seed=seed, mix_decay=mix_decay)
     print(f"  train={len(train_ds):,}  val={len(val_ds):,}  ({time.time()-t0:.1f}s)")
 
     train_loader = DataLoader(
@@ -143,10 +159,10 @@ def train(
         optimizer,
         max_lr=lr,
         total_steps=total_steps,
-        pct_start=0.1,
+        pct_start=lr_warmup,
         anneal_strategy="cos",
         div_factor=10.0,
-        final_div_factor=100.0,
+        final_div_factor=final_div_factor,
     )
 
     out_path = Path(out_path)
@@ -162,13 +178,13 @@ def train(
         tr_p = tr_vi = tr_vn = 0.0
         n_batches = 0
         for batch_idx, batch in enumerate(train_loader):
-            hand, opp, move, hint, flag, pass_, y_trick, y_win = (
+            hand, opp, move, hint, flag, pass_, vi_forced, vn_forced, y_trick, y_win = (
                 t.to(device) for t in batch
             )
 
             optimizer.zero_grad()
             v_init, v_no_init, p_trick = model(hand, opp, move, hint, flag, pass_)
-            loss, metrics = compute_loss(v_init, v_no_init, p_trick, y_trick, y_win)
+            loss, metrics = compute_loss(v_init, v_no_init, p_trick, y_trick, y_win, vi_forced, vn_forced)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
@@ -196,11 +212,11 @@ def train(
         n_val = 0
         with torch.no_grad():
             for batch in val_loader:
-                hand, opp, move, hint, flag, pass_, y_trick, y_win = (
+                hand, opp, move, hint, flag, pass_, vi_forced, vn_forced, y_trick, y_win = (
                     t.to(device) for t in batch
                 )
                 v_init, v_no_init, p_trick = model(hand, opp, move, hint, flag, pass_)
-                loss, metrics = compute_loss(v_init, v_no_init, p_trick, y_trick, y_win)
+                loss, metrics = compute_loss(v_init, v_no_init, p_trick, y_trick, y_win, vi_forced, vn_forced)
                 bs = len(y_trick)
                 val_loss += loss.item() * bs
                 val_p += metrics["loss_p_trick"] * bs
@@ -245,14 +261,22 @@ def train(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train Big2Net")
-    parser.add_argument("parquet", help="Path to *_turn.parquet from dnn datagen")
+    parser.add_argument(
+        "parquet", nargs="+", help="Parquet file(s) from dnn datagen (mixed if multiple)"
+    )
     parser.add_argument(
         "--out", default="models/model.pt", help="Output TorchScript model path"
     )
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch", type=int, default=2048)
     parser.add_argument("--val-frac", type=float, default=0.1)
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--lr-warmup", type=float, default=0.05,
+                        help="Fraction of steps for LR warmup (OneCycleLR pct_start)")
+    parser.add_argument("--final-div-factor", type=float, default=100.0,
+                        help="OneCycleLR final_div_factor; final LR = max_lr/(div_factor*this)")
+    parser.add_argument("--mix-decay", type=float, default=1.0,
+                        help="Subsample fraction per older generation file (0.5 = halve each step back)")
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--grad-clip", type=float, default=0.5)
     parser.add_argument("--workers", type=int, default=8)
@@ -261,12 +285,15 @@ def main() -> None:
     args = parser.parse_args()
 
     train(
-        parquet_path=args.parquet,
+        parquet_paths=args.parquet,
         out_path=args.out,
         epochs=args.epochs,
         batch_size=args.batch,
         val_frac=args.val_frac,
         lr=args.lr,
+        lr_warmup=args.lr_warmup,
+        final_div_factor=args.final_div_factor,
+        mix_decay=args.mix_decay,
         weight_decay=args.weight_decay,
         grad_clip=args.grad_clip,
         num_workers=args.workers,
