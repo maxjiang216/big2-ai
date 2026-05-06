@@ -104,21 +104,22 @@ NNGameData NNGameRunner::run_game(std::mt19937& rng) const {
         int cp = game.current_player();
         auto legal = game.get_legal_moves();
 
-        // Tablebase: play out without recording turns
+        // Tablebase: play out without recording turns; both players use
+        // tablebase when applicable, policy otherwise (no random fallback).
         int tb_mid = tablebase_move_id(game, cp, legal);
         if (tb_mid >= 0) {
-            // Current player has a forcing line — play to end without recording
             game.apply_move(tb_mid);
             while (!game.is_over()) {
+                int cp2 = game.current_player();
                 auto rem = game.get_legal_moves();
-                int tb2 = tablebase_move_id(game, game.current_player(), rem);
+                int tb2 = tablebase_move_id(game, cp2, rem);
                 if (tb2 >= 0) {
                     game.apply_move(tb2);
+                } else if (rem.size() == 1) {
+                    game.apply_move(rem[0]);
                 } else {
-                    // Fall back to random for non-tablebase opponent replies
-                    int idx = std::uniform_int_distribution<int>(
-                        0, static_cast<int>(rem.size()) - 1)(rng);
-                    game.apply_move(rem[idx]);
+                    const auto& fn = (cp2 == 0) ? _p0_fn : _p1_fn;
+                    game.apply_move(fn(game, cp2, rem));
                 }
             }
             break;

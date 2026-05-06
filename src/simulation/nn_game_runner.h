@@ -8,19 +8,20 @@
 #include <random>
 #include <vector>
 
-// Compact per-turn record for NN training. All fields reflect the game state
-// AFTER the move was applied (post-move hand, discard includes move cards).
-//
-// hand_at[n] / opp_at[n]:  bit r set iff the player/opponent-max has ≥(n+1) of rank r.
-// Python: count[r] = (at[0]>>r&1) + (at[1]>>r&1) + (at[2]>>r&1) + (at[3]>>r&1)
+// Per-turn record for NN training. All fields reflect game state AFTER the move.
+// hand_after / opp_counts: rank counts [0..12], ready for Python encode_exact/thermo.
+// trick_winner: 1 if this player won the trick, 0 if not (computed in C++ during sim).
 struct NNTurnData {
     int current_player;               // 0 or 1 (who played this move)
-    std::array<int, 13> move_enc;     // MOVE_TO_CARDS[move_id][0..12]
-    uint16_t hand_at[4];              // post-move player hand as HandBits (at1..at4)
-    uint16_t opp_at[4];              // post-move opponent max counts as HandBits
+    std::array<int, 13> move_enc;     // move rank counts (MOVE_TO_CARDS[move_id][0..12])
+    std::array<int, 13> hand_after;   // post-move player rank counts
+    std::array<int, 13> opp_counts;   // opponent max-possible rank counts
     float hint;                       // P(we win the trick) = 1-kHintTable; 0=pass, 1=flag
     bool flag;                        // !opponent_can_respond() post-move (logical deduction)
     bool pass_;                       // move_id == kPASS
+    bool vi_forced;                   // find_forced_win succeeds from hand_after w/ initiative
+    bool vn_forced;                   // vn=0: 1 card left, opp has <=1 card strictly below it
+    int8_t trick_winner;              // 1 if current_player won this trick, 0 otherwise
 };
 
 struct NNGameData {

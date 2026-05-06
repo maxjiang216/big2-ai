@@ -9,6 +9,7 @@
 // Output format: identical to generate_nn_data (same Parquet schema).
 
 #include "nn_game_runner.h"
+#include "nn_encode.h"
 #include "parquet_export.hpp"
 
 #include "game.h"
@@ -42,36 +43,7 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-static constexpr int ENCODING_DIM = 48;  // one-hot floats per hand/opp/move
 static constexpr int MAX_BATCH    = 200000;  // upper bound on positions per round
-static const char* kAtNames[4]    = { "at1", "at2", "at3", "at4" };
-
-// RANK_MAX_COUNTS[r] = max cards of rank r in deck
-static constexpr int RANK_MAX[13] = {4,4,4,4,4,4,4,4,4,4,4,3,1};
-
-// ---------------------------------------------------------------------------
-// Encoding helpers
-// ---------------------------------------------------------------------------
-
-// Write exact one-hot encoding for rank counts into buf (48 floats).
-static void encode_exact(const std::array<int,13>& counts, float* buf) {
-    int off = 0;
-    for (int r = 0; r < 13; ++r) {
-        int c = counts[r], mx = RANK_MAX[r];
-        for (int k = 1; k <= mx; ++k)
-            buf[off++] = (c == k) ? 1.0f : 0.0f;
-    }
-}
-
-// Write thermometer (upper-bound) encoding for max possible counts.
-static void encode_thermo(const std::array<int,13>& counts, float* buf) {
-    int off = 0;
-    for (int r = 0; r < 13; ++r) {
-        int c = std::min(counts[r], RANK_MAX[r]), mx = RANK_MAX[r];
-        for (int k = 1; k <= mx; ++k)
-            buf[off++] = (c >= k) ? 1.0f : 0.0f;
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Tablebase detection (mirror of nn_game_runner.cpp)
@@ -147,9 +119,11 @@ struct PosRecord {
     float hint;
     bool  flag;
     bool  pass_;
+    bool  vi_forced;
+    bool  vn_forced;
     std::array<int,13> move_enc;
-    uint16_t hand_at[4];
-    uint16_t opp_at[4];
+    std::array<int,13> hand_after;   // post-move rank counts
+    std::array<int,13> opp_counts;   // opponent max rank counts
 };
 
 // ---------------------------------------------------------------------------
@@ -162,6 +136,7 @@ struct GameSlot {
     NNGameData       data{};    // accumulates turns for this game
     bool             active{false};
     int              global_id{-1};
+    int              trick_start{0};  // index into data.turns of current trick start
 };
 
 // ---------------------------------------------------------------------------
@@ -221,9 +196,9 @@ static void encode_pool(const std::vector<GameSlot>& pool, InferBuf& buf) {
         auto discard     = slot.game.discard_pile();
         int  opp_count   = slot.game.get_player_hand_size(1 - cp);
 
-        // Opponent upper-bound counts + HandBits (constant across all moves for this slot)
+        // Opponent upper-bound counts (constant across all moves for this slot)
         std::array<int,13> opp_counts{};
-        HandBits opp_bits{};
+        HandBits opp_bits{};  // still needed for opponent_can_respond()
         for (int r = 0; r < 13; ++r) {
             int hand_r = ((hb.at1>>r)&1)+((hb.at2>>r)&1)+((hb.at3>>r)&1)+((hb.at4>>r)&1);
             int om = max_cards_in_deck_for_rank(r) - hand_r - discard[r];
@@ -239,7 +214,10 @@ static void encode_pool(const std::vector<GameSlot>& pool, InferBuf& buf) {
             std::array<int,13> mc{};
             for (int r = 0; r < 13; ++r) mc[r] = MOVE_TO_CARDS[move_id][r];
 
-            encode_exact(hand_counts,  h_hand + row*ENCODING_DIM);
+            // Post-move hand (model was trained with hand-after-playing-move as input)
+            std::array<int,13> hand_after{};
+            for (int r = 0; r < 13; ++r) hand_after[r] = hand_counts[r] - mc[r];
+            encode_exact(hand_after,   h_hand + row*ENCODING_DIM);
             encode_thermo(opp_counts,  h_opp  + row*ENCODING_DIM);
             encode_exact(mc,           h_move + row*ENCODING_DIM);
 
@@ -252,15 +230,41 @@ static void encode_pool(const std::vector<GameSlot>& pool, InferBuf& buf) {
             h_flag[row] = is_flag;
             h_pass[row] = is_pass;
 
-            // Post-move hand bits (after applying this move)
-            HandBits post_hb = hb;
-            for (int r = 0; r < 13; ++r)
-                if (mc[r]) hand_bits_remove(post_hb, r, mc[r]);
+            // vi_forced: after playing this move, is there a forced win from initiative?
+            // Only check when remaining hand is small (perf gate).
+            bool vi_forced = false;
+            if (!is_pass) {
+                int remaining = 0;
+                for (int r = 0; r < 13; ++r) remaining += hand_after[r];
+                if (remaining <= 10) {
+                    std::array<int,13> discard_after;
+                    for (int r = 0; r < 13; ++r) discard_after[r] = discard[r] + mc[r];
+                    vi_forced = find_forced_win(hand_after, discard_after, opp_count).has_value();
+                }
+            }
 
-            buf.pos_map[row] = {g, mi, cp, hint_val, is_flag, is_pass,
-                                mc,
-                                {post_hb.at1, post_hb.at2, post_hb.at3, post_hb.at4},
-                                {opp_bits.at1, opp_bits.at2, opp_bits.at3, opp_bits.at4}};
+            // vn_forced: exactly 1 card remaining of rank R, and opp has <=1 card
+            // strictly below R → opponent's only below-R card is their last, so
+            // we can never win the trick without initiative (vn = 0 exactly).
+            bool vn_forced = false;
+            if (!is_pass) {
+                int remaining = 0;
+                int remaining_rank = -1;
+                for (int r = 0; r < 13; ++r) {
+                    remaining += hand_after[r];
+                    if (hand_after[r] > 0) remaining_rank = r;
+                }
+                if (remaining == 1 && remaining_rank >= 0) {
+                    int opp_below = 0;
+                    for (int r = 0; r < remaining_rank; ++r)
+                        opp_below += opp_counts[r];
+                    if (opp_below <= 1)
+                        vn_forced = true;
+                }
+            }
+
+            buf.pos_map[row] = {g, mi, cp, hint_val, is_flag, is_pass, vi_forced, vn_forced,
+                                mc, hand_after, opp_counts};
             ++row;
         }
         buf.game_row_end[g] = row;
@@ -293,6 +297,15 @@ static void run_inference(torch::jit::Module& model,
     buf.v_no_init = out->elements()[1].toTensor().to(torch::kCPU);
     buf.p_trick   = out->elements()[2].toTensor().to(torch::kCPU);
 }
+
+// ---------------------------------------------------------------------------
+// Game statistics (updated atomically by workers)
+// ---------------------------------------------------------------------------
+
+static constexpr int kMaxLegalHist = 512;
+static std::atomic<long long> stat_total_turns{0};
+static std::atomic<long long> stat_p1_wins{0};
+static std::atomic<long long> stat_legal_hist[kMaxLegalHist]{};
 
 // ---------------------------------------------------------------------------
 // Progress bar
@@ -337,15 +350,18 @@ static void write_nn_parquet(
     for (const auto& pr : sorted) total += pr.second.turns.size();
 
     arrow::Int32Builder   game_id_b, turn_idx_b, cp_b, winner_b;
-    arrow::Int32Builder   move_b[13], hand_at_b[4], opp_at_b[4];
+    arrow::Int32Builder   move_b[13], hand_after_b[13], opp_cnt_b[13];
     arrow::FloatBuilder   hint_b;
-    arrow::BooleanBuilder flag_b, pass_b;
+    arrow::BooleanBuilder flag_b, pass_b, vi_forced_b, vn_forced_b;
+    arrow::Int8Builder    trick_winner_b;
 
     auto reserve = [&](int64_t n) {
         game_id_b.Reserve(n); turn_idx_b.Reserve(n); cp_b.Reserve(n); winner_b.Reserve(n);
         hint_b.Reserve(n); flag_b.Reserve(n); pass_b.Reserve(n);
-        for (int r=0;r<13;++r) move_b[r].Reserve(n);
-        for (int i=0;i<4;++i) { hand_at_b[i].Reserve(n); opp_at_b[i].Reserve(n); }
+        vi_forced_b.Reserve(n); vn_forced_b.Reserve(n); trick_winner_b.Reserve(n);
+        for (int r=0;r<13;++r) {
+            move_b[r].Reserve(n); hand_after_b[r].Reserve(n); opp_cnt_b[r].Reserve(n);
+        }
     };
     reserve((int64_t)total);
 
@@ -355,17 +371,21 @@ static void write_nn_parquet(
             game_id_b.UnsafeAppend(gid); turn_idx_b.UnsafeAppend(tidx++);
             cp_b.UnsafeAppend(t.current_player); winner_b.UnsafeAppend(pr.second.winner);
             hint_b.UnsafeAppend(t.hint); flag_b.UnsafeAppend(t.flag); pass_b.UnsafeAppend(t.pass_);
-            for (int r=0;r<13;++r) move_b[r].UnsafeAppend(t.move_enc[r]);
-            for (int i=0;i<4;++i) {
-                hand_at_b[i].UnsafeAppend((int32_t)t.hand_at[i]);
-                opp_at_b[i].UnsafeAppend((int32_t)t.opp_at[i]);
+            vi_forced_b.UnsafeAppend(t.vi_forced);
+            vn_forced_b.UnsafeAppend(t.vn_forced);
+            trick_winner_b.UnsafeAppend(t.trick_winner);
+            for (int r=0;r<13;++r) {
+                move_b[r].UnsafeAppend(t.move_enc[r]);
+                hand_after_b[r].UnsafeAppend(t.hand_after[r]);
+                opp_cnt_b[r].UnsafeAppend(t.opp_counts[r]);
             }
         }
     }
 
-    auto fi = [](arrow::Int32Builder&   b){ std::shared_ptr<arrow::Array> a; b.Finish(&a); return a; };
-    auto ff = [](arrow::FloatBuilder&   b){ std::shared_ptr<arrow::Array> a; b.Finish(&a); return a; };
-    auto fb = [](arrow::BooleanBuilder& b){ std::shared_ptr<arrow::Array> a; b.Finish(&a); return a; };
+    auto fi  = [](arrow::Int32Builder&   b){ std::shared_ptr<arrow::Array> a; b.Finish(&a); return a; };
+    auto ff  = [](arrow::FloatBuilder&   b){ std::shared_ptr<arrow::Array> a; b.Finish(&a); return a; };
+    auto fb  = [](arrow::BooleanBuilder& b){ std::shared_ptr<arrow::Array> a; b.Finish(&a); return a; };
+    auto fi8 = [](arrow::Int8Builder&    b){ std::shared_ptr<arrow::Array> a; b.Finish(&a); return a; };
 
     std::vector<std::shared_ptr<arrow::Field>> fields;
     std::vector<std::shared_ptr<arrow::Array>> arrays;
@@ -375,15 +395,18 @@ static void write_nn_parquet(
     push(arrow::field("turn_idx",       arrow::int32()), fi(turn_idx_b));
     push(arrow::field("current_player", arrow::int32()), fi(cp_b));
     for (int r=0;r<13;++r)
-        push(arrow::field("move_at"+std::to_string(r), arrow::int32()), fi(move_b[r]));
-    for (int i=0;i<4;++i)
-        push(arrow::field(std::string("hand_")+kAtNames[i], arrow::int32()), fi(hand_at_b[i]));
-    for (int i=0;i<4;++i)
-        push(arrow::field(std::string("opp_")+kAtNames[i], arrow::int32()), fi(opp_at_b[i]));
-    push(arrow::field("hint",   arrow::float32()), ff(hint_b));
-    push(arrow::field("flag",   arrow::boolean()), fb(flag_b));
-    push(arrow::field("pass_",  arrow::boolean()), fb(pass_b));
-    push(arrow::field("winner", arrow::int32()),   fi(winner_b));
+        push(arrow::field("move_at"+std::to_string(r),      arrow::int32()), fi(move_b[r]));
+    for (int r=0;r<13;++r)
+        push(arrow::field("hand_after_"+std::to_string(r),  arrow::int32()), fi(hand_after_b[r]));
+    for (int r=0;r<13;++r)
+        push(arrow::field("opp_cnt_"+std::to_string(r),     arrow::int32()), fi(opp_cnt_b[r]));
+    push(arrow::field("hint",         arrow::float32()), ff(hint_b));
+    push(arrow::field("flag",         arrow::boolean()), fb(flag_b));
+    push(arrow::field("pass_",        arrow::boolean()), fb(pass_b));
+    push(arrow::field("vi_forced",    arrow::boolean()), fb(vi_forced_b));
+    push(arrow::field("vn_forced",    arrow::boolean()), fb(vn_forced_b));
+    push(arrow::field("trick_winner", arrow::int8()),    fi8(trick_winner_b));
+    push(arrow::field("winner",       arrow::int32()),   fi(winner_b));
 
     auto table = arrow::Table::Make(arrow::schema(fields), arrays);
     auto out = arrow::io::FileOutputStream::Open(path).ValueOrDie();
@@ -406,6 +429,7 @@ static void print_usage(const char* prog) {
         << "  --out <path>      Output .parquet file (required)\n"
         << "  --pool <P>        Games per pool (default: 900, total 2P in flight)\n"
         << "  --seed <S>        RNG seed (default: random)\n"
+        << "  --temp <T>        Softmax temperature for move selection (default: 0 = argmax)\n"
         << "  --device <d>      cuda or cpu (default: cuda if available)\n"
         << "\nRuns NN self-play with double-buffer CPU/GPU pipeline.\n"
         << "Two independent pools of P games each; while GPU runs inference\n"
@@ -415,6 +439,7 @@ static void print_usage(const char* prog) {
 int main(int argc, char** argv) {
     int         num_games  = 0;
     int         pool_size  = 900;
+    float       temp       = 0.0f;
     std::string out_path;
     std::string model_path;
     std::string device_str = "auto";
@@ -428,6 +453,7 @@ int main(int argc, char** argv) {
         else if (arg=="--out"    && i+1<argc) out_path    = argv[++i];
         else if (arg=="--pool"   && i+1<argc) pool_size   = std::stoi(argv[++i]);
         else if (arg=="--seed"   && i+1<argc) seed        = std::stoul(argv[++i]);
+        else if (arg=="--temp"   && i+1<argc) temp        = std::stof(argv[++i]);
         else if (arg=="--device" && i+1<argc) device_str  = argv[++i];
         else { std::cerr << "Unknown: " << arg << "\n"; print_usage(argv[0]); return 1; }
     }
@@ -447,6 +473,7 @@ int main(int argc, char** argv) {
               << "Out:     " << out_path    << "\n"
               << "Seed:    " << seed        << "\n"
               << "Pool:    " << pool_size   << " per pool (" << 2*pool_size << " total in flight)\n"
+              << "Temp:    " << temp        << (temp==0?"  (argmax)":"") << "\n"
               << "Device:  " << (dev==torch::kCUDA ? "cuda" : "cpu") << "\n\n";
 
     torch::jit::Module model = torch::jit::load(model_path);
@@ -500,6 +527,14 @@ int main(int argc, char** argv) {
         int local_games_done = 0;
 
         while (games_done.load() < num_games) {
+            // Record legal move counts for stats
+            for (const auto& slot : pool) {
+                if (!slot.active) continue;
+                int k = (int)slot.legal.size();
+                if (k > 0 && k < kMaxLegalHist)
+                    stat_legal_hist[k].fetch_add(1, std::memory_order_relaxed);
+            }
+
             // Encode this pool's current decision points
             encode_pool(pool, buf);
 
@@ -514,16 +549,35 @@ int main(int argc, char** argv) {
                 auto& slot = pool[g];
                 if (!slot.active) continue;
 
-                // Find best move for this slot
-                float best_w = -1e9f;
+                // Select move: argmax when temp==0, softmax sampling otherwise
                 int   best_row = -1;
                 const float* vi = buf.v_init.data_ptr<float>();
                 const float* vn = buf.v_no_init.data_ptr<float>();
                 const float* pt = buf.p_trick.data_ptr<float>();
+                const int row0  = buf.game_row_start[g];
+                const int row1  = buf.game_row_end[g];
 
-                for (int row = buf.game_row_start[g]; row < buf.game_row_end[g]; ++row) {
-                    float w = pt[row]*vi[row] + (1.0f-pt[row])*vn[row];
-                    if (w > best_w) { best_w = w; best_row = row; }
+                if (temp == 0.0f) {
+                    float best_w = -1e9f;
+                    for (int row = row0; row < row1; ++row) {
+                        float w = pt[row]*vi[row] + (1.0f-pt[row])*vn[row];
+                        if (w > best_w) { best_w = w; best_row = row; }
+                    }
+                } else {
+                    // Softmax sampling: exp((w - max_w) / temp), then sample
+                    float max_w = -1e9f;
+                    for (int row = row0; row < row1; ++row) {
+                        float w = pt[row]*vi[row] + (1.0f-pt[row])*vn[row];
+                        if (w > max_w) max_w = w;
+                    }
+                    std::vector<float> probs;
+                    probs.reserve(row1 - row0);
+                    for (int row = row0; row < row1; ++row) {
+                        float w = pt[row]*vi[row] + (1.0f-pt[row])*vn[row];
+                        probs.push_back(std::exp((w - max_w) / temp));
+                    }
+                    std::discrete_distribution<int> dist(probs.begin(), probs.end());
+                    best_row = row0 + dist(rng);
                 }
                 if (best_row < 0) continue;
 
@@ -531,17 +585,37 @@ int main(int argc, char** argv) {
                 int move_id = slot.legal[pr.move_idx];
 
                 slot.data.turns.push_back({
-                    pr.cp, pr.move_enc,
-                    {pr.hand_at[0],pr.hand_at[1],pr.hand_at[2],pr.hand_at[3]},
-                    {pr.opp_at[0], pr.opp_at[1], pr.opp_at[2], pr.opp_at[3]},
-                    pr.hint, pr.flag, pr.pass_
+                    pr.cp, pr.move_enc, pr.hand_after, pr.opp_counts,
+                    pr.hint, pr.flag, pr.pass_, pr.vi_forced, pr.vn_forced, 0
                 });
+
+                // Trick winner: when a pass lands, backfill the completed trick.
+                if (pr.pass_) {
+                    int n = (int)slot.data.turns.size();
+                    int winner_cp = (n >= 2) ? slot.data.turns[n-2].current_player : -1;
+                    for (int j = slot.trick_start; j < n; ++j)
+                        slot.data.turns[j].trick_winner =
+                            (winner_cp >= 0 &&
+                             slot.data.turns[j].current_player == winner_cp) ? 1 : 0;
+                    slot.trick_start = n;
+                }
 
                 slot.game.apply_move(move_id);
                 slot.legal = advance_to_decision(slot.game, rng);
 
                 if (slot.legal.empty()) {
+                    // Backfill the final trick (ended by emptying hand, not a pass).
+                    int last_cp = slot.data.turns.back().current_player;
+                    for (int j = slot.trick_start; j < (int)slot.data.turns.size(); ++j)
+                        slot.data.turns[j].trick_winner =
+                            (slot.data.turns[j].current_player == last_cp) ? 1 : 0;
+                    slot.trick_start = 0;
+
                     slot.data.winner = slot.game.get_winner();
+                    stat_total_turns.fetch_add((long long)slot.data.turns.size(),
+                                               std::memory_order_relaxed);
+                    if (slot.data.winner == 1)
+                        stat_p1_wins.fetch_add(1, std::memory_order_relaxed);
                     int gid = slot.global_id;
                     {
                         std::lock_guard<std::mutex> lk(data_mutex);
@@ -554,6 +628,7 @@ int main(int argc, char** argv) {
                         slot.global_id = global_id_counter.fetch_add(1);
                         slot.game.shuffle_deal(rng);
                         slot.data = {};
+                        slot.trick_start = 0;
                         slot.legal = advance_to_decision(slot.game, rng);
                         slot.active = !slot.legal.empty();
                     } else {
@@ -588,5 +663,36 @@ int main(int argc, char** argv) {
     std::cout << "Done. " << ms << " ms  ("
               << (ms>0 ? (long)(1000.0*num_games/ms) : 0) << " games/s)\n"
               << "Output: " << out_path << "\n";
+
+    // Print game statistics
+    long long total_turns = stat_total_turns.load();
+    long long p1_wins     = stat_p1_wins.load();
+    int actual = (int)completed.size();
+    std::cout << "\n=== Game Statistics ===\n";
+    std::cout << "Avg decision points/game: "
+              << (actual > 0 ? (double)total_turns / actual : 0.0) << "\n";
+    std::cout << "P1 win rate: "
+              << p1_wins << " / " << actual
+              << (actual > 0 ? " (" + std::to_string((int)(100.0*p1_wins/actual+0.5)) + "%)" : "")
+              << "\n";
+
+    // Legal move distribution
+    std::cout << "Legal move count distribution:\n";
+    std::cout << "  count  decisions  pct\n";
+    long long total_dp = 0;
+    for (int k = 0; k < kMaxLegalHist; ++k)
+        total_dp += stat_legal_hist[k].load();
+    // Print buckets that have data, grouped sparsely
+    long long cumul = 0;
+    for (int k = 1; k < kMaxLegalHist; ++k) {
+        long long v = stat_legal_hist[k].load();
+        if (v == 0) continue;
+        cumul += v;
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "  %5d  %9lld  %5.1f%%\n",
+                      k, v, total_dp > 0 ? 100.0*v/total_dp : 0.0);
+        std::cout << buf;
+    }
+
     return 0;
 }

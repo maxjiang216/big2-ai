@@ -256,19 +256,32 @@ def compute_trick_winners_selfplay(df: pd.DataFrame) -> pd.Series:
 class Big2SelfPlayDataset(Dataset):
     """Dataset for generate_nn_selfplay parquet output.
 
-    Columns: game_id, turn_idx, current_player, move_at0..12,
-             hand_at1..4, opp_at1..4, hint (float), flag (bool),
-             pass_ (bool), winner.
+    New format (hand_after_0..12 / opp_cnt_0..12 / trick_winner columns):
+      C++ pre-computed rank counts and trick labels — no Python processing.
+
+    Old format fallback (hand_at1..4 / opp_at1..4):
+      Decodes HandBits and computes trick labels in Python.
     """
 
     def __init__(
-        self, parquet_path: str, val_game_ids: Optional[set] = None, train: bool = True
+        self,
+        parquet_path: str,
+        val_game_ids: Optional[set] = None,
+        train: bool = True,
+        subsample_frac: float = 1.0,
+        seed: int = 0,
     ) -> None:
         df = pd.read_parquet(parquet_path)
         df = df.sort_values(["game_id", "turn_idx"]).reset_index(drop=True)
 
-        trick_labels = compute_trick_winners_selfplay(df)
-        df["p_win_trick"] = trick_labels
+        new_format = "hand_after_0" in df.columns
+
+        if new_format:
+            # C++ already computed trick_winner — use directly, no Python loop needed.
+            df["p_win_trick"] = df["trick_winner"].astype(float)
+        else:
+            trick_labels = compute_trick_winners_selfplay(df)
+            df["p_win_trick"] = trick_labels
 
         if val_game_ids is not None:
             if train:
@@ -278,18 +291,32 @@ class Big2SelfPlayDataset(Dataset):
 
         df = df.dropna(subset=["p_win_trick"]).reset_index(drop=True)
 
-        hand_counts = decode_handbits_np(
-            df["hand_at1"].to_numpy(dtype=np.int32),
-            df["hand_at2"].to_numpy(dtype=np.int32),
-            df["hand_at3"].to_numpy(dtype=np.int32),
-            df["hand_at4"].to_numpy(dtype=np.int32),
-        )
-        opp_counts = decode_handbits_np(
-            df["opp_at1"].to_numpy(dtype=np.int32),
-            df["opp_at2"].to_numpy(dtype=np.int32),
-            df["opp_at3"].to_numpy(dtype=np.int32),
-            df["opp_at4"].to_numpy(dtype=np.int32),
-        )
+        if subsample_frac < 1.0:
+            df = df.sample(frac=subsample_frac, random_state=seed).reset_index(
+                drop=True
+            )
+
+        if new_format:
+            hand_counts = df[[f"hand_after_{r}" for r in range(13)]].to_numpy(
+                dtype=np.int32
+            )
+            opp_counts = df[[f"opp_cnt_{r}" for r in range(13)]].to_numpy(
+                dtype=np.int32
+            )
+        else:
+            hand_counts = decode_handbits_np(
+                df["hand_at1"].to_numpy(dtype=np.int32),
+                df["hand_at2"].to_numpy(dtype=np.int32),
+                df["hand_at3"].to_numpy(dtype=np.int32),
+                df["hand_at4"].to_numpy(dtype=np.int32),
+            )
+            opp_counts = decode_handbits_np(
+                df["opp_at1"].to_numpy(dtype=np.int32),
+                df["opp_at2"].to_numpy(dtype=np.int32),
+                df["opp_at3"].to_numpy(dtype=np.int32),
+                df["opp_at4"].to_numpy(dtype=np.int32),
+            )
+
         move_counts = df[[f"move_at{r}" for r in range(13)]].to_numpy(dtype=np.int32)
 
         self.hand_enc = torch.from_numpy(encode_exact_np(hand_counts))
@@ -301,6 +328,18 @@ class Big2SelfPlayDataset(Dataset):
         )
         self.flag = torch.tensor(df["flag"].to_numpy(dtype=bool), dtype=torch.bool)
         self.pass_ = torch.tensor(df["pass_"].to_numpy(dtype=bool), dtype=torch.bool)
+
+        if "vi_forced" in df.columns:
+            vi_forced = df["vi_forced"].to_numpy(dtype=bool)
+        else:
+            vi_forced = np.zeros(len(df), dtype=bool)
+        self.vi_forced = torch.tensor(vi_forced, dtype=torch.bool)
+
+        if "vn_forced" in df.columns:
+            vn_forced = df["vn_forced"].to_numpy(dtype=bool)
+        else:
+            vn_forced = np.zeros(len(df), dtype=bool)
+        self.vn_forced = torch.tensor(vn_forced, dtype=torch.bool)
 
         y_win = (
             df["winner"].to_numpy(dtype=np.int32)
@@ -322,15 +361,17 @@ class Big2SelfPlayDataset(Dataset):
             self.hint[idx],
             self.flag[idx],
             self.pass_[idx],
+            self.vi_forced[idx],
+            self.vn_forced[idx],
             self.y_trick[idx],
             self.y_win[idx],
         )
 
 
-def make_train_val_split(
-    parquet_path: str, val_frac: float = 0.1, seed: int = 0
-) -> tuple[Big2Dataset, Big2Dataset]:
-    """Return (train, val) datasets split by game ID, auto-detecting format."""
+def _split_one(
+    parquet_path: str, val_frac: float, seed: int, subsample_frac: float = 1.0
+) -> tuple[Dataset, Dataset]:
+    """Train/val split for a single parquet file."""
     import pyarrow.parquet as pq
 
     schema_names = set(pq.read_schema(parquet_path).names)
@@ -344,6 +385,36 @@ def make_train_val_split(
     val_ids = set(game_ids[:n_val].tolist())
 
     DatasetClass = Big2SelfPlayDataset if is_selfplay else Big2Dataset
-    train_ds = DatasetClass(parquet_path, val_game_ids=val_ids, train=True)
-    val_ds = DatasetClass(parquet_path, val_game_ids=val_ids, train=False)
+    kwargs = {"subsample_frac": subsample_frac, "seed": seed} if is_selfplay else {}
+    return (
+        DatasetClass(parquet_path, val_game_ids=val_ids, train=True, **kwargs),
+        DatasetClass(parquet_path, val_game_ids=val_ids, train=False, **kwargs),
+    )
+
+
+def make_train_val_split(
+    parquet_paths: "str | list[str]",
+    val_frac: float = 0.1,
+    seed: int = 0,
+    mix_decay: float = 1.0,
+) -> "tuple[Dataset, Dataset]":
+    """Return (train, val) datasets split by game ID, auto-detecting format.
+
+    parquet_paths may be a single path or a list. When mix_decay < 1, each
+    subsequent file is subsampled by mix_decay^i (file 0 = full, file 1 = mix_decay,
+    file 2 = mix_decay^2, etc.) to blend older-generation data.
+    """
+    from torch.utils.data import ConcatDataset
+
+    if isinstance(parquet_paths, str):
+        parquet_paths = [parquet_paths]
+
+    fracs = [mix_decay**i for i in range(len(parquet_paths))]
+    splits = [
+        _split_one(p, val_frac, seed + i, subsample_frac=fracs[i])
+        for i, p in enumerate(parquet_paths)
+    ]
+    train_parts, val_parts = zip(*splits)
+    train_ds = train_parts[0] if len(train_parts) == 1 else ConcatDataset(train_parts)
+    val_ds = val_parts[0] if len(val_parts) == 1 else ConcatDataset(val_parts)
     return train_ds, val_ds

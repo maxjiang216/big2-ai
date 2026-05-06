@@ -22,3 +22,8 @@ analysis = [
 
 [tool.uv]
 package = false
+
+[dependency-groups]
+dev = [
+    "black==23.3.0",
+]
