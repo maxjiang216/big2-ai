@@ -338,6 +338,29 @@ Throughput (1 thread, 1000 games, gen-4 tables):
 
 The +45% throughput is the main surprise: I'd expected a small slowdown from the extra check + the shrinkage-side double-lookup, but the dominance prune drops a meaningful fraction of legal moves at most decision points, which removes recursive `visit_opp` calls that would otherwise inflate the search tree.
 
+#### How often does the prune actually fire?
+
+Measured over 200 gen-4 self-play games (341,246 `visit_our` calls):
+
+| Metric | Value |
+|---|---|
+| Total `visit_our` calls | 341,246 |
+| Calls with >1 legal move | 109,341 (32%) — the rest are forced (1 legal move) |
+| Calls where at least one move was dropped | 31,464 (9.2% of all, **28.8% of multi-move**) |
+| Total moves dropped | 61,660 (avg 0.18/call, 9.3% of legal-set on average) |
+
+Breakdown of drops by kind:
+
+| Kind | Drops | Share |
+|---|---|---|
+| Loose single dominance (the `[89] → 8` rule) | 29,427 | **47.7%** |
+| Bomb aux dominance (the AAAK / AAA8 case) | 31,915 | **51.8%** |
+| Full house aux dominance | 318 | 0.5% |
+
+So the +45% throughput isn't *just* from rare bomb situations — it's about half from single-move dominance, which fires whenever the legal set contains multiple loose-single options (very common for both leads with many singles in hand and responses where multiple singles can beat the last move). Bomb-aux drops contribute the other half because each bomb playable in our hand tends to have many aux variants (10+ for a 4-of-a-kind bomb), and when one of them is the smallest loose aux, all the larger loose-aux variants get dropped at once — *aggressive when it fires, but only fires when a bomb is in the legal set*. Full-house-aux dominance is essentially noise (FHs are rare and usually only have a couple of aux options).
+
+The "30%" claim from the previous note was wrong; the real number is ~9% of all `visit_our` calls (or ~29% of calls that have any choice at all). I'd been guessing without measuring; corrected here.
+
 ### Risks / caveats
 
 - The dominance argument assumes "remove a loose card → keep a strictly more capable hand." The check uses straight-set equivalence as the loose-test, which is sufficient but not necessary — there are positions where breaking a straight you'd never want to play *would* still be safe. Conservative: we under-prune, never over-prune.

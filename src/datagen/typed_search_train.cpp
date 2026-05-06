@@ -526,6 +526,39 @@ int main(int argc, char *argv[]) {
     if (stats.is_open()) std::cout << "Stats CSV written.\n";
     if (args.sample_games > 0 && !args.sample_dir.empty())
       std::cout << "Annotated sample games written.\n";
+
+    auto ps = typed_search::snapshot_prune_stats_thread_local();
+    if (ps.calls > 0) {
+      const std::uint64_t total_drops = ps.total_drops_single +
+                                          ps.total_drops_bomb_aux +
+                                          ps.total_drops_fh_aux;
+      auto pct_of = [](std::uint64_t n, std::uint64_t d) {
+        return d == 0 ? 0.0 : 100.0 * static_cast<double>(n) / d;
+      };
+      double avg_in = static_cast<double>(ps.total_input_moves) / ps.calls;
+      double avg_drop = static_cast<double>(total_drops) / ps.calls;
+      std::cout << "Prune stats over " << ps.calls << " visit_our calls ("
+                << ps.calls_multi << " with >1 legal moves):\n";
+      std::cout << "  calls_with_drop:    " << ps.calls_with_drop << " ("
+                << pct_of(ps.calls_with_drop, ps.calls)
+                << "% of all, "
+                << pct_of(ps.calls_with_drop, ps.calls_multi)
+                << "% of multi-move)\n";
+      std::cout << "  total drops:        " << total_drops
+                << " — single=" << ps.total_drops_single
+                << " ("
+                << pct_of(ps.total_drops_single, total_drops)
+                << "%) bomb_aux=" << ps.total_drops_bomb_aux
+                << " (" << pct_of(ps.total_drops_bomb_aux, total_drops)
+                << "%) fh_aux=" << ps.total_drops_fh_aux
+                << " (" << pct_of(ps.total_drops_fh_aux, total_drops)
+                << "%)\n";
+      std::cout << "  avg legal_moves in: " << avg_in << "\n";
+      std::cout << "  avg dropped/call:   " << avg_drop << " ("
+                << pct_of(static_cast<std::uint64_t>(avg_drop * 1000),
+                           static_cast<std::uint64_t>(avg_in * 1000))
+                << "% of input)\n";
+    }
   }
   return 0;
 }

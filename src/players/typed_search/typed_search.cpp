@@ -160,9 +160,25 @@ bool affects_straights(const std::array<int, 13> &hand, int rank_idx,
 //
 // Non-loose auxes and the bare bomb are NOT pruned — the dominance
 // argument doesn't extend to those without more analysis.
+// Diagnostic counters — incremented on each prune call and reported by
+// typed_search_train via dump_prune_stats(). Per-thread to avoid contention.
+struct PruneStats {
+  std::uint64_t calls{0};
+  std::uint64_t calls_multi{0};       // legal_moves_in > 1
+  std::uint64_t calls_with_drop{0};
+  std::uint64_t total_drops_single{0};
+  std::uint64_t total_drops_bomb_aux{0};
+  std::uint64_t total_drops_fh_aux{0};
+  std::uint64_t total_input_moves{0};
+};
+thread_local PruneStats g_prune_stats;
+
 void prune_dominated_moves(const std::array<int, 13> &hand,
                             std::vector<int> &legal) {
+  g_prune_stats.calls++;
+  g_prune_stats.total_input_moves += legal.size();
   if (legal.size() <= 1) return;
+  g_prune_stats.calls_multi++;
 
   // Pass 1: find smallest-rank legal-move id of each "loose" category.
   int smallest_loose_single = INT_MAX;
@@ -258,11 +274,39 @@ void prune_dominated_moves(const std::array<int, 13> &hand,
     return false;
   };
 
+  // Also count what we drop, by kind, before the erase.
+  for (int m : legal) {
+    if (m == kPASS) continue;
+    if (!is_dominated(m)) continue;
+    const Move &mv = all[m];
+    if (mv.combination == Move::Combination::kSingle) {
+      g_prune_stats.total_drops_single++;
+    } else if (mv.combination == Move::Combination::kBomb) {
+      g_prune_stats.total_drops_bomb_aux++;
+    } else if (mv.combination == Move::Combination::kFullHouse) {
+      g_prune_stats.total_drops_fh_aux++;
+    }
+  }
+  std::size_t before = legal.size();
   legal.erase(std::remove_if(legal.begin(), legal.end(), is_dominated),
                legal.end());
+  if (legal.size() < before) g_prune_stats.calls_with_drop++;
 }
 
 }  // namespace
+
+PruneStatsSnapshot snapshot_prune_stats_thread_local() {
+  PruneStatsSnapshot s;
+  s.calls = g_prune_stats.calls;
+  s.calls_multi = g_prune_stats.calls_multi;
+  s.calls_with_drop = g_prune_stats.calls_with_drop;
+  s.total_drops_single = g_prune_stats.total_drops_single;
+  s.total_drops_bomb_aux = g_prune_stats.total_drops_bomb_aux;
+  s.total_drops_fh_aux = g_prune_stats.total_drops_fh_aux;
+  s.total_input_moves = g_prune_stats.total_input_moves;
+  return s;
+}
+void reset_prune_stats_thread_local() { g_prune_stats = {}; }
 
 TypedSearch::TypedSearch(const EvalTable &eval_table,
                           const MoveProbTable &mp_table,

@@ -14,6 +14,18 @@ namespace typed_search {
 class EvalTable;
 class MoveProbTable;
 
+struct PruneStatsSnapshot {
+  std::uint64_t calls;
+  std::uint64_t calls_multi;
+  std::uint64_t calls_with_drop;
+  std::uint64_t total_drops_single;
+  std::uint64_t total_drops_bomb_aux;
+  std::uint64_t total_drops_fh_aux;
+  std::uint64_t total_input_moves;
+};
+PruneStatsSnapshot snapshot_prune_stats_thread_local();
+void reset_prune_stats_thread_local();
+
 // One run of the typed-Shannon search at a single decision point.
 // Stateless w.r.t. prior calls — caller can persist via separate caching.
 class TypedSearch {
