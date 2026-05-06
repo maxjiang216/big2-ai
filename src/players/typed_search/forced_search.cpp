@@ -25,7 +25,9 @@ inline float eval_at(const std::array<int, 13> &hand,
   if (imp.has_value) return imp.value;
   uint32_t main_id = main_state_id(ctx);
   uint32_t fb_id = fallback_state_id(ctx);
-  return table.query(main_id, fb_id, /*min_visits=*/5.0f, default_value);
+  // Use default kappa/fb_min_visits.
+  return table.query(main_id, fb_id, /*kappa=*/20.0f, /*fb_min_visits=*/5.0f,
+                      default_value);
 }
 
 // Same opp_bits / opp_count invariance as in find_forced_win — hoist

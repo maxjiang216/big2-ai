@@ -41,10 +41,21 @@ public:
 
   void set_fallback(const EvalTable *fb) { fallback_ = fb; }
 
-  // Returns win probability in [0, 1]. If neither table has enough visits at
-  // (state_id), returns `default_value`. Increments stats_ counters.
+  // Bayesian-shrinkage query.
+  //
+  //   value = (kappa * prior_value + main_total_wins) / (kappa + main_visits)
+  //
+  // where prior_value is the fallback table's win-probability for
+  // `fallback_state_id` (or `default_value` if the fallback entry has fewer
+  // than `fb_min_visits` observations). `kappa` is the equivalent-visit weight
+  // of the prior. With kappa=20: 20 main visits gives a 50/50 blend with the
+  // fallback prior; 100 main visits is ~83% main / 17% fallback.
+  //
+  // When the main entry is missing entirely we return prior_value directly.
+  // Stats counters classify the call by which path dominated the outcome.
   float query(uint32_t state_id, uint32_t fallback_state_id,
-              float min_visits = 5.0f, float default_value = 0.5f) const;
+              float kappa = 20.0f, float fb_min_visits = 5.0f,
+              float default_value = 0.5f) const;
 
   EvalQueryStats &stats() const { return stats_; }
 

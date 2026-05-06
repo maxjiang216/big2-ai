@@ -85,9 +85,10 @@ void dump_pos(const char *label, const std::array<int, 13> &hand,
     printf("  fb    state=%u  visits=0  (absent)\n", fid);
   }
 
-  // Show what query() resolves to with min_visits=5 (default).
-  float q = main.query(mid, fid, 5.0f, 0.5f);
-  printf("  query(min_visits=5)  -> %.3f\n", q);
+  // Show shrunken query value (kappa=20 default).
+  float q = main.query(mid, fid, /*kappa=*/20.0f, /*fb_min_visits=*/5.0f,
+                        /*default=*/0.5f);
+  printf("  query(kappa=20)      -> %.3f\n", q);
 
   // Forced-search value (this is what eval_leaf_we_have_init returns).
   float fsv = typed_search::forced_search_value(hand, discard, opp_count, main);

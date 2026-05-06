@@ -49,24 +49,46 @@ void EvalTable::save(const std::string &path) const {
   }
 }
 
-float EvalTable::query(uint32_t state_id, uint32_t fb_state_id, float min_visits,
-                        float default_value) const {
+float EvalTable::query(uint32_t state_id, uint32_t fb_state_id, float kappa,
+                        float fb_min_visits, float default_value) const {
   stats_.queries.fetch_add(1, std::memory_order_relaxed);
-  auto it = entries_.find(state_id);
-  if (it != entries_.end() && it->second.visit_count >= min_visits) {
-    stats_.main_hits.fetch_add(1, std::memory_order_relaxed);
-    return it->second.total_wins / it->second.visit_count;
-  }
+
+  // Resolve the fallback prior. fb_min_visits guards against using an
+  // unreliable fallback estimate as the prior.
+  float prior_value = default_value;
+  bool have_fb = false;
   if (fallback_) {
-    auto it2 = fallback_->entries_.find(fb_state_id);
-    if (it2 != fallback_->entries_.end() &&
-        it2->second.visit_count >= min_visits) {
-      stats_.fallback_hits.fetch_add(1, std::memory_order_relaxed);
-      return it2->second.total_wins / it2->second.visit_count;
+    auto it_fb = fallback_->entries_.find(fb_state_id);
+    if (it_fb != fallback_->entries_.end() &&
+        it_fb->second.visit_count >= fb_min_visits) {
+      prior_value = it_fb->second.total_wins / it_fb->second.visit_count;
+      have_fb = true;
     }
   }
-  stats_.defaults.fetch_add(1, std::memory_order_relaxed);
-  return default_value;
+
+  auto it_main = entries_.find(state_id);
+  if (it_main == entries_.end()) {
+    if (have_fb) {
+      stats_.fallback_hits.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      stats_.defaults.fetch_add(1, std::memory_order_relaxed);
+    }
+    return prior_value;
+  }
+  const float vc = it_main->second.visit_count;
+  const float tw = it_main->second.total_wins;
+  // Posterior mean of Beta(kappa*prior, kappa*(1-prior)) updated with
+  // (tw, vc-tw) = (wins, losses).
+  const float blended = (kappa * prior_value + tw) / (kappa + vc);
+  // Classify which signal dominated for the stats counter.
+  if (vc >= kappa) {
+    stats_.main_hits.fetch_add(1, std::memory_order_relaxed);
+  } else if (have_fb) {
+    stats_.fallback_hits.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    stats_.defaults.fetch_add(1, std::memory_order_relaxed);
+  }
+  return blended;
 }
 
 void EvalTable::add_observation(uint32_t state_id, float winner, float weight) {

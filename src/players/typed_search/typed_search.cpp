@@ -8,6 +8,7 @@
 #include "util.h"
 
 #include <algorithm>
+#include <climits>
 #include <cstring>
 #include <vector>
 
@@ -120,6 +121,147 @@ inline bool opp_could_play_bits(int mid, const HandBits &opp_bits,
          (mn.bits.at4 & opp_bits.at4) == mn.bits.at4;
 }
 
+// Index of `face_rank` (3..K=13, A=14, "2"=2 or 15) into our 0..12 rank space.
+inline int rank_idx_of(int face_rank) {
+  return (face_rank == 2 || face_rank == 15) ? 12 : (face_rank - 3);
+}
+
+// Does removing `delta` cards of `rank_idx` from `hand` change the set of
+// straight / double-straight / triple-straight moves available? If yes, the
+// rank participates in some straight-family combination — NOT loose.
+// The four-of-a-kind bomb at the rank is ignored here (those don't get pruned
+// by this rule).
+bool affects_straights(const std::array<int, 13> &hand, int rank_idx,
+                        int delta) {
+  if (hand[rank_idx] < delta) return false;  // shouldn't happen
+  HandBits hb1 = hand_bits_from_counts(hand);
+  std::array<int, 13> mod = hand;
+  mod[rank_idx] -= delta;
+  HandBits hb2 = hand_bits_from_counts(mod);
+  thread_local std::vector<int> s1, s2;
+  straight_moves_for_pass_masks_into(hb1.at1, hb1.at2, hb1.at3, s1);
+  straight_moves_for_pass_masks_into(hb2.at1, hb2.at2, hb2.at3, s2);
+  return s1.size() != s2.size();
+}
+
+// Drop moves that are strictly dominated by a smaller-rank alternative
+// using a "loose" sacrifice card (or pair). Two complementary rules:
+//
+// 1. Single-move domination. Among legal Single moves whose rank is loose
+//    in `hand` (count == 1, not in any straight), the smallest-rank wins;
+//    larger ones are dominated and get dropped.
+//
+// 2. Bomb / full-house aux domination. Among bomb moves at the same
+//    bomb_rank, those whose auxiliary is a "loose" sacrifice (single aux
+//    with count_X == 1 in hand-after-bomb and not in any straight; or pair
+//    aux with count_Y == 2 and not in any straight/DS/TS) are dominated by
+//    the smallest-rank loose aux of the same kind. Same logic for full
+//    houses keyed by triple_rank with loose-pair auxes.
+//
+// Non-loose auxes and the bare bomb are NOT pruned — the dominance
+// argument doesn't extend to those without more analysis.
+void prune_dominated_moves(const std::array<int, 13> &hand,
+                            std::vector<int> &legal) {
+  if (legal.size() <= 1) return;
+
+  // Pass 1: find smallest-rank legal-move id of each "loose" category.
+  int smallest_loose_single = INT_MAX;
+  // Bomb aux maps keyed by bomb_rank_idx (0..11).
+  std::array<int, 13> bomb_smallest_single_aux;
+  bomb_smallest_single_aux.fill(INT_MAX);
+  std::array<int, 13> bomb_smallest_pair_aux;
+  bomb_smallest_pair_aux.fill(INT_MAX);
+  // FH aux: keyed by triple_rank_idx.
+  std::array<int, 13> fh_smallest_pair_aux;
+  fh_smallest_pair_aux.fill(INT_MAX);
+
+  const auto &all = all_moves();
+
+  auto loose_single_at = [&](const std::array<int, 13> &h, int idx) {
+    return h[idx] == 1 && !affects_straights(h, idx, 1);
+  };
+  auto loose_pair_at = [&](const std::array<int, 13> &h, int idx) {
+    return h[idx] == 2 && !affects_straights(h, idx, 2);
+  };
+
+  for (int m : legal) {
+    if (m == kPASS) continue;
+    const Move &mv = all[m];
+    if (mv.combination == Move::Combination::kSingle) {
+      int idx = rank_idx_of(mv.rank);
+      if (loose_single_at(hand, idx)) {
+        if (m < smallest_loose_single) smallest_loose_single = m;
+      }
+    } else if (mv.combination == Move::Combination::kBomb) {
+      if (mv.auxiliary == 0) continue;  // bare
+      int bomb_idx = rank_idx_of(mv.rank);
+      int aux_idx = rank_idx_of(mv.auxiliary);
+      const auto &cost = MOVE_TO_CARDS[m];
+      int aux_count = cost[aux_idx];
+      // Hand after the bomb removes its base cards (but not aux).
+      std::array<int, 13> h_after_base = hand;
+      h_after_base[bomb_idx] -= cost[bomb_idx];
+      bool loose = (aux_count == 1)
+                       ? loose_single_at(h_after_base, aux_idx)
+                       : loose_pair_at(h_after_base, aux_idx);
+      if (loose) {
+        auto &slot = (aux_count == 1) ? bomb_smallest_single_aux[bomb_idx]
+                                          : bomb_smallest_pair_aux[bomb_idx];
+        if (m < slot) slot = m;
+      }
+    } else if (mv.combination == Move::Combination::kFullHouse) {
+      int triple_idx = rank_idx_of(mv.rank);
+      int aux_idx = rank_idx_of(mv.auxiliary);
+      std::array<int, 13> h_after_triple = hand;
+      h_after_triple[triple_idx] -= 3;
+      if (loose_pair_at(h_after_triple, aux_idx)) {
+        auto &slot = fh_smallest_pair_aux[triple_idx];
+        if (m < slot) slot = m;
+      }
+    }
+  }
+
+  // Pass 2: drop any move that is dominated.
+  auto is_dominated = [&](int m) -> bool {
+    if (m == kPASS) return false;
+    const Move &mv = all[m];
+    if (mv.combination == Move::Combination::kSingle) {
+      int idx = rank_idx_of(mv.rank);
+      if (smallest_loose_single != INT_MAX && m != smallest_loose_single &&
+          loose_single_at(hand, idx)) {
+        return true;
+      }
+    } else if (mv.combination == Move::Combination::kBomb &&
+               mv.auxiliary != 0) {
+      int bomb_idx = rank_idx_of(mv.rank);
+      int aux_idx = rank_idx_of(mv.auxiliary);
+      const auto &cost = MOVE_TO_CARDS[m];
+      int aux_count = cost[aux_idx];
+      std::array<int, 13> h_after_base = hand;
+      h_after_base[bomb_idx] -= cost[bomb_idx];
+      bool loose = (aux_count == 1)
+                       ? loose_single_at(h_after_base, aux_idx)
+                       : loose_pair_at(h_after_base, aux_idx);
+      if (!loose) return false;
+      int slot = (aux_count == 1) ? bomb_smallest_single_aux[bomb_idx]
+                                      : bomb_smallest_pair_aux[bomb_idx];
+      if (slot != INT_MAX && m != slot) return true;
+    } else if (mv.combination == Move::Combination::kFullHouse) {
+      int triple_idx = rank_idx_of(mv.rank);
+      int aux_idx = rank_idx_of(mv.auxiliary);
+      std::array<int, 13> h_after_triple = hand;
+      h_after_triple[triple_idx] -= 3;
+      if (!loose_pair_at(h_after_triple, aux_idx)) return false;
+      int slot = fh_smallest_pair_aux[triple_idx];
+      if (slot != INT_MAX && m != slot) return true;
+    }
+    return false;
+  };
+
+  legal.erase(std::remove_if(legal.begin(), legal.end(), is_dominated),
+               legal.end());
+}
+
 }  // namespace
 
 TypedSearch::TypedSearch(const EvalTable &eval_table,
@@ -181,6 +323,11 @@ float TypedSearch::visit_our(OurNode &n) {
 
   auto legal = compute_legal_moves(n.hand, n.last_move);
   // compute_legal_moves at lead position never includes PASS; at response it does.
+
+  // Prune strictly-dominated moves (smallest-loose-aux dominance) so the
+  // search and the eval table aren't burdened with options that an obvious
+  // dominance argument already settles.
+  prune_dominated_moves(n.hand, legal);
 
   float best = -1.0f;
   int best_move = -1;

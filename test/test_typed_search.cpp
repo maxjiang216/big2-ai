@@ -98,22 +98,27 @@ void test_eval_table_roundtrip() {
   t1.add_observation(42, 0.0f, 1.0f);
   t1.add_observation(100, 0.5f, 10.0f);
 
-  // total_wins[42] = 3, visit_count[42] = 4 -> 0.75
-  // total_wins[100] = 5, visit_count[100] = 10 -> 0.5
-  // min_visits=1 to ensure both pass threshold; no fallback.
-  assert(std::abs(t1.query(42, 0, 1.0f, 0.0f) - 0.75f) < 1e-5f);
-  assert(std::abs(t1.query(100, 0, 1.0f, 0.0f) - 0.5f) < 1e-5f);
-  assert(t1.query(99, 0, 1.0f, 0.123f) == 0.123f);  // missing -> default
+  // total_wins[42] = 3, visit_count[42] = 4 -> raw 0.75
+  // total_wins[100] = 5, visit_count[100] = 10 -> raw 0.5
+  // kappa=0 disables shrinkage so raw ratios come through.
+  assert(std::abs(t1.query(42, 0, /*kappa=*/0.0f, 0.0f, 0.0f) - 0.75f) < 1e-5f);
+  assert(std::abs(t1.query(100, 0, 0.0f, 0.0f, 0.0f) - 0.5f) < 1e-5f);
+  assert(t1.query(99, 0, 0.0f, 0.0f, 0.123f) == 0.123f);  // missing -> default
 
   const std::string path = "/tmp/typed_search_eval_test.bin";
   t1.save(path);
   t2.load(path);
-  assert(std::abs(t2.query(42, 0, 1.0f, 0.0f) - 0.75f) < 1e-5f);
-  assert(std::abs(t2.query(100, 0, 1.0f, 0.0f) - 0.5f) < 1e-5f);
+  assert(std::abs(t2.query(42, 0, 0.0f, 0.0f, 0.0f) - 0.75f) < 1e-5f);
+  assert(std::abs(t2.query(100, 0, 0.0f, 0.0f, 0.0f) - 0.5f) < 1e-5f);
 
-  // Decay halves both.
+  // Decay halves both — ratio unchanged.
   t2.decay(0.5f);
-  assert(std::abs(t2.query(42, 0, 0.5f, 0.0f) - 0.75f) < 1e-5f);  // ratio unchanged
+  assert(std::abs(t2.query(42, 0, 0.0f, 0.0f, 0.0f) - 0.75f) < 1e-5f);
+
+  // Shrinkage: with kappa=20, a state with 4 visits at wp=0.75 and no
+  // fallback (default prior 0.5) blends to (20*0.5 + 3) / 24 = 0.5417.
+  assert(std::abs(t1.query(42, 0, 20.0f, 5.0f, 0.5f) - (13.0f / 24.0f)) <
+         1e-4f);
 
   std::remove(path.c_str());
 }
