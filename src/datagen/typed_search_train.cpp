@@ -418,9 +418,11 @@ int main(int argc, char *argv[]) {
       return os.str();
     };
     auto fmt_hand = [](const std::array<int, 13> &h) {
+      // rankToChar takes face values (3..14, or 15/2 for the deuce); convert
+      // rank indices accordingly (matches the pattern in game.cpp).
       std::string s = "[";
       for (int r = 0; r < 13; ++r) {
-        for (int k = 0; k < h[r]; ++k) s += rankToChar(r);
+        for (int k = 0; k < h[r]; ++k) s += rankToChar(r + 3);
       }
       s += "]";
       return s;
