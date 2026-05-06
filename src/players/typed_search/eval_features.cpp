@@ -38,67 +38,69 @@ inline bool is_bomb_rank(const std::array<int, 13> &h, int r) {
   return false;
 }
 
+// Build (at1, at2, at3) bitmasks from a count array, with bomb-rank bits
+// cleared (to match the user's spec that bomb ranks are excluded from straight
+// consideration).
+inline void straight_input_bits(const std::array<int, 13> &h, uint16_t &at1,
+                                 uint16_t &at2, uint16_t &at3) {
+  at1 = at2 = at3 = 0;
+  for (int r = 0; r < 13; ++r) {
+    if (is_bomb_rank(h, r)) continue;
+    if (h[r] >= 1) at1 |= static_cast<uint16_t>(1u << r);
+    if (h[r] >= 2) at2 |= static_cast<uint16_t>(1u << r);
+    if (h[r] >= 3) at3 |= static_cast<uint16_t>(1u << r);
+  }
+}
+
 // Bucket: 0 = no straights, 1 = weak only (highest rank < 10),
 //         2 = at least one strong (highest rank >= 10).
 // Bomb-rank cards are excluded from the hand before checking.
 int straight_tier(const std::array<int, 13> &h) {
-  std::array<int, 13> mod = h;
-  for (int r = 0; r < 13; ++r) {
-    if (is_bomb_rank(h, r)) mod[r] = 0;
-  }
-  Move pass(Move::Combination::kPass);
-  auto legal = compute_legal_moves(mod, pass);
-  bool weak = false, strong = false;
-  for (int mid : legal) {
-    if (mid == kPASS) continue;
-    Move m(mid);
+  uint16_t a1, a2, a3;
+  straight_input_bits(h, a1, a2, a3);
+  thread_local std::vector<int> moves;
+  straight_moves_for_pass_masks_into(a1, a2, a3, moves);
+  bool weak = false;
+  const auto &all = all_moves();
+  for (int mid : moves) {
+    const Move &m = all[mid];
     auto c = m.combination;
     if (c >= Move::Combination::kStraight5 && c <= Move::Combination::kStraight13) {
       // m.rank is the highest card's face value (3..K=13, A=14, 2=15).
-      // "rank 10 or more" => face value >= 10.
-      if (m.rank >= 10) strong = true;
-      else weak = true;
-      if (strong) break;
+      if (m.rank >= 10) {
+        return 2;  // strong dominates; early exit
+      }
+      weak = true;
     }
   }
-  if (strong) return 2;
-  if (weak) return 1;
-  return 0;
+  return weak ? 1 : 0;
 }
 
 // Bucket: 0 = none, 1 = weak only (length-2 doubles, rank<10),
 //         2 = strong present (anything else; longer DS or any TS).
 int double_triple_straight_tier(const std::array<int, 13> &h) {
-  std::array<int, 13> mod = h;
-  for (int r = 0; r < 13; ++r) {
-    if (is_bomb_rank(h, r)) mod[r] = 0;
-  }
-  Move pass(Move::Combination::kPass);
-  auto legal = compute_legal_moves(mod, pass);
-  bool weak = false, strong = false;
-  for (int mid : legal) {
-    if (mid == kPASS) continue;
-    Move m(mid);
+  uint16_t a1, a2, a3;
+  straight_input_bits(h, a1, a2, a3);
+  thread_local std::vector<int> moves;
+  straight_moves_for_pass_masks_into(a1, a2, a3, moves);
+  bool weak = false;
+  const auto &all = all_moves();
+  for (int mid : moves) {
+    const Move &m = all[mid];
     auto c = m.combination;
     if (c >= Move::Combination::kTripleStraight2 &&
         c <= Move::Combination::kTripleStraight5) {
-      strong = true;
-      break;
+      return 2;
     }
     if (c == Move::Combination::kDoubleStraight2) {
-      // length-2 double straight: weak if highest face rank < 10.
-      if (m.rank < 10) weak = true;
-      else strong = true;
-      if (strong) break;
+      if (m.rank >= 10) return 2;
+      weak = true;
     } else if (c >= Move::Combination::kDoubleStraight3 &&
                c <= Move::Combination::kDoubleStraight8) {
-      strong = true;
-      break;
+      return 2;
     }
   }
-  if (strong) return 2;
-  if (weak) return 1;
-  return 0;
+  return weak ? 1 : 0;
 }
 
 inline int bucket_count_3(int count) {
@@ -251,25 +253,14 @@ uint32_t fallback_state_id(const LeafContext &ctx) {
   const int our_b = size_bucket(our_total);
   const int hb = has_bomb(h) ? 1 : 0;
 
-  // Has straight: any straight, double straight, or triple straight (no bomb-rank exclusion).
-  Move pass(Move::Combination::kPass);
-  auto legal = compute_legal_moves(h, pass);
-  bool has_straight = false;
-  for (int mid : legal) {
-    if (mid == kPASS) continue;
-    Move m(mid);
-    if (m.combination >= Move::Combination::kStraight5 &&
-        m.combination <= Move::Combination::kTripleStraight5) {
-      has_straight = true;
-      break;
-    }
-    // kDoubleStraight8 sits past kTripleStraight5 in the enum; check explicitly.
-    if (m.combination == Move::Combination::kDoubleStraight8) {
-      has_straight = true;
-      break;
-    }
-  }
-  const int hs = has_straight ? 1 : 0;
+  // Has straight: any straight, double straight, or triple straight (no
+  // bomb-rank exclusion). Direct bitset lookup — no need to enumerate full
+  // legal moves.
+  HandBits hb_bits = hand_bits_from_counts(h);
+  thread_local std::vector<int> straight_moves;
+  straight_moves_for_pass_masks_into(hb_bits.at1, hb_bits.at2, hb_bits.at3,
+                                       straight_moves);
+  const int hs = straight_moves.empty() ? 0 : 1;
   const int has_two = h[12] >= 1 ? 1 : 0;
   const int has_ace = h[11] >= 1 ? 1 : 0;
 

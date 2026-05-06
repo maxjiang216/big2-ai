@@ -143,3 +143,26 @@ Optimizations applied below are profiled one at a time so we can attribute the d
 The wall-clock gain (16.6%) is larger than the instruction-count drop (6.7%) because the new path is branch-free + cache-friendly: 4 ANDs + 4 equality checks vs. an unrolled 13-iter loop with conditionals.
 
 **Strength check (paired-deal, 500 deals vs greedy, seed 100):** 65.5% (CI excludes 50%) — unchanged within noise vs. baseline 63.3%.
+
+---
+
+## Optimization 2 — Direct bitset straight enumeration in eval_features
+
+**Change:** Replaced `compute_legal_moves(mod_hand, kPass)` calls inside `straight_tier`, `double_triple_straight_tier`, and the `has_straight` check in `fallback_state_id` with direct calls to the existing `straight_moves_for_pass_masks_into(at1, at2, at3, out)` bitmask helper. This skips the bomb/full-house enumeration that we never inspect, and reuses thread-local scratch buffers for the result vector.
+
+**Files:** `src/players/typed_search/eval_features.cpp` only.
+
+**Profile (callgrind, 10 games):**
+
+| Metric | After opt 1 | After opt 2 | Δ vs opt 1 | Δ vs baseline |
+|---|---|---|---|---|
+| Total instructions | 1,090M | 1,038M | −4.8% | **−11.2%** |
+| `Move::Move(int)` | 3.85% | 1.41% | −2.4 pp | −2.1 pp (12.5M of 14.6M Ir avoided in eval-features) |
+| `compute_legal_moves(HandBits, Move)` | 6.02% | 3.13% | −2.9 pp | −2.4 pp |
+| `main_state_id` (self only — internals shifted) | 3.73% | 4.14% | +0.4 pp | +0.7 pp |
+
+**Wall clock (1 thread, 1000 games):** 88.4 g/s → **103.8 g/s** (+17.4% from opt 1; **+37.0% from baseline**).
+
+**Strength check:** 65.8% vs greedy at seed 100 — unchanged within noise.
+
+**New hot spot — `find_forced_win` (`opponent_can_respond(arr, arr)`):** Now 17.08% / 177M Ir, the single largest cost. Each call rebuilds opp's HandBits from scratch via the array overload. Switching `find_forced_win` (in `src/core/util.cpp`) and `forced_search_recursive` (in `forced_search.cpp`) to compute opp_bits once per call site and use `opponent_can_respond(int, HandBits, int)` would target this directly.
