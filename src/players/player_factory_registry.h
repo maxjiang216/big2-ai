@@ -19,6 +19,7 @@
 #include "pimc/pimc_redet_player_factory.h"
 #include "pimc/pimc_tree_redet_player_factory.h"
 #include "random/random_player_factory.h"
+#include "typed_search/typed_search_player_factory.h"
 
 #include <iostream>
 #include <memory>
@@ -96,6 +97,8 @@ inline std::shared_ptr<PlayerFactory> make_player_factory(const std::string &nam
   if (name == "pimc_pass_rollout_adaptive")
     return std::make_shared<PimcPassRolloutAdaptivePlayerFactory>(
         param == 0.0 ? 10.0 : param, seed);
+  if (name == "typed_search")
+    return std::make_shared<typed_search::TypedSearchPlayerFactory>(seed);
 
   std::cerr << "Error: unknown player '" << name << "'\n"
             << "Available: random, greedy, greedy_random, greedy_random_pass, "

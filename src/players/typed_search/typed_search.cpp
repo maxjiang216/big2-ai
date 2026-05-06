@@ -1,0 +1,225 @@
+#include "typed_search.h"
+
+#include "eval_features.h"
+#include "eval_table.h"
+#include "forced_search.h"
+#include "move_grouping.h"
+#include "move_prob_table.h"
+#include "util.h"
+
+#include <algorithm>
+#include <cstring>
+
+namespace typed_search {
+
+namespace {
+
+inline int hand_total(const std::array<int, 13> &h) {
+  int s = 0;
+  for (int c : h) s += c;
+  return s;
+}
+
+inline void apply_to_arrays(int move_id, std::array<int, 13> &our_hand,
+                             std::array<int, 13> &discard) {
+  const auto &cost = MOVE_TO_CARDS[move_id];
+  for (int r = 0; r < 13; ++r) {
+    our_hand[r] -= cost[r];
+    discard[r] += cost[r];
+  }
+}
+
+inline void apply_opp_to_discard(int move_id, std::array<int, 13> &discard) {
+  const auto &cost = MOVE_TO_CARDS[move_id];
+  for (int r = 0; r < 13; ++r) discard[r] += cost[r];
+}
+
+// Whether the opponent could plausibly hold the cards required by `mid`,
+// given our hand, the discard, and opp_count.
+bool opp_could_play(int mid, const std::array<int, 13> &our_hand,
+                     const std::array<int, 13> &discard, int opp_count) {
+  const auto &cost = MOVE_TO_CARDS[mid];
+  if (cost[13] > opp_count) return false;
+  for (int r = 0; r < 13; ++r) {
+    int need = cost[r];
+    if (need == 0) continue;
+    int opp_max = max_cards_in_deck_for_rank(r) - our_hand[r] - discard[r];
+    if (opp_max < need) return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+TypedSearch::TypedSearch(const EvalTable &eval_table,
+                          const MoveProbTable &mp_table,
+                          std::uint64_t rng_seed)
+    : eval_table_(eval_table), mp_table_(mp_table), rng_(rng_seed) {}
+
+std::uint64_t TypedSearch::make_key(const std::array<int, 13> &hand,
+                                     int opp_count,
+                                     const Move &last_move) const {
+  std::uint64_t k = 0;
+  for (int r = 0; r < 13; ++r) k = (k << 3) | (static_cast<std::uint64_t>(hand[r]) & 7u);
+  k = (k << 5) | (static_cast<std::uint64_t>(opp_count) & 0x1Fu);
+  k = (k << 5) |
+      (static_cast<std::uint64_t>(static_cast<int>(last_move.combination)) & 0x1Fu);
+  k = (k << 5) | (static_cast<std::uint64_t>(last_move.rank) & 0x1Fu);
+  return k;
+}
+
+float TypedSearch::eval_leaf_we_passed(const std::array<int, 13> &hand,
+                                        const std::array<int, 13> &discard,
+                                        int opp_count) const {
+  LeafContext ctx{hand, discard, opp_count, /*initiative=*/1};
+  auto imp = impute_terminal(ctx);
+  if (imp.has_value) return imp.value;
+  uint32_t mid = main_state_id(ctx);
+  uint32_t fid = fallback_state_id(ctx);
+  return eval_table_.query(mid, fid);
+}
+
+float TypedSearch::eval_leaf_we_have_init(const std::array<int, 13> &hand,
+                                           const std::array<int, 13> &discard,
+                                           int opp_count) const {
+  // Imputed wins (e.g., one-move-clear) handled inside forced_search via
+  // impute_terminal.
+  return forced_search_value(hand, discard, opp_count, eval_table_);
+}
+
+float TypedSearch::visit_our(OurNode &n) {
+  if (n.computed) return n.value;
+  n.computed = true;
+
+  // Terminal imputation.
+  if (hand_total(n.hand) == 0) {
+    n.value = 1.0f;
+    n.best_move = -1;
+    return n.value;
+  }
+  if (n.opp_count <= 0) {
+    n.value = 0.0f;
+    n.best_move = -1;
+    return n.value;
+  }
+
+  auto legal = compute_legal_moves(n.hand, n.last_move);
+  // compute_legal_moves at lead position never includes PASS; at response it does.
+
+  float best = -1.0f;
+  int best_move = -1;
+  for (int m : legal) {
+    float v;
+    if (m == kPASS) {
+      // We pass; opp gains initiative. Leaf evaluated from our POV.
+      v = eval_leaf_we_passed(n.hand, n.discard, n.opp_count);
+    } else {
+      auto new_hand = n.hand;
+      auto new_discard = n.discard;
+      apply_to_arrays(m, new_hand, new_discard);
+      if (hand_total(new_hand) == 0) {
+        v = 1.0f;  // we just emptied our hand
+      } else {
+        v = visit_opp(new_hand, new_discard, n.opp_count, m);
+      }
+    }
+    if (v > best) {
+      best = v;
+      best_move = m;
+    }
+  }
+
+  n.value = best;
+  n.best_move = best_move;
+  return best;
+}
+
+float TypedSearch::visit_opp(const std::array<int, 13> &our_hand_after,
+                              const std::array<int, 13> &discard_after,
+                              int opp_count, int our_move_id) {
+  // Build superset of opp's legal responses to `our_move_id`.
+  std::vector<int> opp_legal;
+  opp_legal.reserve(16);
+  opp_legal.push_back(kPASS);
+  const auto &beating = get_beating_moves();
+  for (int mid : beating[our_move_id]) {
+    if (opp_could_play(mid, our_hand_after, discard_after, opp_count)) {
+      opp_legal.push_back(mid);
+    }
+  }
+
+  // Query move-prob distribution.
+  std::vector<float> opp_probs;
+  mp_table_.query(our_move_id, opp_count, opp_legal, opp_probs);
+
+  // Group by response equivalence.
+  auto groups = group_opp_moves(our_hand_after, opp_legal, opp_probs);
+
+  // For each group: sample a representative and recurse.
+  float ev = 0.0f;
+  for (auto &g : groups) {
+    float group_prob = 0.0f;
+    for (float p : g.probs) group_prob += p;
+    if (group_prob <= 0.0f) continue;
+
+    // Sample representative weighted by g.probs.
+    std::uniform_real_distribution<float> U(0.0f, group_prob);
+    float r = U(rng_);
+    float acc = 0.0f;
+    int rep = g.moves.front();
+    for (std::size_t i = 0; i < g.moves.size(); ++i) {
+      acc += g.probs[i];
+      if (r <= acc) {
+        rep = g.moves[i];
+        break;
+      }
+    }
+
+    float val;
+    if (rep == kPASS) {
+      // Opp passes; we gain initiative. Leaf eval (with forced-search).
+      val = eval_leaf_we_have_init(our_hand_after, discard_after, opp_count);
+    } else {
+      auto new_discard = discard_after;
+      apply_opp_to_discard(rep, new_discard);
+      int new_opp_count = opp_count - MOVE_TO_CARDS[rep][13];
+      Move rep_move(rep);
+      if (new_opp_count <= 0) {
+        // Opp just emptied hand: we lose.
+        val = 0.0f;
+      } else {
+        std::uint64_t key = make_key(our_hand_after, new_opp_count, rep_move);
+        auto it = memo_.find(key);
+        if (it == memo_.end()) {
+          OurNode child;
+          child.hand = our_hand_after;
+          child.discard = new_discard;
+          child.opp_count = new_opp_count;
+          child.last_move = rep_move;
+          it = memo_.emplace(key, std::move(child)).first;
+          val = visit_our(it->second);
+        } else {
+          val = it->second.computed ? it->second.value : visit_our(it->second);
+        }
+      }
+    }
+    ev += group_prob * val;
+  }
+  return ev;
+}
+
+TypedSearch::Result TypedSearch::run(const std::array<int, 13> &our_hand,
+                                      const std::array<int, 13> &discard,
+                                      int opp_count, const Move &last_move) {
+  std::uint64_t key = make_key(our_hand, opp_count, last_move);
+  OurNode root;
+  root.hand = our_hand;
+  root.discard = discard;
+  root.opp_count = opp_count;
+  root.last_move = last_move;
+  auto it = memo_.emplace(key, std::move(root)).first;
+  float v = visit_our(it->second);
+  return Result{it->second.best_move, v};
+}
+
+}  // namespace typed_search
