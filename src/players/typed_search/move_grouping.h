@@ -30,6 +30,14 @@ std::vector<MoveGroup> group_opp_moves(const std::array<int, 13> &our_hand,
                                         const std::vector<int> &opp_moves,
                                         const std::vector<float> &opp_probs);
 
+// _into variant: writes into a caller-provided output vector. Callers in the
+// search hot path use this with a thread-local scratch buffer to avoid the
+// allocation traffic of returning by value.
+void group_opp_moves_into(const std::array<int, 13> &our_hand,
+                          const std::vector<int> &opp_moves,
+                          const std::vector<float> &opp_probs,
+                          std::vector<MoveGroup> &out);
+
 }  // namespace typed_search
 
 #endif

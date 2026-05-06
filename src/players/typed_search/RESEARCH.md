@@ -193,3 +193,39 @@ The wall-clock gain (16.6%) is larger than the instruction-count drop (6.7%) bec
 **Strength check:** 65.0% vs greedy at seed 100 — unchanged within noise.
 
 **New top hot spot — allocator pressure:** combined malloc/free now ~18% of program total. Per-call vector allocations in `visit_opp` (legal-moves vector, opp_legal, opp_probs, group buckets) and in `compute_legal_moves` are the main contributors. Threadlocal scratch buffers + reservation tuning could halve this.
+
+---
+
+## Optimization 4 — Scratch pool + sort-walk grouping (allocator pressure)
+
+**Two changes in this commit:**
+
+1. Thread-local depth-indexed scratch pool (`SearchScratch` in `typed_search.cpp`) holding reusable `opp_legal`, `opp_probs`, and `groups` buffers per recursion level. RAII `ScratchGuard` pushes/pops. Vectors retain capacity across calls so steady-state pushes don't reallocate.
+
+2. Rewrite `group_opp_moves_into` to use a sort-walk algorithm instead of two `std::unordered_map`s + per-call `vector<Bucket>`. Single pass: build `(combo, rank, orig_idx)` infos in a thread-local scratch vector, sort by `(combo, rank)`, walk consecutive runs to emit groups (collapse over auxiliary for bombs/full-houses, merge consecutive ranks for other combinations when our hand has no in-range response). Output goes into a caller-provided `std::vector<MoveGroup>` (the scratch buffer); recycled `MoveGroup` slots preserve their inner-vector capacity via `clear()` instead of being destroyed.
+
+**Files:** `src/players/typed_search/typed_search.cpp`, `src/players/typed_search/move_grouping.{h,cpp}`.
+
+**Calibration note** — measured both before/after across 5 runs to control for variance. The single-run readings vary by ~10% game-to-game due to RNG-driven exploration depth. Median of 5 runs is the reliable signal.
+
+**Profile (callgrind, 10 games):**
+
+| Metric | After opt 3 | After opt 4 | Δ vs opt 3 | Δ vs baseline |
+|---|---|---|---|---|
+| Total instructions | 796M | 662M | **−16.8%** | **−43.3%** |
+| `_int_free` | 6.78% | 3.24% | −3.5 pp | gone halved |
+| `malloc` | 4.93% | 2.29% | −2.6 pp | halved |
+| `free` | 3.07% | 1.40% | −1.7 pp | halved |
+| Total allocator | ~17.85% | ~9.91% | **−7.9 pp** | (combined malloc/free) |
+
+**Wall clock (1 thread, 1000 games, median of 5 runs):** 141 g/s → **170.6 g/s** (+21% from opt 3; **+125% cumulative from baseline 75.8 g/s**).
+
+**Strength check:** 67.1% vs greedy at seed 100 — unchanged within noise.
+
+**Remaining hot spots** (in order):
+1. `visit_opp` (self): 10.39% — recursion + bookkeeping; not much more to squeeze without algorithmic changes.
+2. `opponent_can_respond(HandBits, int)`: 6.74% — already the fast overload; bound by table-driven walk over `BeatEntry`s.
+3. `main_state_id`: 5.91% — eval-feature encoding; per-leaf computation. Could be cached per memo node (each `OurNode` would compute once, reuse on memo hits).
+4. `compute_legal_moves(HandBits, Move)`: 4.39% — central. An `_into` overload that takes a caller buffer (instead of allocating + returning) would let `visit_our` skip its per-call alloc.
+
+The remaining allocator pressure (~10%) is mostly inside `compute_legal_moves` and incidental `std::vector` allocations in `move_grouping_into`'s emit path. The next target with clear payoff is plan #3 (`compute_legal_moves_into` in `src/core/util.cpp`).

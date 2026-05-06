@@ -9,10 +9,42 @@
 
 #include <algorithm>
 #include <cstring>
+#include <vector>
 
 namespace typed_search {
 
 namespace {
+
+// Thread-local scratch pool indexed by recursion depth. Reusable vectors
+// retain their capacity across calls, so after the first few calls the inner
+// pushes never reallocate.
+struct ScratchLevel {
+  std::vector<int> opp_legal;
+  std::vector<float> opp_probs;
+  std::vector<MoveGroup> groups;
+};
+
+struct SearchScratch {
+  std::vector<ScratchLevel> levels;
+  int depth = 0;
+};
+
+thread_local SearchScratch g_search_scratch;
+
+struct ScratchGuard {
+  ScratchLevel *lvl;
+  ScratchGuard() {
+    auto &s = g_search_scratch;
+    if (static_cast<size_t>(s.depth) >= s.levels.size()) {
+      s.levels.emplace_back();
+    }
+    lvl = &s.levels[s.depth];
+    ++s.depth;
+  }
+  ~ScratchGuard() { --g_search_scratch.depth; }
+  ScratchGuard(const ScratchGuard &) = delete;
+  ScratchGuard &operator=(const ScratchGuard &) = delete;
+};
 
 inline int hand_total(const std::array<int, 13> &h) {
   int s = 0;
@@ -176,8 +208,13 @@ float TypedSearch::visit_our(OurNode &n) {
 float TypedSearch::visit_opp(const std::array<int, 13> &our_hand_after,
                               const std::array<int, 13> &discard_after,
                               int opp_count, int our_move_id) {
-  // Build superset of opp's legal responses to `our_move_id`.
-  std::vector<int> opp_legal;
+  // Acquire thread-local scratch buffers for this recursion level. Capacity
+  // is retained across calls so the inner pushes typically don't reallocate.
+  ScratchGuard guard;
+  auto &opp_legal = guard.lvl->opp_legal;
+  auto &opp_probs = guard.lvl->opp_probs;
+  auto &groups = guard.lvl->groups;
+  opp_legal.clear();
   opp_legal.reserve(16);
   opp_legal.push_back(kPASS);
   const auto &beating = get_beating_moves();
@@ -192,11 +229,10 @@ float TypedSearch::visit_opp(const std::array<int, 13> &our_hand_after,
   }
 
   // Query move-prob distribution.
-  std::vector<float> opp_probs;
   mp_table_.query(our_move_id, opp_count, opp_legal, opp_probs);
 
-  // Group by response equivalence.
-  auto groups = group_opp_moves(our_hand_after, opp_legal, opp_probs);
+  // Group by response equivalence (writes into scratch.groups).
+  group_opp_moves_into(our_hand_after, opp_legal, opp_probs, groups);
 
   // For each group: sample a representative and recurse.
   float ev = 0.0f;
