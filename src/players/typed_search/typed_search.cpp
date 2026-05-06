@@ -503,8 +503,13 @@ float TypedSearch::visit_opp(const std::array<int, 13> &our_hand_after,
     }
   }
 
-  // Query move-prob distribution.
-  mp_table_.query(our_move_id, opp_count, opp_legal, opp_probs);
+  // Query move-prob distribution. Conditioned on our hand size after the
+  // move (the move-player's remaining-hand context that the table is keyed
+  // on for the response prediction).
+  int our_hand_size = 0;
+  for (int c : our_hand_after) our_hand_size += c;
+  int our_b = MoveProbTable::size_bucket(our_hand_size);
+  mp_table_.query(our_move_id, opp_count, our_b, opp_legal, opp_probs);
 
   // Group by response equivalence (writes into scratch.groups).
   group_opp_moves_into(our_hand_after, opp_legal, opp_probs, groups);

@@ -115,16 +115,19 @@ struct EvalDelta {
 };
 
 struct MpDelta {
-  // (player_move, opp_count) -> 468 floats
+  // (player_move, opp_count, our_hand_size_bucket) -> 468 floats
   std::unordered_map<std::uint32_t, std::array<float, 468>> main_;
   std::unordered_map<std::uint32_t, std::array<float, 468>> fb_;
-  static std::uint32_t main_key(int pm, int oc) {
-    return static_cast<std::uint32_t>(pm) * 17u + static_cast<std::uint32_t>(oc);
+  static std::uint32_t main_key(int pm, int oc, int ob) {
+    return ((static_cast<std::uint32_t>(pm) * 17u +
+              static_cast<std::uint32_t>(oc)) *
+              4u) +
+            static_cast<std::uint32_t>(ob);
   }
   static std::uint32_t fb_key(int pm) { return static_cast<std::uint32_t>(pm); }
-  void add(int pm, int oc, int resp, float w) {
+  void add(int pm, int oc, int ob, int resp, float w) {
     if (resp < 0 || resp >= 468) return;
-    main_[main_key(pm, oc)][resp] += w;
+    main_[main_key(pm, oc, ob)][resp] += w;
     fb_[fb_key(pm)][resp] += w;
   }
 };
@@ -165,11 +168,13 @@ void process_game(const GameRecord &rec, int winner_seat, EvalDelta &eval_delta,
       const auto &next = turns[i + 1];
       int player_move = encodeMove(t.move);
       int opp_count = t.views[t.current_player].opponent_hand_size();
-      // Adjust opp_count for what opp has when responding: opp's current hand
-      // before they move is the same as before our move (we don't change opp).
-      // (no change needed)
+      // our_hand_size after the move = the move-player's hand size at the
+      // start of opp's response turn. opp's view at next turn knows this as
+      // its "opponent_hand_size".
+      int our_size = next.views[1 - t.current_player].opponent_hand_size();
+      int our_b = typed_search::MoveProbTable::size_bucket(our_size);
       int response = encodeMove(next.move);
-      mp_delta.add(player_move, opp_count, response, 1.0f);
+      mp_delta.add(player_move, opp_count, our_b, response, 1.0f);
     }
   }
 }
@@ -203,18 +208,22 @@ void merge_deltas(typed_search::EvalTable &ext_e,
   }
   for (const auto &md : mds) {
     for (const auto &kv : md.main_) {
-      int pm = static_cast<int>(kv.first / 17u);
-      int oc = static_cast<int>(kv.first % 17u);
+      std::uint32_t k = kv.first;
+      int ob = static_cast<int>(k % 4u);
+      k /= 4u;
+      int oc = static_cast<int>(k % 17u);
+      int pm = static_cast<int>(k / 17u);
       const auto &vec = kv.second;
       for (int m = 0; m < 468; ++m) {
-        if (vec[m] != 0.0f) main_m.add_observation(pm, oc, m, vec[m]);
+        if (vec[m] != 0.0f) main_m.add_observation(pm, oc, ob, m, vec[m]);
       }
     }
     for (const auto &kv : md.fb_) {
       int pm = static_cast<int>(kv.first);
       const auto &vec = kv.second;
       for (int m = 0; m < 468; ++m) {
-        if (vec[m] != 0.0f) fb_m.add_observation(pm, /*opp_count=*/0, m, vec[m]);
+        if (vec[m] != 0.0f)
+          fb_m.add_observation(pm, /*opp_count=*/0, /*our_b=*/0, m, vec[m]);
       }
     }
   }

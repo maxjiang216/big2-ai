@@ -9,11 +9,13 @@ namespace typed_search {
 // Total state space sizes (used by tables for sizing / sanity).
 constexpr uint32_t kMainStateCount = 442368u;
 constexpr uint32_t kFallbackStateCount = 9216u;
-// Extended (finer-grained) main: same features as main, but every 0/1+
-// bucket becomes 0/1/2+ and every 0/1/2+ becomes 0/1/2/3+. Plus the
-// doubles_medium / doubles_large boundary moves so that medium=8-J,
-// large=Q-A (was medium=8-10, large=J-A in main).
-constexpr uint32_t kExtendedStateCount = 15116544u;
+// Extended state encoding. Trims `ds_ts` and the per-region doubles split
+// (replaced by a single 0/1/2+ doubles count). Splits singles into per-rank
+// indicators for 3 and 4, plus 5-7/8-10/J-K/A-2-and-GL regions. Splits
+// triples into 4 regions (3-5/6-8/9-J/Q-K).
+//
+// Total: 2 * 4 * 4 * 2 * 2 * 2 * 2 * 4 * 3 * 3 * 3 * 3 * 3 * 3 * 3 * 3 = 13_436_928
+constexpr uint32_t kExtendedStateCount = 13436928u;
 
 // Inputs needed to compute eval state at a leaf (just-passed) position.
 // initiative: 0 = we have init (opp passed), 1 = opp has init (we passed).

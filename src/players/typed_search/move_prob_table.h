@@ -24,8 +24,10 @@ struct MoveProbQueryStats {
 };
 
 // Tabular distribution over opponent's response moves, conditioned on:
-//   key = (player_move_id, opp_count)         [main table]
-//   key = (player_move_id)                    [fallback table, opp_count=0]
+//   key = (player_move_id, opp_count, our_hand_size_bucket)  [main table]
+//   key = (player_move_id)                                    [fallback table]
+//
+// our_hand_size_bucket: 0 = [1-4], 1 = [5-7], 2 = [8-11], 3 = [12-16].
 //
 // Storage: counts[468] per visited state. Decay = scale all counts by alpha.
 // Query returns a normalized distribution over a caller-supplied list of
@@ -34,6 +36,7 @@ struct MoveProbQueryStats {
 class MoveProbTable {
 public:
   static constexpr int kNumMoves = 468;
+  static constexpr int kOurBuckets = 4;
 
   struct Entry {
     std::array<float, kNumMoves> counts{};
@@ -53,24 +56,35 @@ public:
   // Fill out_probs (parallel to legal_moves) with a normalized distribution.
   // If neither this nor fallback has any mass for the state-and-legal subset,
   // returns uniform.
-  void query(int player_move, int opp_count,
+  void query(int player_move, int opp_count, int our_hand_size_bucket,
              const std::vector<int> &legal_moves,
              std::vector<float> &out_probs) const;
 
   MoveProbQueryStats &stats() const { return stats_; }
 
   // Training.
-  void add_observation(int player_move, int opp_count, int opp_move,
+  void add_observation(int player_move, int opp_count,
+                       int our_hand_size_bucket, int opp_move,
                        float weight = 1.0f);
   void decay(float alpha);
 
   std::size_t size() const { return entries_.size(); }
 
+  static int size_bucket(int n) {
+    if (n <= 4) return 0;
+    if (n <= 7) return 1;
+    if (n <= 11) return 2;
+    return 3;
+  }
+
 private:
-  std::uint32_t make_key(int player_move, int opp_count) const {
+  std::uint32_t make_key(int player_move, int opp_count,
+                          int our_hand_size_bucket) const {
     if (ignore_opp_count_) return static_cast<std::uint32_t>(player_move);
-    return static_cast<std::uint32_t>(player_move) * 17u +
-           static_cast<std::uint32_t>(opp_count);
+    return ((static_cast<std::uint32_t>(player_move) * 17u +
+              static_cast<std::uint32_t>(opp_count)) *
+              kOurBuckets) +
+            static_cast<std::uint32_t>(our_hand_size_bucket);
   }
 
   std::unordered_map<std::uint32_t, Entry> entries_;

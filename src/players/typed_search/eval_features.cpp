@@ -253,47 +253,51 @@ uint32_t extended_state_id(const LeafContext &ctx) {
   const int opp_b = size_bucket(ctx.opp_count);
   const int our_b = size_bucket(our_total);
   const int hb = has_bomb(h) ? 1 : 0;
-  const int st = straight_tier(h);
-  const int ds = double_triple_straight_tier(h);
+
+  // has_straight: any straight / DS / TS (binary). Uses the bitset helper to
+  // avoid the heavier compute_legal_moves path.
+  HandBits hb_bits = hand_bits_from_counts(h);
+  thread_local std::vector<int> straight_buf;
+  straight_moves_for_pass_masks_into(hb_bits.at1, hb_bits.at2, hb_bits.at3,
+                                       straight_buf);
+  const int has_str = straight_buf.empty() ? 0 : 1;
 
   GuaranteedLargestThresholds gl =
       compute_r_star(h, ctx.discard_pile, ctx.opp_count);
 
-  // Singles bucketing (same regions as main; promotion logic identical).
-  int singles_small = 0;   // ranks 0..4 (3-7), excluding promoted
-  int singles_medium = 0;  // ranks 5..7 (8-10)
-  int singles_large = 0;   // ranks 8..10 (J-K)
-  int singles_top = 0;     // ranks 11..12 (A-2) ∪ promoted
+  // Singles: per-rank indicators for 3 (idx 0) and 4 (idx 1); regional buckets
+  // for 5-7 (idx 2..4) / 8-10 (idx 5..7) / J-K (idx 8..10); plus a "top"
+  // bucket = A-2 (idx 11..12) ∪ guaranteed-largest singles.
+  int s_3 = 0, s_4 = 0, s_57 = 0, s_med = 0, s_lg = 0, s_top = 0;
   for (int r = 0; r < 13; ++r) {
     if (h[r] != 1) continue;
     const bool promote = (r >= 11) || (r > gl.r_star[1]);
-    if (promote) ++singles_top;
-    else if (r <= 4) ++singles_small;
-    else if (r <= 7) ++singles_medium;
-    else ++singles_large;
+    if (promote) ++s_top;
+    else if (r == 0) ++s_3;
+    else if (r == 1) ++s_4;
+    else if (r <= 4) ++s_57;
+    else if (r <= 7) ++s_med;
+    else ++s_lg;
   }
 
-  // Doubles bucketing — REFINED boundary: medium = 8-J (idx 5..8),
-  // large = Q-A (idx 9..11) ∪ promoted.
-  int doubles_small = 0, doubles_medium = 0, doubles_large = 0;
-  for (int r = 0; r < 12; ++r) {
-    if (h[r] != 2) continue;
-    const bool promote = (r >= 9) || (r > gl.r_star[2]);
-    if (promote) ++doubles_large;
-    else if (r <= 4) ++doubles_small;
-    else ++doubles_medium;  // r in 5..8
+  // Doubles: a single 0/1/2+ count over all rank indices that have count 2.
+  int doubles = 0;
+  for (int r = 0; r < 12; ++r) {  // rank 12 (2) max 1, never a double
+    if (h[r] == 2) ++doubles;
   }
 
-  // Triples bucketing — same as main.
-  int triples_small = 0, triples_large = 0;
+  // Triples: 3-5 / 6-8 / 9-J / Q-K (idx 0-2 / 3-5 / 6-8 / 9-10). No GL
+  // promotion; A is a bomb (excluded), 2 can't form a triple.
+  int trip_sm = 0, trip_med = 0, trip_lg = 0, trip_top = 0;
   for (int r = 0; r < 11; ++r) {
     if (h[r] != 3) continue;
-    const bool promote = (r >= 6) || (r > gl.r_star[3]);
-    if (promote) ++triples_large;
-    else ++triples_small;
+    if (r <= 2) ++trip_sm;
+    else if (r <= 5) ++trip_med;
+    else if (r <= 8) ++trip_lg;
+    else ++trip_top;  // r in 9..10 (Q-K)
   }
 
-  // Bucket counts: singles_small now 0/1/2/3+, all others 0/1/2+.
+  auto b2 = [](int n) { return n > 0 ? 1 : 0; };
   auto b3 = [](int n) { return n <= 0 ? 0 : (n == 1 ? 1 : 2); };
   auto b4 = [](int n) {
     if (n <= 0) return 0;
@@ -307,17 +311,18 @@ uint32_t extended_state_id(const LeafContext &ctx) {
   s = s * 4 + opp_b;
   s = s * 4 + our_b;
   s = s * 2 + hb;
-  s = s * 3 + st;
-  s = s * 3 + ds;
-  s = s * 4 + b4(singles_small);
-  s = s * 3 + b3(singles_medium);
-  s = s * 3 + b3(singles_large);
-  s = s * 3 + b3(singles_top);
-  s = s * 3 + b3(doubles_small);
-  s = s * 3 + b3(doubles_medium);
-  s = s * 3 + b3(doubles_large);
-  s = s * 3 + b3(triples_small);
-  s = s * 3 + b3(triples_large);
+  s = s * 2 + has_str;
+  s = s * 2 + b2(s_3);
+  s = s * 2 + b2(s_4);
+  s = s * 4 + b4(s_57);
+  s = s * 3 + b3(s_med);
+  s = s * 3 + b3(s_lg);
+  s = s * 3 + b3(s_top);
+  s = s * 3 + b3(doubles);
+  s = s * 3 + b3(trip_sm);
+  s = s * 3 + b3(trip_med);
+  s = s * 3 + b3(trip_lg);
+  s = s * 3 + b3(trip_top);
   return s;
 }
 

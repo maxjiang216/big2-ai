@@ -130,19 +130,19 @@ void test_move_prob_uniform_fallback() {
   typed_search::MoveProbTable t;
   std::vector<int> legal{0, 1, 2, 3};
   std::vector<float> probs;
-  t.query(/*pm=*/5, /*oc=*/8, legal, probs);
+  t.query(/*pm=*/5, /*oc=*/8, /*our_b=*/0, legal, probs);
   // Empty table -> uniform.
   for (float p : probs) assert(std::abs(p - 0.25f) < 1e-6f);
 }
 
 void test_move_prob_observation_and_normalize() {
   typed_search::MoveProbTable t;
-  t.add_observation(/*pm=*/5, /*oc=*/8, /*resp=*/2, 4.0f);
-  t.add_observation(/*pm=*/5, /*oc=*/8, /*resp=*/3, 2.0f);
+  t.add_observation(/*pm=*/5, /*oc=*/8, /*our_b=*/0, /*resp=*/2, 4.0f);
+  t.add_observation(/*pm=*/5, /*oc=*/8, /*our_b=*/0, /*resp=*/3, 2.0f);
 
   std::vector<int> legal{0, 2, 3};  // mask out resp=1; include 0 with no obs
   std::vector<float> probs;
-  t.query(5, 8, legal, probs);
+  t.query(5, 8, /*our_b=*/0, legal, probs);
   // Counts over legal: [0, 4, 2] -> normalized [0, 4/6, 2/6]
   assert(std::abs(probs[0] - 0.0f) < 1e-6f);
   assert(std::abs(probs[1] - (4.0f / 6.0f)) < 1e-5f);
