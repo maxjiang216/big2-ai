@@ -79,7 +79,7 @@ private:
                              int opp_count) const;
   float eval_leaf_we_have_init(const std::array<int, 13> &hand,
                                 const std::array<int, 13> &discard,
-                                int opp_count) const;
+                                int opp_count);
 
   const EvalTable &eval_table_;
   const MoveProbTable &mp_table_;

@@ -352,9 +352,37 @@ float TypedSearch::eval_leaf_we_passed(const std::array<int, 13> &hand,
 
 float TypedSearch::eval_leaf_we_have_init(const std::array<int, 13> &hand,
                                            const std::array<int, 13> &discard,
-                                           int opp_count) const {
-  // Imputed wins (e.g., one-move-clear) handled inside forced_search via
-  // impute_terminal.
+                                           int opp_count) {
+  // Cheap-tactical extension: if the search has only visited a handful of
+  // nodes so far and both hands are small (endgame), continue past the
+  // trick boundary by recursively searching from this lead position. This
+  // gives precise look-ahead in tactical endgames where the eval table's
+  // bucketed features are too coarse.
+  //
+  // Bounded automatically: once memo_.size() reaches the cap, no further
+  // leaf extensions trigger, so recursion terminates.
+  constexpr std::size_t kExtendNodeCap = 10;
+  constexpr int kExtendHandCap = 7;  // strictly less than 7
+  if (memo_.size() < kExtendNodeCap) {
+    int hand_size = 0;
+    for (int c : hand) hand_size += c;
+    if (hand_size < kExtendHandCap && opp_count < kExtendHandCap &&
+        hand_size > 0 && opp_count > 0) {
+      Move pass_move(Move::Combination::kPass);
+      std::uint64_t key = make_key(hand, opp_count, pass_move);
+      auto it = memo_.find(key);
+      if (it == memo_.end()) {
+        OurNode node;
+        node.hand = hand;
+        node.discard = discard;
+        node.opp_count = opp_count;
+        node.last_move = pass_move;
+        auto inserted = memo_.emplace(key, std::move(node));
+        return visit_our(inserted.first->second);
+      }
+      return it->second.computed ? it->second.value : visit_our(it->second);
+    }
+  }
   return forced_search_value(hand, discard, opp_count, eval_table_);
 }
 
