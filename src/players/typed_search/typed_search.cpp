@@ -34,19 +34,58 @@ inline void apply_opp_to_discard(int move_id, std::array<int, 13> &discard) {
   for (int r = 0; r < 13; ++r) discard[r] += cost[r];
 }
 
-// Whether the opponent could plausibly hold the cards required by `mid`,
-// given our hand, the discard, and opp_count.
-bool opp_could_play(int mid, const std::array<int, 13> &our_hand,
-                     const std::array<int, 13> &discard, int opp_count) {
-  const auto &cost = MOVE_TO_CARDS[mid];
-  if (cost[13] > opp_count) return false;
+// Per-move precomputed HandBits "needs" + total card count. Used by the
+// O(1) bitset version of opp_could_play.
+struct MoveNeeds {
+  HandBits bits;
+  int count;
+};
+
+const std::array<MoveNeeds, LEGAL_MOVES_SIZE> &move_needs_table() {
+  static const auto table = []() {
+    std::array<MoveNeeds, LEGAL_MOVES_SIZE> t{};
+    for (int mid = 0; mid < LEGAL_MOVES_SIZE; ++mid) {
+      const auto &cost = MOVE_TO_CARDS[mid];
+      HandBits b{};
+      for (int r = 0; r < 13; ++r) {
+        if (cost[r] >= 1) b.at1 |= static_cast<uint16_t>(1u << r);
+        if (cost[r] >= 2) b.at2 |= static_cast<uint16_t>(1u << r);
+        if (cost[r] >= 3) b.at3 |= static_cast<uint16_t>(1u << r);
+        if (cost[r] >= 4) b.at4 |= static_cast<uint16_t>(1u << r);
+      }
+      t[mid] = {b, cost[13]};
+    }
+    return t;
+  }();
+  return table;
+}
+
+// Build HandBits representing the upper-bound on what cards the opponent
+// could hold, given our hand and the discard.
+inline HandBits opp_upper_bound_bits(const std::array<int, 13> &our_hand,
+                                      const std::array<int, 13> &discard) {
+  HandBits b{};
   for (int r = 0; r < 13; ++r) {
-    int need = cost[r];
-    if (need == 0) continue;
-    int opp_max = max_cards_in_deck_for_rank(r) - our_hand[r] - discard[r];
-    if (opp_max < need) return false;
+    int om = max_cards_in_deck_for_rank(r) - our_hand[r] - discard[r];
+    if (om <= 0) continue;
+    b.at1 |= static_cast<uint16_t>(1u << r);
+    if (om >= 2) b.at2 |= static_cast<uint16_t>(1u << r);
+    if (om >= 3) b.at3 |= static_cast<uint16_t>(1u << r);
+    if (om >= 4) b.at4 |= static_cast<uint16_t>(1u << r);
   }
-  return true;
+  return b;
+}
+
+// O(1) bitset check: can opp's possible-card upper bound cover `mid`'s needs?
+inline bool opp_could_play_bits(int mid, const HandBits &opp_bits,
+                                 int opp_count,
+                                 const std::array<MoveNeeds, LEGAL_MOVES_SIZE> &mn_tbl) {
+  const auto &mn = mn_tbl[mid];
+  if (opp_count < mn.count) return false;
+  return (mn.bits.at1 & opp_bits.at1) == mn.bits.at1 &&
+         (mn.bits.at2 & opp_bits.at2) == mn.bits.at2 &&
+         (mn.bits.at3 & opp_bits.at3) == mn.bits.at3 &&
+         (mn.bits.at4 & opp_bits.at4) == mn.bits.at4;
 }
 
 }  // namespace
@@ -142,8 +181,12 @@ float TypedSearch::visit_opp(const std::array<int, 13> &our_hand_after,
   opp_legal.reserve(16);
   opp_legal.push_back(kPASS);
   const auto &beating = get_beating_moves();
+  // Hoist: precompute the opp upper-bound HandBits ONCE, then bitmask-check
+  // each candidate move in O(1).
+  const HandBits opp_bits = opp_upper_bound_bits(our_hand_after, discard_after);
+  const auto &mn_tbl = move_needs_table();
   for (int mid : beating[our_move_id]) {
-    if (opp_could_play(mid, our_hand_after, discard_after, opp_count)) {
+    if (opp_could_play_bits(mid, opp_bits, opp_count, mn_tbl)) {
       opp_legal.push_back(mid);
     }
   }

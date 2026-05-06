@@ -120,3 +120,26 @@ Callgrind on 10 games, single-thread, with trained tables loaded. 1.17B instruct
 | 6 | `Move::Move(int)` accessor inlining / `all_moves()` direct member ref | ~2% | low |
 
 Optimizations applied below are profiled one at a time so we can attribute the delta to each change.
+
+---
+
+## Optimization 1 — Bitset `opp_could_play` (HandBits-based)
+
+**Change:** Replaced the per-move 13-rank loop in `opp_could_play` with an O(1) bitset check using a precomputed `move_needs_table()` (HandBits per move ID). Hoisted `opp_upper_bound_bits` to be computed once per `visit_opp` call instead of once per (move × rank).
+
+**Files:** `src/players/typed_search/typed_search.cpp` only.
+
+**Profile (callgrind, 10 games):**
+
+| Metric | Baseline | After opt 1 | Δ |
+|---|---|---|---|
+| Total instructions | 1,168M | 1,090M | **−6.7%** |
+| `visit_opp` (self) | 12.24% | 6.83% | −5.4 pp |
+| `compute_legal_moves(HandBits, Move)` | 5.52% | 6.02% | +0.5 pp (relative grew) |
+| `opponent_can_respond(arr, arr)` | 12.08% | 13.17% | +1.1 pp (still hot via `find_forced_win`; absolute Ir nearly unchanged at 141M→143M) |
+
+**Wall clock (1 thread, 1000 games, trained tables):** 75.8 g/s → **88.4 g/s** (+16.6%).
+
+The wall-clock gain (16.6%) is larger than the instruction-count drop (6.7%) because the new path is branch-free + cache-friendly: 4 ANDs + 4 equality checks vs. an unrolled 13-iter loop with conditionals.
+
+**Strength check (paired-deal, 500 deals vs greedy, seed 100):** 65.5% (CI excludes 50%) — unchanged within noise vs. baseline 63.3%.
