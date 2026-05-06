@@ -493,3 +493,120 @@ The biggest gain from longer training is the well-saturated tail — **3.4× mor
 Cumulative improvement from the chain (corrected pruning + Bayesian shrinkage + leaf extension + bigger training): **+6.7 pp vs pimc(20)** — from 55.0% to 61.7%.
 
 **Production model recommendation:** gen-3 or gen-4 of the 6×200k run (`data/typed_search_v3` or `_v4`). Both saturated and statistically equivalent; gen-3 has the highest pimc result, gen-4 the highest greedy. Pick either.
+
+---
+
+## mp_disc + factored move-prob storage
+
+Two related changes that together produce the cleanest improvement of the
+session.
+
+### mp_disc — discard-conditioned response prediction
+
+Adds a third tier to the move-prob chain (was: `mp_fallback → mp_main`):
+
+```
+mp_fallback (key: player_move only)
+   → mp_main (key: + opp_count + our_size_bucket)
+      → mp_disc (key: + 11-bit "opp could still hold ≥3 of rank X" bitmap)
+```
+
+`mp_disc` is populated only for **eligible moves** (singles 3-K, doubles 3-K,
+triples 3-Q — 32 moves total) since the analyzer showed that for higher-rank
+singles, doubles, full houses, bombs and straights the response is
+PASS-dominated regardless of context (~98% PASS for max_prob ≥ 0.6 cells).
+
+Bitmap masking per move type:
+- Singles / doubles: bits for face 4..A (excluding 2, which we don't track).
+- Triples: bits for face 4..K (excluding A, since triple-A is the bomb).
+- Bits below the move's rank are always masked out (opponent can't beat with
+  same-type at lower rank).
+
+opp_count and our_size are 4-bucketed in the disc key
+(`[1-4][5-7][8-11][12-16]`), giving a worst-case ~164k state space.
+
+### Factored per-cell representation
+
+Each cell in all three mp tables stores **108 floats** (was 936 = 468 counts +
+468 trials):
+
+| Component | size | meaning |
+|---|---|---|
+| `pass_count, pass_trial` | 2 | did opp pass / was passing feasible |
+| `main_count[13], main_trial[13]` | 26 | per-rank, did opp play same-type-higher at R |
+| `bomb_rank_count[13], bomb_rank_trial[13]` | 26 | per-rank, did opp play a bomb at R |
+| `bomb_aux_count[14], bomb_aux_trial[14]` | 28 | per-aux-idx (0=bare, 1..13=rank+1) |
+| `fh_aux_count[13], fh_aux_trial[13]` | 26 | per-pair-aux rank for FH responses |
+
+Each response y decomposes to its component contributions:
+- `y == PASS` → pass component
+- `y` is bomb → `bomb_rank[R]` AND `bomb_aux[A]`
+- `y` is same-type-higher → `main_rank[R]` (and `fh_aux[A]` for FH)
+
+At training time, factor `y_played` and increment its component counts; for
+each y in the deduced-feasible set, factor it and increment touched
+component trials (deduplicated per turn).
+
+At inference, per-component shrunken values are computed:
+
+```
+P(component) = (kappa·prior + count) / (kappa + trial)
+```
+
+with the prior coming from the previous tier (chain). Per-y weight is the
+product of its components' shrunken values; weights normalized over the
+candidate set.
+
+Independence assumption between rank and aux gives substantial
+data-efficiency gain — observing one bomb-3-aux-K informs both
+bomb-3-aux-anything *and* bomb-anything-aux-K.
+
+### Effects (6×200k training)
+
+Disk sizes (gen 6):
+
+| File | Old (dense, 15M ext) | New (factored, mp_disc) | Reduction |
+|---|---|---|---|
+| `mp_main.bin` | ~55 MB | 8.7 MB | 6× |
+| `mp_disc.bin` | n/a | 44 MB | new tier |
+| `eval_extended.bin` | 1.7 MB | 2.8 MB | (slightly bigger from new feature spec) |
+| `eval_main.bin` | 660 KB | 940 KB | similar |
+| **Total** | **~700 MB** (with old 15M ext) | **~57 MB** | **~12×** |
+
+Per-gen vs pimc(20) (1000 deals):
+
+| Gen | vs random | vs greedy | vs pimc(20) | vs prev |
+|---|---|---|---|---|
+| 0 | 93.65% | 65.20% | 46.20% | — |
+| 1 | 92.80% | 71.50% | 58.10% | 50.00% |
+| 2 | 93.00% | 70.75% | 55.60% | 53.05% |
+| 3 | 92.40% | 71.05% | 58.20% | 51.45% |
+| 4 | 93.00% | 70.80% | 57.30% | 50.25% |
+| 5 | 93.00% | 70.75% | **60.40%** | 50.45% |
+| 6 | 92.95% | 71.05% | 59.10% | 51.05% |
+
+Tighter eval at 2000 deals: **gen 5 vs pimc(20) = 60.15% [58.62, 61.66]** (decisive 76.16% [73.04, 79.02]).
+
+**Head-to-head vs prior best model (4×50k extension gen 4):**
+- Overall: **68.60% [66.53, 70.60]** — strongly significant win.
+- Decisive: **92.27% [89.40, 94.42]**.
+- Only 56% splits (vs. typical 75%+ for prior comparisons).
+
+The smaller split share is the cleanest signal that the new model
+**plays meaningfully differently** in many positions. Prior changes mostly
+reproduced the same play with minor table reweighting; this change shifts
+behavior on a substantial fraction of positions, and the new behavior wins
+the vast majority of decisive games.
+
+### Why pimc(20) result didn't move proportionally
+
+Despite the head-to-head showing 92% decisive win, gen 5 vs pimc(20) tops
+at ~60%, similar to prior 6×200k runs. Likely explanation: pimc(20) is its
+own ceiling at this depth — both models max out against it because both
+make near-optimal play in the cases pimc(20) gets wrong, and pimc(20)'s
+own determinization noise puts a floor on what we can win above 50%. The
+head-to-head is a stronger discriminator since the models adversarially
+exploit each other's weaknesses.
+
+**Production-recommended model:** `data/typed_search_v5` (highest pimc and
+similar performance vs others), with `data/typed_search_v6` as backup.
