@@ -292,11 +292,17 @@ class Big2SelfPlayDataset(Dataset):
         df = df.dropna(subset=["p_win_trick"]).reset_index(drop=True)
 
         if subsample_frac < 1.0:
-            df = df.sample(frac=subsample_frac, random_state=seed).reset_index(drop=True)
+            df = df.sample(frac=subsample_frac, random_state=seed).reset_index(
+                drop=True
+            )
 
         if new_format:
-            hand_counts = df[[f"hand_after_{r}" for r in range(13)]].to_numpy(dtype=np.int32)
-            opp_counts  = df[[f"opp_cnt_{r}"    for r in range(13)]].to_numpy(dtype=np.int32)
+            hand_counts = df[[f"hand_after_{r}" for r in range(13)]].to_numpy(
+                dtype=np.int32
+            )
+            opp_counts = df[[f"opp_cnt_{r}" for r in range(13)]].to_numpy(
+                dtype=np.int32
+            )
         else:
             hand_counts = decode_handbits_np(
                 df["hand_at1"].to_numpy(dtype=np.int32),
@@ -317,7 +323,9 @@ class Big2SelfPlayDataset(Dataset):
         self.opp_enc = torch.from_numpy(encode_upper_bound_np(opp_counts))
         self.move_enc = torch.from_numpy(encode_exact_np(move_counts))
 
-        self.hint = torch.tensor(df["hint"].to_numpy(dtype=np.float32), dtype=torch.float32)
+        self.hint = torch.tensor(
+            df["hint"].to_numpy(dtype=np.float32), dtype=torch.float32
+        )
         self.flag = torch.tensor(df["flag"].to_numpy(dtype=bool), dtype=torch.bool)
         self.pass_ = torch.tensor(df["pass_"].to_numpy(dtype=bool), dtype=torch.bool)
 
@@ -337,7 +345,9 @@ class Big2SelfPlayDataset(Dataset):
             df["winner"].to_numpy(dtype=np.int32)
             == df["current_player"].to_numpy(dtype=np.int32)
         ).astype(np.float32)
-        self.y_trick = torch.tensor(df["p_win_trick"].to_numpy(dtype=np.float32), dtype=torch.float32)
+        self.y_trick = torch.tensor(
+            df["p_win_trick"].to_numpy(dtype=np.float32), dtype=torch.float32
+        )
         self.y_win = torch.tensor(y_win, dtype=torch.float32)
 
     def __len__(self) -> int:
@@ -377,7 +387,7 @@ def _split_one(
     DatasetClass = Big2SelfPlayDataset if is_selfplay else Big2Dataset
     kwargs = {"subsample_frac": subsample_frac, "seed": seed} if is_selfplay else {}
     return (
-        DatasetClass(parquet_path, val_game_ids=val_ids, train=True,  **kwargs),
+        DatasetClass(parquet_path, val_game_ids=val_ids, train=True, **kwargs),
         DatasetClass(parquet_path, val_game_ids=val_ids, train=False, **kwargs),
     )
 

@@ -305,7 +305,10 @@ def run_depth_sweep(
     depths: list[int],
     min_samples_leaf: int,
     kf,
-) -> tuple[list[dict], list[tuple[float, int, int, DecisionTreeRegressor]],]:
+) -> tuple[
+    list[dict],
+    list[tuple[float, int, int, DecisionTreeRegressor]],
+]:
     """Returns sweep_rows and (cv_brier, depth, min_samples_leaf, fitted_model)."""
     sweep_rows: list[dict] = []
     results: list[tuple[float, int, int, DecisionTreeRegressor]] = []

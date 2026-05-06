@@ -118,7 +118,9 @@ def train(
     else:
         print("Loading dataset...")
     t0 = time.time()
-    train_ds, val_ds = make_train_val_split(parquet_paths, val_frac=val_frac, seed=seed, mix_decay=mix_decay)
+    train_ds, val_ds = make_train_val_split(
+        parquet_paths, val_frac=val_frac, seed=seed, mix_decay=mix_decay
+    )
     print(f"  train={len(train_ds):,}  val={len(val_ds):,}  ({time.time()-t0:.1f}s)")
 
     train_loader = DataLoader(
@@ -184,7 +186,9 @@ def train(
 
             optimizer.zero_grad()
             v_init, v_no_init, p_trick = model(hand, opp, move, hint, flag, pass_)
-            loss, metrics = compute_loss(v_init, v_no_init, p_trick, y_trick, y_win, vi_forced, vn_forced)
+            loss, metrics = compute_loss(
+                v_init, v_no_init, p_trick, y_trick, y_win, vi_forced, vn_forced
+            )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
@@ -212,11 +216,22 @@ def train(
         n_val = 0
         with torch.no_grad():
             for batch in val_loader:
-                hand, opp, move, hint, flag, pass_, vi_forced, vn_forced, y_trick, y_win = (
-                    t.to(device) for t in batch
-                )
+                (
+                    hand,
+                    opp,
+                    move,
+                    hint,
+                    flag,
+                    pass_,
+                    vi_forced,
+                    vn_forced,
+                    y_trick,
+                    y_win,
+                ) = (t.to(device) for t in batch)
                 v_init, v_no_init, p_trick = model(hand, opp, move, hint, flag, pass_)
-                loss, metrics = compute_loss(v_init, v_no_init, p_trick, y_trick, y_win, vi_forced, vn_forced)
+                loss, metrics = compute_loss(
+                    v_init, v_no_init, p_trick, y_trick, y_win, vi_forced, vn_forced
+                )
                 bs = len(y_trick)
                 val_loss += loss.item() * bs
                 val_p += metrics["loss_p_trick"] * bs
@@ -262,7 +277,9 @@ def train(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train Big2Net")
     parser.add_argument(
-        "parquet", nargs="+", help="Parquet file(s) from dnn datagen (mixed if multiple)"
+        "parquet",
+        nargs="+",
+        help="Parquet file(s) from dnn datagen (mixed if multiple)",
     )
     parser.add_argument(
         "--out", default="models/model.pt", help="Output TorchScript model path"
@@ -271,12 +288,24 @@ def main() -> None:
     parser.add_argument("--batch", type=int, default=2048)
     parser.add_argument("--val-frac", type=float, default=0.1)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--lr-warmup", type=float, default=0.05,
-                        help="Fraction of steps for LR warmup (OneCycleLR pct_start)")
-    parser.add_argument("--final-div-factor", type=float, default=100.0,
-                        help="OneCycleLR final_div_factor; final LR = max_lr/(div_factor*this)")
-    parser.add_argument("--mix-decay", type=float, default=1.0,
-                        help="Subsample fraction per older generation file (0.5 = halve each step back)")
+    parser.add_argument(
+        "--lr-warmup",
+        type=float,
+        default=0.05,
+        help="Fraction of steps for LR warmup (OneCycleLR pct_start)",
+    )
+    parser.add_argument(
+        "--final-div-factor",
+        type=float,
+        default=100.0,
+        help="OneCycleLR final_div_factor; final LR = max_lr/(div_factor*this)",
+    )
+    parser.add_argument(
+        "--mix-decay",
+        type=float,
+        default=1.0,
+        help="Subsample fraction per older generation file (0.5 = halve each step back)",
+    )
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--grad-clip", type=float, default=0.5)
     parser.add_argument("--workers", type=int, default=8)
