@@ -13,6 +13,7 @@ namespace typed_search {
 
 class EvalTable;
 class MoveProbTable;
+class MoveProbDiscardTable;
 
 struct PruneStatsSnapshot {
   std::uint64_t calls;
@@ -31,9 +32,12 @@ void reset_prune_stats_thread_local();
 class TypedSearch {
 public:
   // 3-tier eval chain (ext shrinks toward main shrinks toward fb).
+  // mp_disc adds discard-conditioned response prediction for eligible moves
+  // (single/double/triple of low-mid ranks); shrinks toward mp_main.
   TypedSearch(const EvalTable &eval_extended, const EvalTable &eval_main,
               const EvalTable &eval_fallback,
-              const MoveProbTable &mp_table, std::uint64_t rng_seed);
+              const MoveProbDiscardTable &mp_disc,
+              const MoveProbTable &mp_main, std::uint64_t rng_seed);
 
   struct Result {
     int move_id{-1};
@@ -86,6 +90,7 @@ private:
   const EvalTable &eval_extended_;
   const EvalTable &eval_main_;
   const EvalTable &eval_fallback_;
+  const MoveProbDiscardTable &mp_disc_;
   const MoveProbTable &mp_table_;
   std::mt19937_64 rng_;
   std::unordered_map<std::uint64_t, OurNode> memo_;

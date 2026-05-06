@@ -6,8 +6,9 @@
 namespace typed_search {
 
 namespace {
-constexpr char kMagicMain[4] = {'M', 'P', 'R', 'B'};
-constexpr char kMagicFallback[4] = {'M', 'P', 'R', 'F'};
+// Bumped from MPRB / MPRF: format now stores both counts and trials per cell.
+constexpr char kMagicMain[4] = {'M', 'P', 'B', '2'};
+constexpr char kMagicFallback[4] = {'M', 'P', 'F', '2'};
 }  // namespace
 
 void MoveProbTable::load(const std::string &path) {
@@ -36,6 +37,8 @@ void MoveProbTable::load(const std::string &path) {
     in.read(reinterpret_cast<char *>(&our_b), 1);
     Entry e;
     in.read(reinterpret_cast<char *>(e.counts.data()),
+            sizeof(float) * kNumMoves);
+    in.read(reinterpret_cast<char *>(e.trials.data()),
             sizeof(float) * kNumMoves);
     if (!in) break;
     std::uint32_t key = make_key(static_cast<int>(player_move),
@@ -69,6 +72,8 @@ void MoveProbTable::save(const std::string &path) const {
     out.write(reinterpret_cast<const char *>(&our_b), 1);
     out.write(reinterpret_cast<const char *>(kv.second.counts.data()),
               sizeof(float) * kNumMoves);
+    out.write(reinterpret_cast<const char *>(kv.second.trials.data()),
+              sizeof(float) * kNumMoves);
   }
 }
 
@@ -80,58 +85,74 @@ void MoveProbTable::query(int player_move, int opp_count,
   out_probs.assign(legal_moves.size(), 0.0f);
   if (legal_moves.empty()) return;
 
-  // Try this table first.
+  constexpr float kKappa = 20.0f;
+  const std::size_t N = legal_moves.size();
+
+  // Step 1: build the prior. If there's a fallback table, recurse for it;
+  // otherwise the prior is uniform 1/N over the candidate set.
+  std::vector<float> prior(N, 1.0f / static_cast<float>(N));
+  if (fallback_) {
+    fallback_->query(player_move, opp_count, our_hand_size_bucket, legal_moves,
+                      prior);
+  }
+
+  // Step 2: look up this tier's entry.
   std::uint32_t key = make_key(player_move, opp_count, our_hand_size_bucket);
   auto it = entries_.find(key);
-  double sum = 0.0;
-  if (it != entries_.end()) {
-    for (std::size_t i = 0; i < legal_moves.size(); ++i) {
-      float c = it->second.counts[legal_moves[i]];
-      out_probs[i] = c;
-      sum += c;
+  if (it == entries_.end()) {
+    out_probs = prior;
+    if (fallback_) {
+      stats_.fallback_hits.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      stats_.uniform.fetch_add(1, std::memory_order_relaxed);
     }
-  }
-  bool from_main = sum > 0.0;
-  if (sum <= 0.0 && fallback_) {
-    std::uint32_t fk = fallback_->make_key(player_move, opp_count,
-                                             our_hand_size_bucket);
-    auto it2 = fallback_->entries_.find(fk);
-    if (it2 != fallback_->entries_.end()) {
-      for (std::size_t i = 0; i < legal_moves.size(); ++i) {
-        float c = it2->second.counts[legal_moves[i]];
-        out_probs[i] = c;
-        sum += c;
-      }
-    }
-  }
-  if (sum <= 0.0) {
-    stats_.uniform.fetch_add(1, std::memory_order_relaxed);
-    float u = 1.0f / static_cast<float>(legal_moves.size());
-    for (auto &p : out_probs) p = u;
     return;
   }
-  if (from_main) {
+
+  // Step 3: per-response Bayesian shrinkage. P(y | y feasible) is estimated
+  // as (kappa * prior_y + counts[y]) / (kappa + trials[y]). Then renormalize
+  // over the candidate set to get a valid distribution.
+  double sum = 0.0;
+  for (std::size_t i = 0; i < N; ++i) {
+    int y = legal_moves[i];
+    float c = it->second.counts[y];
+    float t = it->second.trials[y];
+    float val = (kKappa * prior[i] + c) / (kKappa + t);
+    out_probs[i] = val;
+    sum += val;
+  }
+  if (sum > 0.0) {
+    float inv = static_cast<float>(1.0 / sum);
+    for (auto &p : out_probs) p *= inv;
     stats_.main_hits.fetch_add(1, std::memory_order_relaxed);
   } else {
-    stats_.fallback_hits.fetch_add(1, std::memory_order_relaxed);
+    out_probs = prior;
+    if (fallback_) {
+      stats_.fallback_hits.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      stats_.uniform.fetch_add(1, std::memory_order_relaxed);
+    }
   }
-  float inv = static_cast<float>(1.0 / sum);
-  for (auto &p : out_probs) p *= inv;
 }
 
 void MoveProbTable::add_observation(int player_move, int opp_count,
-                                     int our_hand_size_bucket, int opp_move,
-                                     float weight) {
+                                     int our_hand_size_bucket,
+                                     const std::vector<int> &feasible_set,
+                                     int played_response, float weight) {
   std::uint32_t key = make_key(player_move, opp_count, our_hand_size_bucket);
   Entry &e = entries_[key];
-  if (opp_move >= 0 && opp_move < kNumMoves) {
-    e.counts[opp_move] += weight;
+  for (int y : feasible_set) {
+    if (y >= 0 && y < kNumMoves) e.trials[y] += weight;
+  }
+  if (played_response >= 0 && played_response < kNumMoves) {
+    e.counts[played_response] += weight;
   }
 }
 
 void MoveProbTable::decay(float alpha) {
   for (auto &kv : entries_) {
     for (auto &c : kv.second.counts) c *= alpha;
+    for (auto &t : kv.second.trials) t *= alpha;
   }
 }
 

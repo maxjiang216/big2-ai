@@ -23,6 +23,7 @@
 #include "random/random_player_factory.h"
 #include "typed_search/eval_features.h"
 #include "typed_search/eval_table.h"
+#include "typed_search/move_prob_disc_table.h"
 #include "typed_search/move_prob_table.h"
 #include "typed_search/typed_search_player.h"
 #include "typed_search/typed_search_player_factory.h"
@@ -115,9 +116,14 @@ struct EvalDelta {
 };
 
 struct MpDelta {
-  // (player_move, opp_count, our_hand_size_bucket) -> 468 floats
-  std::unordered_map<std::uint32_t, std::array<float, 468>> main_;
-  std::unordered_map<std::uint32_t, std::array<float, 468>> fb_;
+  // Each cell stores per-response counts and trials.
+  struct Cell {
+    std::array<float, 468> counts{};
+    std::array<float, 468> trials{};
+  };
+  std::unordered_map<std::uint32_t, Cell> main_;
+  std::unordered_map<std::uint32_t, Cell> fb_;
+  std::unordered_map<std::uint32_t, Cell> disc_;
   static std::uint32_t main_key(int pm, int oc, int ob) {
     return ((static_cast<std::uint32_t>(pm) * 17u +
               static_cast<std::uint32_t>(oc)) *
@@ -125,10 +131,36 @@ struct MpDelta {
             static_cast<std::uint32_t>(ob);
   }
   static std::uint32_t fb_key(int pm) { return static_cast<std::uint32_t>(pm); }
-  void add(int pm, int oc, int ob, int resp, float w) {
-    if (resp < 0 || resp >= 468) return;
-    main_[main_key(pm, oc, ob)][resp] += w;
-    fb_[fb_key(pm)][resp] += w;
+  static std::uint32_t disc_key(int pm, int oc, int ob, std::uint16_t rel) {
+    return (((static_cast<std::uint32_t>(pm) * 17u +
+                static_cast<std::uint32_t>(oc)) *
+                4u +
+              static_cast<std::uint32_t>(ob)) *
+              2048u) +
+            static_cast<std::uint32_t>(rel);
+  }
+  void add(int pm, int oc, int ob, const std::vector<int> &feasible,
+            int played, float w) {
+    auto &cm = main_[main_key(pm, oc, ob)];
+    auto &cf = fb_[fb_key(pm)];
+    for (int y : feasible) {
+      if (y >= 0 && y < 468) {
+        cm.trials[y] += w;
+        cf.trials[y] += w;
+      }
+    }
+    if (played >= 0 && played < 468) {
+      cm.counts[played] += w;
+      cf.counts[played] += w;
+    }
+  }
+  void add_disc(int pm, int oc, int ob, std::uint16_t rel,
+                 const std::vector<int> &feasible, int played, float w) {
+    auto &cd = disc_[disc_key(pm, oc, ob, rel)];
+    for (int y : feasible) {
+      if (y >= 0 && y < 468) cd.trials[y] += w;
+    }
+    if (played >= 0 && played < 468) cd.counts[played] += w;
   }
 };
 
@@ -168,13 +200,48 @@ void process_game(const GameRecord &rec, int winner_seat, EvalDelta &eval_delta,
       const auto &next = turns[i + 1];
       int player_move = encodeMove(t.move);
       int opp_count = t.views[t.current_player].opponent_hand_size();
-      // our_hand_size after the move = the move-player's hand size at the
-      // start of opp's response turn. opp's view at next turn knows this as
-      // its "opponent_hand_size".
       int our_size = next.views[1 - t.current_player].opponent_hand_size();
       int our_b = typed_search::MoveProbTable::size_bucket(our_size);
       int response = encodeMove(next.move);
-      mp_delta.add(player_move, opp_count, our_b, response, 1.0f);
+
+      // Compute opp's deduced-feasible response set from the move-player's
+      // POV after the move. This matches what the search computes at
+      // inference time (opp_could_play check on each beating move).
+      const auto &view_after = next.views[t.current_player];
+      const auto &hand_after = view_after.player_hand();
+      const auto &discard_after = view_after.discard_pile();
+      std::array<int, 13> opp_max{};
+      for (int r = 0; r < 13; ++r) {
+        int m = max_cards_in_deck_for_rank(r) - hand_after[r] -
+                discard_after[r];
+        if (m < 0) m = 0;
+        if (m > opp_count) m = opp_count;
+        opp_max[r] = m;
+      }
+      std::vector<int> feasible;
+      feasible.reserve(16);
+      feasible.push_back(kPASS);
+      for (int mid : get_beating_moves()[player_move]) {
+        const auto &cost = MOVE_TO_CARDS[mid];
+        if (cost[13] > opp_count) continue;
+        bool can = true;
+        for (int r = 0; r < 13; ++r) {
+          if (cost[r] > opp_max[r]) { can = false; break; }
+        }
+        if (can) feasible.push_back(mid);
+      }
+      mp_delta.add(player_move, opp_count, our_b, feasible, response, 1.0f);
+
+      // Discard-conditioned observation (eligible moves only).
+      if (typed_search::MoveProbDiscardTable::is_eligible(player_move)) {
+        std::uint16_t bm =
+            typed_search::MoveProbDiscardTable::compute_bitmap(
+                hand_after, discard_after, opp_count);
+        std::uint16_t rel =
+            typed_search::MoveProbDiscardTable::mask_relevant(player_move, bm);
+        mp_delta.add_disc(player_move, opp_count, our_b, rel, feasible,
+                           response, 1.0f);
+      }
     }
   }
 }
@@ -182,6 +249,7 @@ void process_game(const GameRecord &rec, int winner_seat, EvalDelta &eval_delta,
 void merge_deltas(typed_search::EvalTable &ext_e,
                    typed_search::EvalTable &main_e,
                    typed_search::EvalTable &fb_e,
+                   typed_search::MoveProbDiscardTable &disc_m,
                    typed_search::MoveProbTable &main_m,
                    typed_search::MoveProbTable &fb_m,
                    const std::vector<EvalDelta> &eds,
@@ -206,6 +274,9 @@ void merge_deltas(typed_search::EvalTable &ext_e,
       fb_e.add_observation(kv.first, winner, vc);
     }
   }
+  // Helper: directly add a delta cell into a global table entry. We bypass
+  // the public add_observation API since we already have aggregated
+  // counts/trials and don't want to re-derive a feasible_set per response.
   for (const auto &md : mds) {
     for (const auto &kv : md.main_) {
       std::uint32_t k = kv.first;
@@ -213,17 +284,56 @@ void merge_deltas(typed_search::EvalTable &ext_e,
       k /= 4u;
       int oc = static_cast<int>(k % 17u);
       int pm = static_cast<int>(k / 17u);
-      const auto &vec = kv.second;
+      const auto &cell = kv.second;
+      // We feed counts/trials to add_observation by passing each non-zero
+      // (response, count) as a played-with-itself-feasible record, then
+      // separately top up trials for non-played-but-feasible responses.
+      // Simplest: collect a single feasible_set and a single weight per cell?
+      // No — counts and trials may differ per y. Build per-response calls.
       for (int m = 0; m < 468; ++m) {
-        if (vec[m] != 0.0f) main_m.add_observation(pm, oc, ob, m, vec[m]);
+        float c = cell.counts[m];
+        if (c > 0.0f) {
+          main_m.add_observation(pm, oc, ob, /*feasible=*/{m}, m, c);
+        }
+        float t_extra = cell.trials[m] - cell.counts[m];
+        if (t_extra > 0.0f) {
+          main_m.add_observation(pm, oc, ob, /*feasible=*/{m}, /*played=*/-1,
+                                  t_extra);
+        }
       }
     }
     for (const auto &kv : md.fb_) {
       int pm = static_cast<int>(kv.first);
-      const auto &vec = kv.second;
+      const auto &cell = kv.second;
       for (int m = 0; m < 468; ++m) {
-        if (vec[m] != 0.0f)
-          fb_m.add_observation(pm, /*opp_count=*/0, /*our_b=*/0, m, vec[m]);
+        float c = cell.counts[m];
+        if (c > 0.0f) {
+          fb_m.add_observation(pm, 0, 0, /*feasible=*/{m}, m, c);
+        }
+        float t_extra = cell.trials[m] - cell.counts[m];
+        if (t_extra > 0.0f) {
+          fb_m.add_observation(pm, 0, 0, /*feasible=*/{m}, -1, t_extra);
+        }
+      }
+    }
+    for (const auto &kv : md.disc_) {
+      std::uint32_t k = kv.first;
+      std::uint16_t rel = static_cast<std::uint16_t>(k & 0x7FFu);
+      k >>= 11;
+      int ob = static_cast<int>(k % 4u);
+      k /= 4u;
+      int oc = static_cast<int>(k % 17u);
+      int pm = static_cast<int>(k / 17u);
+      const auto &cell = kv.second;
+      for (int m = 0; m < 468; ++m) {
+        float c = cell.counts[m];
+        if (c > 0.0f) {
+          disc_m.add_observation(pm, oc, ob, rel, /*feasible=*/{m}, m, c);
+        }
+        float t_extra = cell.trials[m] - cell.counts[m];
+        if (t_extra > 0.0f) {
+          disc_m.add_observation(pm, oc, ob, rel, /*feasible=*/{m}, -1, t_extra);
+        }
       }
     }
   }
@@ -238,29 +348,34 @@ int main(int argc, char *argv[]) {
   const std::string p_eval_ext = args.tables_dir + "/eval_extended.bin";
   const std::string p_eval_main = args.tables_dir + "/eval_main.bin";
   const std::string p_eval_fb = args.tables_dir + "/eval_fallback.bin";
+  const std::string p_mp_disc = args.tables_dir + "/mp_disc.bin";
   const std::string p_mp_main = args.tables_dir + "/mp_main.bin";
   const std::string p_mp_fb = args.tables_dir + "/mp_fallback.bin";
 
   // Load + decay.
   typed_search::EvalTable eval_ext, eval_main, eval_fb;
+  typed_search::MoveProbDiscardTable mp_disc;
   typed_search::MoveProbTable mp_main, mp_fb;
   mp_main.set_ignore_opp_count(false);
   mp_fb.set_ignore_opp_count(true);
   eval_ext.load(p_eval_ext);
   eval_main.load(p_eval_main);
   eval_fb.load(p_eval_fb);
+  mp_disc.load(p_mp_disc);
   mp_main.load(p_mp_main);
   mp_fb.load(p_mp_fb);
 
   std::cout << "Loaded eval_ext=" << eval_ext.size()
             << " eval_main=" << eval_main.size()
-            << " eval_fb=" << eval_fb.size() << " mp_main=" << mp_main.size()
-            << " mp_fb=" << mp_fb.size() << "\n";
+            << " eval_fb=" << eval_fb.size() << " mp_disc=" << mp_disc.size()
+            << " mp_main=" << mp_main.size() << " mp_fb=" << mp_fb.size()
+            << "\n";
 
   if (args.alpha < 1.0f) {
     eval_ext.decay(args.alpha);
     eval_main.decay(args.alpha);
     eval_fb.decay(args.alpha);
+    mp_disc.decay(args.alpha);
     mp_main.decay(args.alpha);
     mp_fb.decay(args.alpha);
     std::cout << "Decayed by alpha=" << args.alpha << "\n";
@@ -282,16 +397,19 @@ int main(int argc, char *argv[]) {
     eval_ext.save(p_eval_ext + ".tmp");
     eval_main.save(p_eval_main + ".tmp");
     eval_fb.save(p_eval_fb + ".tmp");
+    mp_disc.save(p_mp_disc + ".tmp");
     mp_main.save(p_mp_main + ".tmp");
     mp_fb.save(p_mp_fb + ".tmp");
     ts_tables->eval_extended.load(p_eval_ext + ".tmp");
     ts_tables->eval_main.load(p_eval_main + ".tmp");
     ts_tables->eval_fallback.load(p_eval_fb + ".tmp");
+    ts_tables->mp_disc.load(p_mp_disc + ".tmp");
     ts_tables->mp_main.load(p_mp_main + ".tmp");
     ts_tables->mp_fallback.load(p_mp_fb + ".tmp");
     std::filesystem::remove(p_eval_ext + ".tmp");
     std::filesystem::remove(p_eval_main + ".tmp");
     std::filesystem::remove(p_eval_fb + ".tmp");
+    std::filesystem::remove(p_mp_disc + ".tmp");
     std::filesystem::remove(p_mp_main + ".tmp");
     std::filesystem::remove(p_mp_fb + ".tmp");
   }
@@ -375,7 +493,7 @@ int main(int argc, char *argv[]) {
             << (100.0 * p0_wins.load() / args.games) << "%\n";
 
   // Merge deltas into the (already decayed) tables.
-  merge_deltas(eval_ext, eval_main, eval_fb, mp_main, mp_fb, eds, mds);
+  merge_deltas(eval_ext, eval_main, eval_fb, mp_disc, mp_main, mp_fb, eds, mds);
 
   std::cout << "Post-merge: eval_ext=" << eval_ext.size()
             << " eval_main=" << eval_main.size()
@@ -422,6 +540,7 @@ int main(int argc, char *argv[]) {
   eval_ext.save(p_eval_ext);
   eval_main.save(p_eval_main);
   eval_fb.save(p_eval_fb);
+  mp_disc.save(p_mp_disc);
   mp_main.save(p_mp_main);
   mp_fb.save(p_mp_fb);
   std::cout << "Saved to " << args.tables_dir << "\n";
@@ -433,6 +552,7 @@ int main(int argc, char *argv[]) {
     sample_tables->eval_extended.load(p_eval_ext);
     sample_tables->eval_main.load(p_eval_main);
     sample_tables->eval_fallback.load(p_eval_fb);
+    sample_tables->mp_disc.load(p_mp_disc);
     sample_tables->mp_main.load(p_mp_main);
     sample_tables->mp_fallback.load(p_mp_fb);
 

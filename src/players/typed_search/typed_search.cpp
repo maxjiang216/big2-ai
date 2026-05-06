@@ -4,6 +4,7 @@
 #include "eval_table.h"
 #include "forced_search.h"
 #include "move_grouping.h"
+#include "move_prob_disc_table.h"
 #include "move_prob_table.h"
 #include "util.h"
 
@@ -325,10 +326,12 @@ void reset_prune_stats_thread_local() { g_prune_stats = {}; }
 TypedSearch::TypedSearch(const EvalTable &eval_extended,
                           const EvalTable &eval_main,
                           const EvalTable &eval_fallback,
+                          const MoveProbDiscardTable &mp_disc,
                           const MoveProbTable &mp_table,
                           std::uint64_t rng_seed)
     : eval_extended_(eval_extended), eval_main_(eval_main),
-      eval_fallback_(eval_fallback), mp_table_(mp_table), rng_(rng_seed) {}
+      eval_fallback_(eval_fallback), mp_disc_(mp_disc), mp_table_(mp_table),
+      rng_(rng_seed) {}
 
 namespace {
 constexpr float kShrinkKappa = 20.0f;
@@ -504,12 +507,15 @@ float TypedSearch::visit_opp(const std::array<int, 13> &our_hand_after,
   }
 
   // Query move-prob distribution. Conditioned on our hand size after the
-  // move (the move-player's remaining-hand context that the table is keyed
-  // on for the response prediction).
+  // move and (for eligible moves) the discard-derived availability bitmap;
+  // mp_disc shrinks toward mp_main as prior.
   int our_hand_size = 0;
   for (int c : our_hand_after) our_hand_size += c;
   int our_b = MoveProbTable::size_bucket(our_hand_size);
-  mp_table_.query(our_move_id, opp_count, our_b, opp_legal, opp_probs);
+  std::uint16_t bitmap = MoveProbDiscardTable::compute_bitmap(
+      our_hand_after, discard_after, opp_count);
+  mp_disc_.query(our_move_id, opp_count, our_b, bitmap, opp_legal, mp_table_,
+                  opp_probs);
 
   // Group by response equivalence (writes into scratch.groups).
   group_opp_moves_into(our_hand_after, opp_legal, opp_probs, groups);

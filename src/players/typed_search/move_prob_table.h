@@ -38,8 +38,13 @@ public:
   static constexpr int kNumMoves = 468;
   static constexpr int kOurBuckets = 4;
 
+  // Per-cell, per-response stats. counts[y] = # times opp played y when y was
+  // a deduced-feasible response. trials[y] = # times y was deduced-feasible
+  // (whether or not opp picked it). The estimator P(y | y feasible) is then
+  // shrunken Bayesian: (kappa * prior + counts[y]) / (kappa + trials[y]).
   struct Entry {
     std::array<float, kNumMoves> counts{};
+    std::array<float, kNumMoves> trials{};
   };
 
   MoveProbTable() = default;
@@ -62,10 +67,13 @@ public:
 
   MoveProbQueryStats &stats() const { return stats_; }
 
-  // Training.
+  // Training. For each response in feasible_set, increment trials by weight.
+  // For played_response (which must also be in feasible_set), increment its
+  // count by weight.
   void add_observation(int player_move, int opp_count,
-                       int our_hand_size_bucket, int opp_move,
-                       float weight = 1.0f);
+                       int our_hand_size_bucket,
+                       const std::vector<int> &feasible_set,
+                       int played_response, float weight = 1.0f);
   void decay(float alpha);
 
   std::size_t size() const { return entries_.size(); }

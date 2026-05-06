@@ -2,6 +2,7 @@
 #define TYPED_SEARCH_TYPED_SEARCH_PLAYER_H
 
 #include "eval_table.h"
+#include "move_prob_disc_table.h"
 #include "move_prob_table.h"
 #include "player.h"
 #include "typed_search.h"
@@ -21,13 +22,13 @@ struct TypedSearchTables {
   EvalTable eval_extended;
   EvalTable eval_main;
   EvalTable eval_fallback;
+  MoveProbDiscardTable mp_disc;  // discard-conditioned, shrinks toward mp_main
   MoveProbTable mp_main;
   MoveProbTable mp_fallback;
 
   TypedSearchTables() {
     mp_main.set_ignore_opp_count(false);
     mp_fallback.set_ignore_opp_count(true);
-    // 2-tier fb pointer chain still set up for the legacy 2-tier query path.
     eval_main.set_fallback(&eval_fallback);
     eval_extended.set_fallback(&eval_main);
     mp_main.set_fallback(&mp_fallback);

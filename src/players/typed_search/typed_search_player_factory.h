@@ -33,6 +33,7 @@ public:
     t->eval_extended.load(dir_ + "/eval_extended.bin");
     t->eval_main.load(dir_ + "/eval_main.bin");
     t->eval_fallback.load(dir_ + "/eval_fallback.bin");
+    t->mp_disc.load(dir_ + "/mp_disc.bin");
     t->mp_main.load(dir_ + "/mp_main.bin");
     t->mp_fallback.load(dir_ + "/mp_fallback.bin");
   }

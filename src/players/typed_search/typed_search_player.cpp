@@ -11,7 +11,8 @@ Move TypedSearchPlayer::select_move_impl() {
   const std::uint64_t seed =
       rng_seed_ ^ (0x9E3779B97F4A7C15ull * (++move_counter_));
   TypedSearch search(tables_->eval_extended, tables_->eval_main,
-                      tables_->eval_fallback, tables_->mp_main, seed);
+                      tables_->eval_fallback, tables_->mp_disc,
+                      tables_->mp_main, seed);
 
   auto hand = game_.player_hand();
   auto discard = game_.discard_pile();
