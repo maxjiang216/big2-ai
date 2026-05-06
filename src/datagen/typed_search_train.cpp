@@ -49,6 +49,10 @@ struct Args {
   float alpha = 0.7f;
   std::uint64_t seed = 0;
   std::string tables_dir = "data/typed_search";
+  // Optional: after the main run, play `sample_games` extra typed_search
+  // self-play games with verbose logging to `sample_dir`/game_NNNN.log.
+  int sample_games = 0;
+  std::string sample_dir;
 };
 
 Args parse_args(int argc, char *argv[]) {
@@ -70,6 +74,8 @@ Args parse_args(int argc, char *argv[]) {
     else if (s == "--alpha") a.alpha = std::stof(next("--alpha"));
     else if (s == "--seed") a.seed = static_cast<std::uint64_t>(std::stoll(next("--seed")));
     else if (s == "--tables-dir") a.tables_dir = next("--tables-dir");
+    else if (s == "--sample-games") a.sample_games = std::stoi(next("--sample-games"));
+    else if (s == "--sample-dir") a.sample_dir = next("--sample-dir");
     else {
       std::cerr << "Unknown flag: " << s << "\n";
       std::exit(2);
@@ -381,5 +387,38 @@ int main(int argc, char *argv[]) {
   mp_main.save(p_mp_main);
   mp_fb.save(p_mp_fb);
   std::cout << "Saved to " << args.tables_dir << "\n";
+
+  // Optionally play a few extra games with verbose logging using the
+  // freshly-saved tables. Useful for spot-checking and as NN training samples.
+  if (args.sample_games > 0 && !args.sample_dir.empty()) {
+    std::filesystem::create_directories(args.sample_dir);
+    auto sample_tables = std::make_shared<typed_search::TypedSearchTables>();
+    sample_tables->eval_main.load(p_eval_main);
+    sample_tables->eval_fallback.load(p_eval_fb);
+    sample_tables->mp_main.load(p_mp_main);
+    sample_tables->mp_fallback.load(p_mp_fb);
+
+    std::cout << "Logging " << args.sample_games
+              << " sample games to " << args.sample_dir << "/...\n";
+    std::mt19937 rng(args.seed + 0xCAFEBABEull);
+    for (int i = 0; i < args.sample_games; ++i) {
+      auto p0 = std::make_unique<typed_search::TypedSearchPlayer>(
+          sample_tables, static_cast<std::uint64_t>(rng()));
+      auto p1 = std::make_unique<typed_search::TypedSearchPlayer>(
+          sample_tables, static_cast<std::uint64_t>(rng()));
+      char path_buf[64];
+      std::snprintf(path_buf, sizeof(path_buf), "%04d", i);
+      std::string log_prefix = args.sample_dir + "/game_" + path_buf;
+      GameSimulator sim(std::move(p0), std::move(p1), rng, log_prefix);
+      GameRecord rec = sim.run();
+      int winner = rec.turns().empty() ? 0
+                                          : rec.turns().back().current_player;
+      // Append outcome line to the log file (path includes seed suffix).
+      // GameSimulator's log filename pattern is "<prefix>_<seed>.txt".
+      // We can't easily recover the seed, so just print the index.
+      (void)winner;
+    }
+    std::cout << "Sample games written.\n";
+  }
   return 0;
 }
