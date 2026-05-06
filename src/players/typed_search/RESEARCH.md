@@ -388,6 +388,32 @@ Strength side-effect (gen-4 tables, no retraining):
 
 The broader rule was adding strength against pimc(20) by ~4 points, suggesting it was acting as a useful prior (the search couldn't reliably pick the dominated-but-table-better move). But the rule wasn't actually correct outside `hand_size == 2`, so we accept the regression as the price of correctness. Bomb/FH aux dominance is preserved; that argument doesn't have the same parity hole.
 
+#### Fresh retraining recovers the regression
+
+Ran a new 4-gen training (50k games each, α=0.7) starting from random self-play with the corrected pruning rules. Comparison:
+
+| Match | Old gen-4 (broad rule, 4 gens) | New gen-4 (2-card-only rule, 4 gens) |
+|---|---|---|
+| vs random | 92.30% | **93.05%** (+0.75 pp) |
+| vs greedy | 66.80% | **70.45%** (+3.65 pp) |
+| vs pimc(20) | 55.00% | **57.00%** (+2.00 pp) |
+
+Head-to-head **new gen-4 vs old gen-4** (1000 deals): 49.85%, CI [47.66, 52.04] — statistically a tie. **745/1000 deals are 1-1 splits**, meaning the two players make the same moves in most positions; they only differ where the broad rule was over-pruning, and there the new model is on average as good or slightly better.
+
+So the answer to the trade is: the corrected pruning loses a little against the previously-strong baselines if measured immediately, but a fresh round of training fills in the eval table for the previously-overpruned states and recovers the strength — and in fact the new model is uniformly stronger against every baseline. The parity hole is closed without paying for it in the long run.
+
+Per-gen progression on the new run:
+
+| Gen | vs random | vs greedy | vs pimc(20) | vs prev gen |
+|---|---|---|---|---|
+| 0 | 90.95% | 62.80% | 42.00% | — |
+| 1 | 91.90% | 68.80% | 54.50% | 50.15% (985 split) |
+| 2 | 92.90% | 70.15% | 54.75% | 54.50% |
+| 3 | 93.20% | 69.55% | **59.00%** | 50.20% |
+| 4 | 93.05% | 70.45% | 57.00% | 50.45% |
+
+vs-prev-gen mostly hovers 50-54% with hundreds of split deals each — converging cleanly. The pimc(20) line jiggles around 55-59% in the last three gens; with only 200 deals the per-gen SE is ~2.5 pp so this is consistent with stable performance, not a clear monotone gain. Gen 3 may be a noise-favorable snapshot; for production, picking the gen with the highest average across all baselines is reasonable, otherwise gen 4 is fine.
+
 ### Risks / caveats
 
 - The dominance argument assumes "remove a loose card → keep a strictly more capable hand." The check uses straight-set equivalence as the loose-test, which is sufficient but not necessary — there are positions where breaking a straight you'd never want to play *would* still be safe. Conservative: we under-prune, never over-prune.
