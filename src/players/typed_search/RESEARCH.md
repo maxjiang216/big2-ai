@@ -414,6 +414,21 @@ Per-gen progression on the new run:
 
 vs-prev-gen mostly hovers 50-54% with hundreds of split deals each — converging cleanly. The pimc(20) line jiggles around 55-59% in the last three gens; with only 200 deals the per-gen SE is ~2.5 pp so this is consistent with stable performance, not a clear monotone gain. Gen 3 may be a noise-favorable snapshot; for production, picking the gen with the highest average across all baselines is reasonable, otherwise gen 4 is fine.
 
+#### Decisive-only CIs (excluding 1-1 splits)
+
+The overall paired-deal win rate is diluted by split deals (one game each), which contribute exactly 50% by construction. Looking only at decisive deals (one player swept 2-0) is a cleaner signal of "given a chance to demonstrate advantage, who wins?".
+
+| Match | Overall % (CI) | Decisive % (CI) | Splits |
+|---|---|---|---|
+| new gen-4 vs random | 93.35% [92.17, 94.36] | **99.43%** [98.67, 99.76] (872/877) | 12.3% |
+| new gen-4 vs greedy | 70.45% [68.41, 72.41] | **92.16%** [89.43, 94.24] (447/485) | 51.5% |
+| new gen-4 vs pimc(20) | 56.50% [51.60, 61.27] | **69.70%** [57.78, 79.45] (46/66) | 67.0% |
+| new gen-4 vs old gen-4 | 49.65% [47.46, 51.84] | 48.62% [42.52, 54.75] (123/253) | 74.7% |
+
+vs pimc(20) the overall CI [51.6, 61.3] only marginally excludes 50%, but the decisive CI [57.8, 79.5] is firm — when one player demonstrably won the deal, it was the new gen-4 ~70% of the time. The marginal overall number reflects 67% of deals being splits, not actual closeness.
+
+vs the old gen-4 the head-to-head is statistically tied even after removing splits (decisive CI includes 50%, with 253 decisive deals out of 1000). The two models play the same on 75% of deals and roughly equally well on the rest; the dominance fix doesn't make the model strictly stronger against the prior model — it makes it stronger against *external* baselines. Consistent with: both models converge on similar play in most positions, the corrected one's table values generalize better to non-typed_search opponents.
+
 ### Risks / caveats
 
 - The dominance argument assumes "remove a loose card → keep a strictly more capable hand." The check uses straight-set equivalence as the loose-test, which is sufficient but not necessary — there are positions where breaking a straight you'd never want to play *would* still be safe. Conservative: we under-prune, never over-prune.
