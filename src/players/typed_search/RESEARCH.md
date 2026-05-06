@@ -361,6 +361,33 @@ So the +45% throughput isn't *just* from rare bomb situations — it's about hal
 
 The "30%" claim from the previous note was wrong; the real number is ~9% of all `visit_our` calls (or ~29% of calls that have any choice at all). I'd been guessing without measuring; corrected here.
 
+#### Restricting single-move dominance to the 2-card endgame
+
+The dominance argument for "always prefer the smaller loose single" is only mathematically airtight when we're choosing between two singles and have exactly 2 cards in hand. In mid-game (3+ cards) we may legitimately want to play a *higher* single to force opp to pass and keep initiative — a parity effect the search has to weigh, not a rule we can pre-prune.
+
+Restricted the single-move rule to `hand_size == 2`. Bomb / full-house aux dominance is unchanged (those don't have parity issues; the bomb / FH pins down the trick state too tightly).
+
+Updated prune stats (200 games / 369k visit_our calls):
+
+| Metric | All-singles rule | 2-card-only rule |
+|---|---|---|
+| Calls with drops | 9.22% | 3.32% (10.4% of multi-move) |
+| Total drops | 61,660 | 35,977 |
+| Singles | 29,427 (47.7%) | 36 (0.1%) |
+| Bomb aux | 31,915 (51.8%) | 35,620 (99.0%) |
+| FH aux | 318 (0.5%) | 321 (0.9%) |
+
+Strength side-effect (gen-4 tables, no retraining):
+
+| Match | Both rules | 2-card-only |
+|---|---|---|
+| vs random | 93.3% | 91.6% |
+| vs greedy | 71.3% | 70.7% |
+| vs pimc(20) | 58.5% | 54.75% |
+| Throughput (1 thread) | 205 g/s | 181 g/s |
+
+The broader rule was adding strength against pimc(20) by ~4 points, suggesting it was acting as a useful prior (the search couldn't reliably pick the dominated-but-table-better move). But the rule wasn't actually correct outside `hand_size == 2`, so we accept the regression as the price of correctness. Bomb/FH aux dominance is preserved; that argument doesn't have the same parity hole.
+
 ### Risks / caveats
 
 - The dominance argument assumes "remove a loose card → keep a strictly more capable hand." The check uses straight-set equivalence as the loose-test, which is sufficient but not necessary — there are positions where breaking a straight you'd never want to play *would* still be safe. Conservative: we under-prune, never over-prune.

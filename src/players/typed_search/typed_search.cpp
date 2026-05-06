@@ -147,16 +147,24 @@ bool affects_straights(const std::array<int, 13> &hand, int rank_idx,
 // Drop moves that are strictly dominated by a smaller-rank alternative
 // using a "loose" sacrifice card (or pair). Two complementary rules:
 //
-// 1. Single-move domination. Among legal Single moves whose rank is loose
-//    in `hand` (count == 1, not in any straight), the smallest-rank wins;
-//    larger ones are dominated and get dropped.
+// 1. Single-move domination, restricted to the 2-card endgame.
+//    With exactly 2 cards in hand and 2+ legal Single moves both loose
+//    (count == 1, not in any straight), the smallest-rank wins. Argument:
+//    after playing X1 (smaller), we hold X2 alone — a strictly more
+//    capable last card than X1. The reason this doesn't extend to 3+
+//    cards is parity: in mid-game we may *want* to play a larger single
+//    to force opp to pass and keep initiative, which the search will
+//    weigh against the dominance gain. Restricting to hand_size == 2
+//    keeps the "always-true" subset of the rule.
 //
 // 2. Bomb / full-house aux domination. Among bomb moves at the same
 //    bomb_rank, those whose auxiliary is a "loose" sacrifice (single aux
 //    with count_X == 1 in hand-after-bomb and not in any straight; or pair
 //    aux with count_Y == 2 and not in any straight/DS/TS) are dominated by
 //    the smallest-rank loose aux of the same kind. Same logic for full
-//    houses keyed by triple_rank with loose-pair auxes.
+//    houses keyed by triple_rank with loose-pair auxes. Bombs/FHs pin
+//    down the trick state more tightly than singles so the dominance
+//    argument carries through without parity concerns.
 //
 // Non-loose auxes and the bare bomb are NOT pruned — the dominance
 // argument doesn't extend to those without more analysis.
@@ -179,6 +187,12 @@ void prune_dominated_moves(const std::array<int, 13> &hand,
   g_prune_stats.total_input_moves += legal.size();
   if (legal.size() <= 1) return;
   g_prune_stats.calls_multi++;
+
+  // Single-move dominance applies only in the 2-card endgame (parity
+  // matters for mid-game). Bomb/FH aux dominance always applies.
+  int hand_size = 0;
+  for (int c : hand) hand_size += c;
+  const bool prune_singles_dom = (hand_size == 2);
 
   // Pass 1: find smallest-rank legal-move id of each "loose" category.
   int smallest_loose_single = INT_MAX;
@@ -203,7 +217,7 @@ void prune_dominated_moves(const std::array<int, 13> &hand,
   for (int m : legal) {
     if (m == kPASS) continue;
     const Move &mv = all[m];
-    if (mv.combination == Move::Combination::kSingle) {
+    if (prune_singles_dom && mv.combination == Move::Combination::kSingle) {
       int idx = rank_idx_of(mv.rank);
       if (loose_single_at(hand, idx)) {
         if (m < smallest_loose_single) smallest_loose_single = m;
@@ -241,7 +255,7 @@ void prune_dominated_moves(const std::array<int, 13> &hand,
   auto is_dominated = [&](int m) -> bool {
     if (m == kPASS) return false;
     const Move &mv = all[m];
-    if (mv.combination == Move::Combination::kSingle) {
+    if (prune_singles_dom && mv.combination == Move::Combination::kSingle) {
       int idx = rank_idx_of(mv.rank);
       if (smallest_loose_single != INT_MAX && m != smallest_loose_single &&
           loose_single_at(hand, idx)) {
