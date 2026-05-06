@@ -28,24 +28,31 @@ inline float eval_at(const std::array<int, 13> &hand,
   return table.query(main_id, fb_id, /*min_visits=*/5.0f, default_value);
 }
 
+// Same opp_bits / opp_count invariance as in find_forced_win — hoist
+// opp_bits to the top of forced_search and pass through recursion.
+struct ForcedSearchCtx {
+  HandBits opp_bits;
+  int opp_count;
+};
+
 float forced_search_recursive(const std::array<int, 13> &hand,
                                const std::array<int, 13> &discard,
-                               int opp_count, const EvalTable &table,
-                               float default_value, int depth_remaining) {
+                               const ForcedSearchCtx &ctx,
+                               const EvalTable &table, float default_value,
+                               int depth_remaining) {
   if (hand_total(hand) == 0) return 1.0f;
 
-  float best = eval_at(hand, discard, opp_count, table, default_value);
+  float best = eval_at(hand, discard, ctx.opp_count, table, default_value);
   if (best >= 1.0f || depth_remaining <= 0) return best;
 
   Move pass(Move::Combination::kPass);
   auto legal = compute_legal_moves(hand, pass);
 
-  // Filter & order: only unbeatable, sort by num_cards desc, then move_id asc.
   std::vector<int> forced_ids;
   forced_ids.reserve(legal.size());
   for (int mid : legal) {
     if (mid == kPASS) continue;
-    if (opponent_can_respond(mid, hand, discard, opp_count)) continue;
+    if (opponent_can_respond(mid, ctx.opp_bits, ctx.opp_count)) continue;
     forced_ids.push_back(mid);
   }
   std::sort(forced_ids.begin(), forced_ids.end(), [](int a, int b) {
@@ -64,12 +71,28 @@ float forced_search_recursive(const std::array<int, 13> &hand,
       new_discard[r] += cost[r];
     }
     if (hand_total(new_hand) == 0) return 1.0f;
-    float v = forced_search_recursive(new_hand, new_discard, opp_count, table,
+    float v = forced_search_recursive(new_hand, new_discard, ctx, table,
                                        default_value, depth_remaining - 1);
     if (v > best) best = v;
     if (best >= 1.0f) return best;
   }
   return best;
+}
+
+ForcedSearchCtx build_ctx(const std::array<int, 13> &hand,
+                           const std::array<int, 13> &discard, int opp_count) {
+  ForcedSearchCtx ctx;
+  ctx.opp_count = opp_count;
+  ctx.opp_bits = HandBits{};
+  for (int r = 0; r < 13; ++r) {
+    int om = max_cards_in_deck_for_rank(r) - hand[r] - discard[r];
+    if (om <= 0) continue;
+    ctx.opp_bits.at1 |= static_cast<uint16_t>(1u << r);
+    if (om >= 2) ctx.opp_bits.at2 |= static_cast<uint16_t>(1u << r);
+    if (om >= 3) ctx.opp_bits.at3 |= static_cast<uint16_t>(1u << r);
+    if (om >= 4) ctx.opp_bits.at4 |= static_cast<uint16_t>(1u << r);
+  }
+  return ctx;
 }
 
 }  // namespace
@@ -81,8 +104,9 @@ float forced_search_value(const std::array<int, 13> &hand,
   // Fast path: the existing tablebase forced-win finder.
   auto fw = find_forced_win(hand, discard, opp_count);
   if (fw.has_value()) return 1.0f;
-  return forced_search_recursive(hand, discard, opp_count, eval_table,
-                                  default_value, depth_cap);
+  ForcedSearchCtx ctx = build_ctx(hand, discard, opp_count);
+  return forced_search_recursive(hand, discard, ctx, eval_table, default_value,
+                                  depth_cap);
 }
 
 }  // namespace typed_search

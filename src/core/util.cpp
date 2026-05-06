@@ -377,44 +377,43 @@ bool opponent_can_respond(int move_id, const HandBits &opp_bits, int opp_count) 
   return false;
 }
 
+namespace {
+
+// Forced-win recursion context. Invariant during recursion: opp_bits and
+// opp_count never change (each forced move moves cards from hand to discard
+// so opp_max = const - hand - discard is algebraically conserved; opp passes
+// so its count is unchanged). Hoisting opp_bits to the top-level avoids
+// rebuilding it from arrays on every per-move can-respond check.
+struct ForcedWinCtx {
+  HandBits opp_bits;
+  int opp_count;
+};
+
 std::optional<std::vector<int>>
-find_forced_win(const std::array<int, 13> &hand,
-                const std::array<int, 13> &discard,
-                int opp_count) {
+find_forced_win_inner(const std::array<int, 13> &hand,
+                       const ForcedWinCtx &ctx) {
   int hand_size = 0;
-  for (int c : hand)
-    hand_size += c;
+  for (int c : hand) hand_size += c;
 
   const Move pass_sentinel(Move::Combination::kPass);
   std::vector<int> legal = compute_legal_moves(hand, pass_sentinel);
   legal.erase(std::remove(legal.begin(), legal.end(), kPASS), legal.end());
-  // DFS: try legal moves with larger combinations first (then lower move_id).
   std::sort(legal.begin(), legal.end(), [](int a, int b) {
     int ca = MOVE_TO_CARDS[a][13];
     int cb = MOVE_TO_CARDS[b][13];
-    if (ca != cb)
-      return ca > cb;
+    if (ca != cb) return ca > cb;
     return a < b;
   });
 
-  const auto &moves = all_moves();
   for (int mid : legal) {
-    int cards = moves[mid].numCards();
-
-    // A hand-emptying move wins immediately — no need to check response.
+    int cards = MOVE_TO_CARDS[mid][13];
     if (cards == hand_size)
       return std::vector<int>{mid};
-
-    // An unbeatable move: opponent must pass, we keep the lead.
-    if (!opponent_can_respond(mid, hand, discard, opp_count)) {
+    if (!opponent_can_respond(mid, ctx.opp_bits, ctx.opp_count)) {
       const auto &cost = MOVE_TO_CARDS[mid];
       std::array<int, 13> new_hand = hand;
-      std::array<int, 13> new_discard = discard;
-      for (int r = 0; r < 13; ++r) {
-        new_hand[r] -= cost[r];
-        new_discard[r] += cost[r];
-      }
-      auto rest = find_forced_win(new_hand, new_discard, opp_count);
+      for (int r = 0; r < 13; ++r) new_hand[r] -= cost[r];
+      auto rest = find_forced_win_inner(new_hand, ctx);
       if (rest) {
         rest->insert(rest->begin(), mid);
         return rest;
@@ -422,6 +421,26 @@ find_forced_win(const std::array<int, 13> &hand,
     }
   }
   return std::nullopt;
+}
+
+}  // namespace
+
+std::optional<std::vector<int>>
+find_forced_win(const std::array<int, 13> &hand,
+                const std::array<int, 13> &discard,
+                int opp_count) {
+  ForcedWinCtx ctx;
+  ctx.opp_count = opp_count;
+  ctx.opp_bits = HandBits{};
+  for (int r = 0; r < 13; ++r) {
+    int om = max_cards_in_deck_for_rank(r) - hand[r] - discard[r];
+    if (om <= 0) continue;
+    ctx.opp_bits.at1 |= static_cast<uint16_t>(1u << r);
+    if (om >= 2) ctx.opp_bits.at2 |= static_cast<uint16_t>(1u << r);
+    if (om >= 3) ctx.opp_bits.at3 |= static_cast<uint16_t>(1u << r);
+    if (om >= 4) ctx.opp_bits.at4 |= static_cast<uint16_t>(1u << r);
+  }
+  return find_forced_win_inner(hand, ctx);
 }
 
 std::vector<int> compute_possible_moves(const std::array<int, 13> &player_hand,

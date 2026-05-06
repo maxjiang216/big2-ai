@@ -166,3 +166,30 @@ The wall-clock gain (16.6%) is larger than the instruction-count drop (6.7%) bec
 **Strength check:** 65.8% vs greedy at seed 100 — unchanged within noise.
 
 **New hot spot — `find_forced_win` (`opponent_can_respond(arr, arr)`):** Now 17.08% / 177M Ir, the single largest cost. Each call rebuilds opp's HandBits from scratch via the array overload. Switching `find_forced_win` (in `src/core/util.cpp`) and `forced_search_recursive` (in `forced_search.cpp`) to compute opp_bits once per call site and use `opponent_can_respond(int, HandBits, int)` would target this directly.
+
+---
+
+## Optimization 3 — Hoist opp_bits in find_forced_win and forced_search
+
+**Insight:** During the forced-win recursion the opponent's possible-card upper bound is invariant. Each forced move moves cards from `hand` to `discard`, and `opp_max[r] = max_in_deck[r] − hand[r] − discard[r]` is algebraically conserved. `opp_count` is also invariant (opp passes each turn). So `opp_bits` can be built once at the top of the recursion and reused.
+
+**Change:** Refactored `find_forced_win` in `src/core/util.cpp` to build `opp_bits` once and pass via a `ForcedWinCtx` to a private `find_forced_win_inner`. The inner function uses the HandBits overload of `opponent_can_respond` and no longer needs `discard`. Same refactor in `src/players/typed_search/forced_search.cpp::forced_search_recursive` (it still tracks `discard` for eval_table queries at intermediate nodes, but unbeatability checks use the precomputed `opp_bits`).
+
+**Aborted intermediate variant:** First tried precomputing the full `unbeatable[mid]` boolean array (468 entries) at each `forced_search_value` entry. That was a 3.5× regression — the 468-call precompute was too eager when most invocations only check ~30 moves at ~5 recursion levels. Reverted to lazy per-need bitmask checks.
+
+**Files:** `src/core/util.cpp`, `src/players/typed_search/forced_search.cpp`.
+
+**Profile (callgrind, 10 games):**
+
+| Metric | After opt 2 | After opt 3 | Δ vs opt 2 | Δ vs baseline |
+|---|---|---|---|---|
+| Total instructions | 1,038M | 796M | **−23.3%** | **−31.8%** |
+| `opponent_can_respond(arr, arr)` | 17.08% / 177M | absent from top 20 | gone | gone |
+| `opponent_can_respond(HandBits, int)` | 3.83% | 4.55% (relative grew; absolute ~36M, similar) | — | — |
+| `visit_opp` (self) | 7.33% | 9.41% (relative grew) | — | — |
+
+**Wall clock (1 thread, 1000 games):** 103.8 g/s → **141.1 g/s** (+36% from opt 2; **+86% cumulative from baseline 75.8 g/s**).
+
+**Strength check:** 65.0% vs greedy at seed 100 — unchanged within noise.
+
+**New top hot spot — allocator pressure:** combined malloc/free now ~18% of program total. Per-call vector allocations in `visit_opp` (legal-moves vector, opp_legal, opp_probs, group buckets) and in `compute_legal_moves` are the main contributors. Threadlocal scratch buffers + reservation tuning could halve this.
