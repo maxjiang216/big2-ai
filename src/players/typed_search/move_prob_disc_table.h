@@ -38,17 +38,25 @@ namespace typed_search {
 // for each candidate response m.
 class MoveProbDiscardTable {
 public:
-  static constexpr int kNumMoves = 468;
   static constexpr int kBitmapWidth = 11;
   static constexpr int kBitmapMax = 1 << kBitmapWidth;
   static constexpr int kOppBuckets = 4;
   static constexpr int kOurBuckets = 4;
+  static constexpr int kRanks = 13;
+  static constexpr int kAuxRanks = 14;
 
-  // counts[y]: # of times opp played y when y was deduced-feasible.
-  // trials[y]: # of times y was deduced-feasible (whether played or not).
+  // Same factored layout as MoveProbTable::Entry.
   struct Entry {
-    std::array<float, kNumMoves> counts{};
-    std::array<float, kNumMoves> trials{};
+    float pass_count = 0.0f;
+    float pass_trial = 0.0f;
+    std::array<float, kRanks> main_count{};
+    std::array<float, kRanks> main_trial{};
+    std::array<float, kRanks> bomb_rank_count{};
+    std::array<float, kRanks> bomb_rank_trial{};
+    std::array<float, kAuxRanks> bomb_aux_count{};
+    std::array<float, kAuxRanks> bomb_aux_trial{};
+    std::array<float, kRanks> fh_aux_count{};
+    std::array<float, kRanks> fh_aux_trial{};
   };
 
   static bool is_eligible(int move_id);

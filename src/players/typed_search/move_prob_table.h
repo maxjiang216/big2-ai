@@ -23,28 +23,69 @@ struct MoveProbQueryStats {
   }
 };
 
+// Per-component shrunken values returned by query_components(). Used by the
+// query path and by higher tiers as their prior.
+struct MoveProbComponents {
+  static constexpr int kRanks = 13;
+  static constexpr int kAuxRanks = 14;
+  float pass = 0.5f;
+  std::array<float, kRanks> main_rank;
+  std::array<float, kRanks> bomb_rank;
+  std::array<float, kAuxRanks> bomb_aux;
+  std::array<float, kRanks> fh_aux;
+  MoveProbComponents() {
+    main_rank.fill(0.5f);
+    bomb_rank.fill(0.5f);
+    bomb_aux.fill(0.5f);
+    fh_aux.fill(0.5f);
+  }
+};
+
+// Compute the un-normalized weight of a candidate response `y` from a set of
+// per-component shrunken values, for a given player_move combination type.
+// The caller normalizes weights across the candidate set.
+float move_prob_weight_of(int response_id, int player_move,
+                            const MoveProbComponents &cv);
+
 // Tabular distribution over opponent's response moves, conditioned on:
 //   key = (player_move_id, opp_count, our_hand_size_bucket)  [main table]
 //   key = (player_move_id)                                    [fallback table]
 //
 // our_hand_size_bucket: 0 = [1-4], 1 = [5-7], 2 = [8-11], 3 = [12-16].
 //
-// Storage: counts[468] per visited state. Decay = scale all counts by alpha.
-// Query returns a normalized distribution over a caller-supplied list of
-// candidate response move IDs (legal_moves), with uniform fallback when
-// nothing has been observed.
+// Storage: factored representation. Each cell stores per-component count and
+// trial pairs. A response y decomposes into:
+//   - PASS                     -> pass component
+//   - same-type higher (main)  -> main_rank[rank_idx]
+//   - bomb                     -> bomb_rank[rank_idx] AND bomb_aux[aux_idx]
+//   - full-house (only when player_move is FH) -> main_rank[triple] AND
+//                                                  fh_aux[pair_idx]
+// Probability of y is the product of its component-wise shrunken values
+// (kappa * prior + count) / (kappa + trial), then normalized over the
+// caller-supplied legal candidate set. The independence assumption between
+// rank and aux gives ~9x storage savings vs. dense [468] vectors with no
+// meaningful loss in precision.
 class MoveProbTable {
 public:
   static constexpr int kNumMoves = 468;
   static constexpr int kOurBuckets = 4;
+  static constexpr int kRanks = 13;       // rank face indexes 0..12 (3..2)
+  static constexpr int kAuxRanks = 14;    // 0=bare, 1..13 = rank_idx+1 for bombs
 
-  // Per-cell, per-response stats. counts[y] = # times opp played y when y was
-  // a deduced-feasible response. trials[y] = # times y was deduced-feasible
-  // (whether or not opp picked it). The estimator P(y | y feasible) is then
-  // shrunken Bayesian: (kappa * prior + counts[y]) / (kappa + trials[y]).
+  // Factored per-cell stats. count[c] = # times opp played a response that
+  // contributed to component c. trial[c] = # times any feasible response
+  // contributed to component c.
   struct Entry {
-    std::array<float, kNumMoves> counts{};
-    std::array<float, kNumMoves> trials{};
+    float pass_count = 0.0f;
+    float pass_trial = 0.0f;
+    std::array<float, kRanks> main_count{};
+    std::array<float, kRanks> main_trial{};
+    std::array<float, kRanks> bomb_rank_count{};
+    std::array<float, kRanks> bomb_rank_trial{};
+    std::array<float, kAuxRanks> bomb_aux_count{};
+    std::array<float, kAuxRanks> bomb_aux_trial{};
+    std::array<float, kRanks> fh_aux_count{};
+    std::array<float, kRanks> fh_aux_trial{};
   };
 
   MoveProbTable() = default;
@@ -64,6 +105,12 @@ public:
   void query(int player_move, int opp_count, int our_hand_size_bucket,
              const std::vector<int> &legal_moves,
              std::vector<float> &out_probs) const;
+
+  // Returns per-component shrunken values at this tier (chained through the
+  // fallback if any). Higher-tier callers (mp_disc) use this as their prior.
+  MoveProbComponents query_components(int player_move, int opp_count,
+                                        int our_hand_size_bucket,
+                                        float kappa = 20.0f) const;
 
   MoveProbQueryStats &stats() const { return stats_; }
 

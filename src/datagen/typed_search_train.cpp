@@ -116,14 +116,26 @@ struct EvalDelta {
 };
 
 struct MpDelta {
-  // Each cell stores per-response counts and trials.
+  // Per-thread accumulator. Each cell stores the same factored components as
+  // the global table's Entry but as deltas.
   struct Cell {
-    std::array<float, 468> counts{};
-    std::array<float, 468> trials{};
+    std::vector<int> feasible;          // dedup-sorted list of feasible moves seen
+    std::vector<int> played_responses;  // each += 1 weight to its components
+    float weight = 1.0f;
   };
-  std::unordered_map<std::uint32_t, Cell> main_;
-  std::unordered_map<std::uint32_t, Cell> fb_;
-  std::unordered_map<std::uint32_t, Cell> disc_;
+  // Simpler: store the full played + feasible per (key, observation); we
+  // accumulate by re-applying add_observation at merge time. Per-thread we
+  // store a flat list of (key, played, feasible, weight) tuples.
+  struct Obs {
+    std::uint32_t key;
+    int played;
+    std::vector<int> feasible;
+  };
+  std::vector<Obs> main_obs;
+  std::vector<Obs> fb_obs;
+  std::vector<Obs> disc_obs;
+  // Pack (player_move, opp_count, our_b) into a single key for main, since we
+  // only need it to dedup observations; we re-derive (pm, oc, ob) at merge.
   static std::uint32_t main_key(int pm, int oc, int ob) {
     return ((static_cast<std::uint32_t>(pm) * 17u +
               static_cast<std::uint32_t>(oc)) *
@@ -143,27 +155,18 @@ struct MpDelta {
             static_cast<std::uint32_t>(rel);
   }
   void add(int pm, int oc, int ob, const std::vector<int> &feasible,
-            int played, float w) {
-    auto &cm = main_[main_key(pm, oc, ob)];
-    auto &cf = fb_[fb_key(pm)];
-    for (int y : feasible) {
-      if (y >= 0 && y < 468) {
-        cm.trials[y] += w;
-        cf.trials[y] += w;
-      }
-    }
-    if (played >= 0 && played < 468) {
-      cm.counts[played] += w;
-      cf.counts[played] += w;
-    }
+            int played) {
+    Obs o; o.played = played; o.feasible = feasible;
+    o.key = main_key(pm, oc, ob);
+    main_obs.push_back(o);
+    o.key = fb_key(pm);
+    fb_obs.push_back(o);
   }
   void add_disc(int pm, int opp_b, int our_b, std::uint16_t rel,
-                 const std::vector<int> &feasible, int played, float w) {
-    auto &cd = disc_[disc_key(pm, opp_b, our_b, rel)];
-    for (int y : feasible) {
-      if (y >= 0 && y < 468) cd.trials[y] += w;
-    }
-    if (played >= 0 && played < 468) cd.counts[played] += w;
+                 const std::vector<int> &feasible, int played) {
+    Obs o; o.played = played; o.feasible = feasible;
+    o.key = disc_key(pm, opp_b, our_b, rel);
+    disc_obs.push_back(o);
   }
 };
 
@@ -233,7 +236,7 @@ void process_game(const GameRecord &rec, int winner_seat, EvalDelta &eval_delta,
         }
         if (can) feasible.push_back(mid);
       }
-      mp_delta.add(player_move, opp_count, our_b, feasible, response, 1.0f);
+      mp_delta.add(player_move, opp_count, our_b, feasible, response);
 
       // Discard-conditioned observation (eligible moves only).
       if (typed_search::MoveProbDiscardTable::is_eligible(player_move)) {
@@ -243,8 +246,7 @@ void process_game(const GameRecord &rec, int winner_seat, EvalDelta &eval_delta,
         std::uint16_t rel =
             typed_search::MoveProbDiscardTable::mask_relevant(player_move, bm);
         int opp_b = typed_search::MoveProbDiscardTable::opp_bucket(opp_count);
-        mp_delta.add_disc(player_move, opp_b, our_b, rel, feasible, response,
-                           1.0f);
+        mp_delta.add_disc(player_move, opp_b, our_b, rel, feasible, response);
       }
     }
   }
@@ -278,74 +280,35 @@ void merge_deltas(typed_search::EvalTable &ext_e,
       fb_e.add_observation(kv.first, winner, vc);
     }
   }
-  // Helper: directly add a delta cell into a global table entry. We bypass
-  // the public add_observation API since we already have aggregated
-  // counts/trials and don't want to re-derive a feasible_set per response.
+  // Merge per-thread observations. Each Obs replays the original training
+  // step into the global tables — same semantics as observing in real time
+  // but batched.
+  static const int opp_lo[4] = {1, 5, 8, 12};
   for (const auto &md : mds) {
-    for (const auto &kv : md.main_) {
-      std::uint32_t k = kv.first;
+    for (const auto &o : md.main_obs) {
+      std::uint32_t k = o.key;
       int ob = static_cast<int>(k % 4u);
       k /= 4u;
       int oc = static_cast<int>(k % 17u);
       int pm = static_cast<int>(k / 17u);
-      const auto &cell = kv.second;
-      // We feed counts/trials to add_observation by passing each non-zero
-      // (response, count) as a played-with-itself-feasible record, then
-      // separately top up trials for non-played-but-feasible responses.
-      // Simplest: collect a single feasible_set and a single weight per cell?
-      // No — counts and trials may differ per y. Build per-response calls.
-      for (int m = 0; m < 468; ++m) {
-        float c = cell.counts[m];
-        if (c > 0.0f) {
-          main_m.add_observation(pm, oc, ob, /*feasible=*/{m}, m, c);
-        }
-        float t_extra = cell.trials[m] - cell.counts[m];
-        if (t_extra > 0.0f) {
-          main_m.add_observation(pm, oc, ob, /*feasible=*/{m}, /*played=*/-1,
-                                  t_extra);
-        }
-      }
+      main_m.add_observation(pm, oc, ob, o.feasible, o.played, 1.0f);
     }
-    for (const auto &kv : md.fb_) {
-      int pm = static_cast<int>(kv.first);
-      const auto &cell = kv.second;
-      for (int m = 0; m < 468; ++m) {
-        float c = cell.counts[m];
-        if (c > 0.0f) {
-          fb_m.add_observation(pm, 0, 0, /*feasible=*/{m}, m, c);
-        }
-        float t_extra = cell.trials[m] - cell.counts[m];
-        if (t_extra > 0.0f) {
-          fb_m.add_observation(pm, 0, 0, /*feasible=*/{m}, -1, t_extra);
-        }
-      }
+    for (const auto &o : md.fb_obs) {
+      int pm = static_cast<int>(o.key);
+      fb_m.add_observation(pm, /*opp=*/0, /*our_b=*/0, o.feasible, o.played,
+                            1.0f);
     }
-    for (const auto &kv : md.disc_) {
-      std::uint32_t k = kv.first;
+    for (const auto &o : md.disc_obs) {
+      std::uint32_t k = o.key;
       std::uint16_t rel = static_cast<std::uint16_t>(k & 0x7FFu);
       k >>= 11;
       int our_b = static_cast<int>(k % 4u);
       k /= 4u;
       int opp_b = static_cast<int>(k % 4u);
       int pm = static_cast<int>(k / 4u);
-      // The disc table's add_observation expects raw opp_count (it buckets
-      // internally). Pick a representative opp_count in the bucket — any
-      // value in the bucket lands the same key, so use the lower bound.
-      static const int opp_lo[4] = {1, 5, 8, 12};
       int oc_repr = opp_lo[opp_b];
-      const auto &cell = kv.second;
-      for (int m = 0; m < 468; ++m) {
-        float c = cell.counts[m];
-        if (c > 0.0f) {
-          disc_m.add_observation(pm, oc_repr, our_b, rel, /*feasible=*/{m}, m,
-                                   c);
-        }
-        float t_extra = cell.trials[m] - cell.counts[m];
-        if (t_extra > 0.0f) {
-          disc_m.add_observation(pm, oc_repr, our_b, rel, /*feasible=*/{m}, -1,
-                                   t_extra);
-        }
-      }
+      disc_m.add_observation(pm, oc_repr, our_b, rel, o.feasible, o.played,
+                              1.0f);
     }
   }
 }
