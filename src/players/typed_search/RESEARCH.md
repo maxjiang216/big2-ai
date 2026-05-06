@@ -250,3 +250,98 @@ By hand size (initiative-only): monotone — hand=1 → 17 nodes, hand=16 → 86
 By opp size (initiative-only): also monotone — opp=1 → 1 node, opp=16 → 720.
 
 **Implication for budget tuning.** Most search cost is concentrated at full-hand opening + mid-game initiative leads. If we ever want to bound per-move cost, capping the initiative-lead branching (e.g., greedy pre-pruning of clearly-dominated lead options) would buy more than capping responses.
+
+---
+
+## Bayesian shrinkage + dominance prune (gen-4 inspection follow-up)
+
+User-reported anomaly. At gen-4 game 0 turn 2, the search ranked candidates for an A-bomb by the auxiliary kicker:
+
+```
+hand = [5,5,5,8,9,0,0,K,A,A,A]   (3 fives, 8, 9, two 10s, K, three As)
+opp = 11   last move = 77700 (full house)
+
+  1. AAAK   v=0.663
+  2. AAA0   v=0.445  (single 10 aux — not loose; breaks the pair of 10s)
+  3. AAA00  v=0.445  (pair of 10s aux — loose)
+  4. AAA5   v=0.443  (single 5 aux — not loose; breaks the triple of 5s)
+  5. AAA8   v=0.434
+  6. AAA9   v=0.434
+  7. AAA55  v=0.405
+```
+
+Counterintuitive: keeping the K (`AAA8` or `AAA9`) should *dominate* discarding it (`AAAK`) — playing the higher loose single only loses optionality. The `eval_inspect` probe showed:
+
+| Move | main visits | main wp | fb visits | fb wp |
+|---|---|---|---|---|
+| AAAK | 34 | 0.663 | 91 | 0.338 |
+| AAA8/9 | 11 | 0.434 | 735 | 0.707 |
+| AAA0/00 | 73 | 0.445 | 456 | 0.359 |
+
+`AAAK`'s main entry has only 34 observations, `AAA8/9`'s only 11; both are noisy. The fallback table — coarser features but ~10× more data per entry — points the *opposite* way: `AAAK` is worse than `AAA8/9`. With the original hard threshold (`visit_count ≥ 5` → use main), the noisy main entry shadowed the well-supported fallback.
+
+### Two fixes layered together
+
+**(1) Bayesian shrinkage in `EvalTable::query`.** Replaced the hard threshold with a Beta-Binomial posterior mean:
+
+```
+value = (κ · fb_prior + main_total_wins) / (κ + main_visit_count)
+```
+
+- `fb_prior` = fallback's `total_wins / visit_count` (when `fb_visits ≥ fb_min_visits`, default 5; otherwise `default_value` 0.5).
+- κ = effective prior weight in equivalent visits (default 20).
+- Smooth crossover: at `main_visits ≈ κ`, blend is 50/50; at `main_visits = 5κ`, ~83% main.
+
+User's example, after shrinkage with κ=20:
+
+| Move | raw main | shrunken |
+|---|---|---|
+| AAAK | 0.663 | **0.543** |
+| AAA8/9 | 0.434 | **0.609** |
+| AAA0/00 | 0.445 | 0.427 |
+| AAA5 | 0.443 | 0.426 |
+| AAA55 | 0.405 | 0.400 |
+
+Ranking flips: `AAA8/9` overtakes `AAAK`, matching the dominance argument.
+
+**(2) Dominance prune in `visit_our`.** Strict-domination prune of the legal-move set before recursion. Two complementary rules:
+
+- **Single-move dominance.** A `Single` move at rank X is "loose" iff `hand[X] == 1` *and* removing X doesn't change the set of straight / DS / TS moves available (checked by re-running `straight_moves_for_pass_masks_into` on the modified bitmasks). Among loose-single moves in the legal set, the smallest-rank wins; larger ones are dominated and dropped.
+- **Aux dominance for bombs / full houses.**
+  - For each bomb at rank R, an aux X (single-card with `cost[X] == 1`) is "loose" iff in the post-bomb-base hand `count[X] == 1` and X not in any straight. The smallest loose-single aux per bomb_rank wins; larger loose-single auxes dropped.
+  - Pair auxes (only ace bomb has these, plus all full houses) are "loose" iff `count == 2` post-base and the rank is not in any straight / DS / TS. Smallest loose-pair aux wins per `(bomb_rank | triple_rank)`.
+- **Not pruned**: bare bombs (no aux), non-loose auxes (where the dominance argument doesn't extend without more analysis).
+
+Both rules are applied at *every* `visit_our` call, not just at the root, so the dominance propagates through the search tree.
+
+Why both fixes together:
+
+- Dominance prune removes the "obviously dominated" moves before the table even sees them — so `AAAK` no longer shows up at all when `AAA8` is loose-and-smaller-rank. The table doesn't need to learn this.
+- Shrinkage handles the residual noise where dominance doesn't apply (the bulk of states), keeping the well-evidenced fallback in charge until main accumulates enough data.
+
+### Effects (gen-4 tables, no retraining)
+
+Strength (paired-deal eval, `--p0 typed_search --p0-param 4`):
+
+| Match | gen-4 raw | gen-4 + shrinkage + dominance | Δ |
+|---|---|---|---|
+| vs random (1000 deals) | 92.3% | **93.3%** | +1.0 pp |
+| vs greedy (1000 deals) | 66.8% | **71.3%** | +4.5 pp |
+| vs pimc(20) (200 deals) | 55.0% | **58.5%** | +3.5 pp |
+
+Throughput (1 thread, 1000 games, gen-4 tables):
+
+| | g/s | per-game wall |
+|---|---|---|
+| Before | 141 | 7.10 ms |
+| After | **205** | 4.88 ms |
+
+The +45% throughput is the main surprise: I'd expected a small slowdown from the extra check + the shrinkage-side double-lookup, but the dominance prune drops a meaningful fraction of legal moves at most decision points, which removes recursive `visit_opp` calls that would otherwise inflate the search tree.
+
+### Risks / caveats
+
+- The dominance argument assumes "remove a loose card → keep a strictly more capable hand." The check uses straight-set equivalence as the loose-test, which is sufficient but not necessary — there are positions where breaking a straight you'd never want to play *would* still be safe. Conservative: we under-prune, never over-prune.
+- Shrinkage with a poorly-calibrated prior (e.g., a coarse fallback whose buckets average over very different positions) can drag well-evidenced main entries toward a worse value. With κ=20 and `main_visits >> 20` the prior gets out-weighted quickly; this should self-correct as gens accrue.
+- κ is hand-tuned; unclear whether 20 is optimal across all states. Could be made adaptive (e.g., scale with fallback's own visit count) in a follow-up.
+
+The strength gains carry forward without retraining, but **a fresh multi-gen run is likely to compound the wins** — generations 1+ will accrue main-table data faster on the *correct* states (no longer wasting visits on dominated moves), and shrinkage means smaller per-state samples translate to usable signal sooner.
