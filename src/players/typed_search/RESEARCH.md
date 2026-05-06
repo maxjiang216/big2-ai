@@ -436,3 +436,60 @@ vs the old gen-4 the head-to-head is statistically tied even after removing spli
 - κ is hand-tuned; unclear whether 20 is optimal across all states. Could be made adaptive (e.g., scale with fallback's own visit count) in a follow-up.
 
 The strength gains carry forward without retraining, but **a fresh multi-gen run is likely to compound the wins** — generations 1+ will accrue main-table data faster on the *correct* states (no longer wasting visits on dominated moves), and shrinkage means smaller per-state samples translate to usable signal sooner.
+
+---
+
+## Bigger training: 6 generations × 200k games
+
+To check whether the marginal pimc(20) gains from leaf extension surface with more data, retrained 6 generations × 200k games each (1.2M typed_search self-play games total) with all current code (corrected pruning + Bayesian shrinkage + leaf extension).
+
+Per-gen results (1000-deal pimc(20) eval for tighter CIs):
+
+| Gen | vs random | vs greedy | vs pimc(20) | vs prev gen |
+|---|---|---|---|---|
+| 0 | 92.05% | 64.25% | 47.20% | — |
+| 1 | 92.25% | 69.15% | 55.80% | 49.70% |
+| 2 | 93.70% | 71.30% | 56.40% | 53.20% |
+| 3 | **93.95%** | 70.55% | **61.70%** | 50.75% |
+| 4 | 91.50% | 70.70% | 60.70% | 50.10% |
+| 5 | 92.95% | 71.55% | 59.80% | 49.65% |
+| 6 | 93.70% | **71.65%** | 59.90% | 50.10% |
+
+Saturation confirmed at gen 3-4. Cross-gen head-to-heads inside this run:
+- gen-6 vs gen-4: 50.45% [48.26, 52.64], 80% splits — tied
+- gen-6 vs gen-3: 50.05% [47.86, 52.24], 78% splits — tied
+- gen-6 vs gen-3 decisive: 50.22% [43.71, 56.73] — tied even on decisive
+
+So gens 3-6 are statistically indistinguishable from each other; more gens past 4 don't help.
+
+Cross-run: 6×200k gen-6 vs the prior 4×50k+extension gen-4:
+- Overall: 51.60% [49.41, 53.79] — barely tied
+- Decisive: 56.78% [50.40, 62.94] — CI just excludes 50%
+
+So bigger training delivers a small but detectable improvement on decisive deals. ~76% of deals are still split — most positions play the same.
+
+Table coverage at gen 6 (post-merge, ~6.7M total visits):
+
+| Metric | 4×50k gen-4 | 6×200k gen-6 | Δ |
+|---|---|---|---|
+| eval_main coverage | 13.5% | 17.4% | +28% |
+| Entries ≥5 visits | 29,212 | 48,727 | +67% |
+| Entries ≥20 visits | 14,621 | 30,768 | +110% |
+| **Entries ≥100 visits** | **3,439** | **11,567** | **+236%** |
+| eval_fb coverage | 44.2% | 50.5% | +14% |
+| Default-query rate | 0.70% | 0.23% | −3.0× |
+
+The biggest gain from longer training is the well-saturated tail — **3.4× more entries have ≥100 visits**, so the table is noticeably less noisy on the rare-state tail. The default-fallback rate drops from ~0.7% to ~0.2%.
+
+**Best vs pimc(20) across all runs:**
+
+| Run | Best gen | Best % vs pimc(20) | Sample size |
+|---|---|---|---|
+| 4×50k pre-dom-fix | gen-4 | 55.0% | 200 deals |
+| 4×50k corrected pruning | gen-4 | 57.0% | 200 deals |
+| 4×50k + leaf extension | gen-4 | 57.95% [55.77, 60.10] | 1000 deals |
+| **6×200k + leaf extension** | **gen-3** | **61.70%** | 1000 deals |
+
+Cumulative improvement from the chain (corrected pruning + Bayesian shrinkage + leaf extension + bigger training): **+6.7 pp vs pimc(20)** — from 55.0% to 61.7%.
+
+**Production model recommendation:** gen-3 or gen-4 of the 6×200k run (`data/typed_search_v3` or `_v4`). Both saturated and statistically equivalent; gen-3 has the highest pimc result, gen-4 the highest greedy. Pick either.
