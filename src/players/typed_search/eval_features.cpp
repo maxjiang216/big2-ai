@@ -245,6 +245,82 @@ uint32_t main_state_id(const LeafContext &ctx) {
   return s;
 }
 
+uint32_t extended_state_id(const LeafContext &ctx) {
+  const auto &h = ctx.player_hand;
+  const int our_total = hand_total(h);
+
+  const int init = ctx.initiative ? 1 : 0;
+  const int opp_b = size_bucket(ctx.opp_count);
+  const int our_b = size_bucket(our_total);
+  const int hb = has_bomb(h) ? 1 : 0;
+  const int st = straight_tier(h);
+  const int ds = double_triple_straight_tier(h);
+
+  GuaranteedLargestThresholds gl =
+      compute_r_star(h, ctx.discard_pile, ctx.opp_count);
+
+  // Singles bucketing (same regions as main; promotion logic identical).
+  int singles_small = 0;   // ranks 0..4 (3-7), excluding promoted
+  int singles_medium = 0;  // ranks 5..7 (8-10)
+  int singles_large = 0;   // ranks 8..10 (J-K)
+  int singles_top = 0;     // ranks 11..12 (A-2) ∪ promoted
+  for (int r = 0; r < 13; ++r) {
+    if (h[r] != 1) continue;
+    const bool promote = (r >= 11) || (r > gl.r_star[1]);
+    if (promote) ++singles_top;
+    else if (r <= 4) ++singles_small;
+    else if (r <= 7) ++singles_medium;
+    else ++singles_large;
+  }
+
+  // Doubles bucketing — REFINED boundary: medium = 8-J (idx 5..8),
+  // large = Q-A (idx 9..11) ∪ promoted.
+  int doubles_small = 0, doubles_medium = 0, doubles_large = 0;
+  for (int r = 0; r < 12; ++r) {
+    if (h[r] != 2) continue;
+    const bool promote = (r >= 9) || (r > gl.r_star[2]);
+    if (promote) ++doubles_large;
+    else if (r <= 4) ++doubles_small;
+    else ++doubles_medium;  // r in 5..8
+  }
+
+  // Triples bucketing — same as main.
+  int triples_small = 0, triples_large = 0;
+  for (int r = 0; r < 11; ++r) {
+    if (h[r] != 3) continue;
+    const bool promote = (r >= 6) || (r > gl.r_star[3]);
+    if (promote) ++triples_large;
+    else ++triples_small;
+  }
+
+  // Bucket counts: singles_small now 0/1/2/3+, all others 0/1/2+.
+  auto b3 = [](int n) { return n <= 0 ? 0 : (n == 1 ? 1 : 2); };
+  auto b4 = [](int n) {
+    if (n <= 0) return 0;
+    if (n == 1) return 1;
+    if (n == 2) return 2;
+    return 3;
+  };
+
+  uint32_t s = 0;
+  s = s * 2 + init;
+  s = s * 4 + opp_b;
+  s = s * 4 + our_b;
+  s = s * 2 + hb;
+  s = s * 3 + st;
+  s = s * 3 + ds;
+  s = s * 4 + b4(singles_small);
+  s = s * 3 + b3(singles_medium);
+  s = s * 3 + b3(singles_large);
+  s = s * 3 + b3(singles_top);
+  s = s * 3 + b3(doubles_small);
+  s = s * 3 + b3(doubles_medium);
+  s = s * 3 + b3(doubles_large);
+  s = s * 3 + b3(triples_small);
+  s = s * 3 + b3(triples_large);
+  return s;
+}
+
 uint32_t fallback_state_id(const LeafContext &ctx) {
   const auto &h = ctx.player_hand;
   const int our_total = hand_total(h);

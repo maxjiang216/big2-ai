@@ -91,6 +91,18 @@ float EvalTable::query(uint32_t state_id, uint32_t fb_state_id, float kappa,
   return blended;
 }
 
+EvalTable::LookupResult EvalTable::lookup(uint32_t state_id) const {
+  auto it = entries_.find(state_id);
+  if (it == entries_.end()) return {};
+  LookupResult r;
+  r.found = true;
+  r.visit_count = it->second.visit_count;
+  r.win_prob = (r.visit_count > 0)
+                   ? it->second.total_wins / r.visit_count
+                   : 0.0f;
+  return r;
+}
+
 void EvalTable::add_observation(uint32_t state_id, float winner, float weight) {
   Entry &e = entries_[state_id];
   e.total_wins += winner * weight;

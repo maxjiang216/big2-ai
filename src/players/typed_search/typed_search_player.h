@@ -11,8 +11,14 @@
 
 namespace typed_search {
 
-// Bundles the four tables and shares them across player instances.
+// Bundles the tables and shares them across player instances.
+//
+// 3-tier eval chain: extended (~15M states, finest) -> main (442k) ->
+// fallback (9k). At search time we shrink: ext shrinks toward main's
+// blended value; main shrinks toward fb's value; fb falls back to a
+// default 0.5 prior when its entry is missing.
 struct TypedSearchTables {
+  EvalTable eval_extended;
   EvalTable eval_main;
   EvalTable eval_fallback;
   MoveProbTable mp_main;
@@ -21,7 +27,9 @@ struct TypedSearchTables {
   TypedSearchTables() {
     mp_main.set_ignore_opp_count(false);
     mp_fallback.set_ignore_opp_count(true);
+    // 2-tier fb pointer chain still set up for the legacy 2-tier query path.
     eval_main.set_fallback(&eval_fallback);
+    eval_extended.set_fallback(&eval_main);
     mp_main.set_fallback(&mp_fallback);
   }
 };

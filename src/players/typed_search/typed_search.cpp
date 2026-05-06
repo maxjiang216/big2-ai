@@ -322,10 +322,44 @@ PruneStatsSnapshot snapshot_prune_stats_thread_local() {
 }
 void reset_prune_stats_thread_local() { g_prune_stats = {}; }
 
-TypedSearch::TypedSearch(const EvalTable &eval_table,
+TypedSearch::TypedSearch(const EvalTable &eval_extended,
+                          const EvalTable &eval_main,
+                          const EvalTable &eval_fallback,
                           const MoveProbTable &mp_table,
                           std::uint64_t rng_seed)
-    : eval_table_(eval_table), mp_table_(mp_table), rng_(rng_seed) {}
+    : eval_extended_(eval_extended), eval_main_(eval_main),
+      eval_fallback_(eval_fallback), mp_table_(mp_table), rng_(rng_seed) {}
+
+namespace {
+constexpr float kShrinkKappa = 20.0f;
+constexpr float kFbMinVisits = 5.0f;
+constexpr float kDefaultPrior = 0.5f;
+}  // namespace
+
+// 3-tier shrinkage: returns ext shrunk toward (main shrunk toward fb shrunk
+// toward default). Each tier's contribution scales with its own visit count.
+static float chained_eval(const EvalTable &ext, const EvalTable &main_t,
+                           const EvalTable &fb, uint32_t ext_id,
+                           uint32_t main_id, uint32_t fb_id) {
+  // Tier 3: fallback. Use as prior only if it has enough data.
+  auto fb_r = fb.lookup(fb_id);
+  float fb_value = (fb_r.found && fb_r.visit_count >= kFbMinVisits)
+                       ? fb_r.win_prob
+                       : kDefaultPrior;
+  // Tier 2: main. Shrink toward fb_value.
+  auto main_r = main_t.lookup(main_id);
+  float main_value = main_r.found
+                         ? EvalTable::shrink(fb_value, main_r.win_prob,
+                                              main_r.visit_count, kShrinkKappa)
+                         : fb_value;
+  // Tier 1: extended. Shrink toward main_value.
+  auto ext_r = ext.lookup(ext_id);
+  float ext_value = ext_r.found
+                        ? EvalTable::shrink(main_value, ext_r.win_prob,
+                                             ext_r.visit_count, kShrinkKappa)
+                        : main_value;
+  return ext_value;
+}
 
 std::uint64_t TypedSearch::make_key(const std::array<int, 13> &hand,
                                      int opp_count,
@@ -345,9 +379,10 @@ float TypedSearch::eval_leaf_we_passed(const std::array<int, 13> &hand,
   LeafContext ctx{hand, discard, opp_count, /*initiative=*/1};
   auto imp = impute_terminal(ctx);
   if (imp.has_value) return imp.value;
+  uint32_t eid = extended_state_id(ctx);
   uint32_t mid = main_state_id(ctx);
   uint32_t fid = fallback_state_id(ctx);
-  return eval_table_.query(mid, fid);
+  return chained_eval(eval_extended_, eval_main_, eval_fallback_, eid, mid, fid);
 }
 
 float TypedSearch::eval_leaf_we_have_init(const std::array<int, 13> &hand,
@@ -383,7 +418,8 @@ float TypedSearch::eval_leaf_we_have_init(const std::array<int, 13> &hand,
       return it->second.computed ? it->second.value : visit_our(it->second);
     }
   }
-  return forced_search_value(hand, discard, opp_count, eval_table_);
+  return forced_search_value(hand, discard, opp_count, eval_extended_,
+                              eval_main_, eval_fallback_);
 }
 
 float TypedSearch::visit_our(OurNode &n) {

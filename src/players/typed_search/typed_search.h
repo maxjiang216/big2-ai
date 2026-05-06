@@ -30,8 +30,10 @@ void reset_prune_stats_thread_local();
 // Stateless w.r.t. prior calls — caller can persist via separate caching.
 class TypedSearch {
 public:
-  TypedSearch(const EvalTable &eval_table, const MoveProbTable &mp_table,
-              std::uint64_t rng_seed);
+  // 3-tier eval chain (ext shrinks toward main shrinks toward fb).
+  TypedSearch(const EvalTable &eval_extended, const EvalTable &eval_main,
+              const EvalTable &eval_fallback,
+              const MoveProbTable &mp_table, std::uint64_t rng_seed);
 
   struct Result {
     int move_id{-1};
@@ -81,7 +83,9 @@ private:
                                 const std::array<int, 13> &discard,
                                 int opp_count);
 
-  const EvalTable &eval_table_;
+  const EvalTable &eval_extended_;
+  const EvalTable &eval_main_;
+  const EvalTable &eval_fallback_;
   const MoveProbTable &mp_table_;
   std::mt19937_64 rng_;
   std::unordered_map<std::uint64_t, OurNode> memo_;

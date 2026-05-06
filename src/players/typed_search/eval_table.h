@@ -57,6 +57,25 @@ public:
               float kappa = 20.0f, float fb_min_visits = 5.0f,
               float default_value = 0.5f) const;
 
+  // Raw lookup — returns whether the entry exists, its win_prob, and its
+  // visit_count. No shrinkage, no fallback. Used by external callers to
+  // build multi-tier shrinkage chains.
+  struct LookupResult {
+    bool found{false};
+    float win_prob{0.0f};
+    float visit_count{0.0f};
+  };
+  LookupResult lookup(uint32_t state_id) const;
+
+  // Apply Beta-Binomial shrinkage with `prior_value` as the prior and
+  // (win_prob, visit_count) as the data. With kappa=20 and visit_count=20,
+  // the result is a 50/50 blend of prior and data.
+  static float shrink(float prior_value, float win_prob, float visit_count,
+                       float kappa) {
+    return (kappa * prior_value + win_prob * visit_count) /
+            (kappa + visit_count);
+  }
+
   EvalQueryStats &stats() const { return stats_; }
 
   // Training updates.

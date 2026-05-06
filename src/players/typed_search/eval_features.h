@@ -9,6 +9,11 @@ namespace typed_search {
 // Total state space sizes (used by tables for sizing / sanity).
 constexpr uint32_t kMainStateCount = 442368u;
 constexpr uint32_t kFallbackStateCount = 9216u;
+// Extended (finer-grained) main: same features as main, but every 0/1+
+// bucket becomes 0/1/2+ and every 0/1/2+ becomes 0/1/2/3+. Plus the
+// doubles_medium / doubles_large boundary moves so that medium=8-J,
+// large=Q-A (was medium=8-10, large=J-A in main).
+constexpr uint32_t kExtendedStateCount = 15116544u;
 
 // Inputs needed to compute eval state at a leaf (just-passed) position.
 // initiative: 0 = we have init (opp passed), 1 = opp has init (we passed).
@@ -32,6 +37,9 @@ uint32_t main_state_id(const LeafContext &ctx);
 
 // Compute fallback eval state ID. Returns uint32_t < kFallbackStateCount.
 uint32_t fallback_state_id(const LeafContext &ctx);
+
+// Compute extended eval state ID (finest tier). < kExtendedStateCount.
+uint32_t extended_state_id(const LeafContext &ctx);
 
 // Helper exposed for testing: compute, for size k in {1,2,3}, the highest
 // rank index where the opponent could still hold ≥ k cards. -1 if none.

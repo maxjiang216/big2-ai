@@ -30,6 +30,7 @@ public:
       : base_seed_(base_seed), dir_(dir),
         tables_(std::make_shared<TypedSearchTables>()) {
     auto t = std::const_pointer_cast<TypedSearchTables>(tables_);
+    t->eval_extended.load(dir_ + "/eval_extended.bin");
     t->eval_main.load(dir_ + "/eval_main.bin");
     t->eval_fallback.load(dir_ + "/eval_fallback.bin");
     t->mp_main.load(dir_ + "/mp_main.bin");

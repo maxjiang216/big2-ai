@@ -94,8 +94,14 @@ Args parse_args(int argc, char *argv[]) {
 
 // Per-thread accumulators (no contention).
 struct EvalDelta {
+  std::unordered_map<uint32_t, typed_search::EvalTable::Entry> ext_;
   std::unordered_map<uint32_t, typed_search::EvalTable::Entry> main_;
   std::unordered_map<uint32_t, typed_search::EvalTable::Entry> fb_;
+  void add_ext(uint32_t sid, float winner, float w) {
+    auto &e = ext_[sid];
+    e.total_wins += winner * w;
+    e.visit_count += w;
+  }
   void add_main(uint32_t sid, float winner, float w) {
     auto &e = main_[sid];
     e.total_wins += winner * w;
@@ -144,8 +150,10 @@ void process_game(const GameRecord &rec, int winner_seat, EvalDelta &eval_delta,
             (p == next.current_player) ? 0 : 1,
         };
         float winner = (p == winner_seat) ? 1.0f : 0.0f;
+        uint32_t eid = typed_search::extended_state_id(ctx);
         uint32_t mid = typed_search::main_state_id(ctx);
         uint32_t fid = typed_search::fallback_state_id(ctx);
+        eval_delta.add_ext(eid, winner, 1.0f);
         eval_delta.add_main(mid, winner, 1.0f);
         eval_delta.add_fb(fid, winner, 1.0f);
       }
@@ -166,12 +174,19 @@ void process_game(const GameRecord &rec, int winner_seat, EvalDelta &eval_delta,
   }
 }
 
-void merge_deltas(typed_search::EvalTable &main_e, typed_search::EvalTable &fb_e,
+void merge_deltas(typed_search::EvalTable &ext_e,
+                   typed_search::EvalTable &main_e,
+                   typed_search::EvalTable &fb_e,
                    typed_search::MoveProbTable &main_m,
                    typed_search::MoveProbTable &fb_m,
                    const std::vector<EvalDelta> &eds,
                    const std::vector<MpDelta> &mds) {
   for (const auto &ed : eds) {
+    for (const auto &kv : ed.ext_) {
+      float vc = kv.second.visit_count;
+      float winner = (vc > 0) ? (kv.second.total_wins / vc) : 0.0f;
+      ext_e.add_observation(kv.first, winner, vc);
+    }
     for (const auto &kv : ed.main_) {
       // add_observation(sid, winner, weight) does:
       //   total_wins += winner * weight; visit_count += weight.
@@ -211,26 +226,30 @@ int main(int argc, char *argv[]) {
   Args args = parse_args(argc, argv);
 
   std::filesystem::create_directories(args.tables_dir);
+  const std::string p_eval_ext = args.tables_dir + "/eval_extended.bin";
   const std::string p_eval_main = args.tables_dir + "/eval_main.bin";
   const std::string p_eval_fb = args.tables_dir + "/eval_fallback.bin";
   const std::string p_mp_main = args.tables_dir + "/mp_main.bin";
   const std::string p_mp_fb = args.tables_dir + "/mp_fallback.bin";
 
   // Load + decay.
-  typed_search::EvalTable eval_main, eval_fb;
+  typed_search::EvalTable eval_ext, eval_main, eval_fb;
   typed_search::MoveProbTable mp_main, mp_fb;
   mp_main.set_ignore_opp_count(false);
   mp_fb.set_ignore_opp_count(true);
+  eval_ext.load(p_eval_ext);
   eval_main.load(p_eval_main);
   eval_fb.load(p_eval_fb);
   mp_main.load(p_mp_main);
   mp_fb.load(p_mp_fb);
 
-  std::cout << "Loaded eval_main=" << eval_main.size()
+  std::cout << "Loaded eval_ext=" << eval_ext.size()
+            << " eval_main=" << eval_main.size()
             << " eval_fb=" << eval_fb.size() << " mp_main=" << mp_main.size()
             << " mp_fb=" << mp_fb.size() << "\n";
 
   if (args.alpha < 1.0f) {
+    eval_ext.decay(args.alpha);
     eval_main.decay(args.alpha);
     eval_fb.decay(args.alpha);
     mp_main.decay(args.alpha);
@@ -251,14 +270,17 @@ int main(int argc, char *argv[]) {
   if (policy == "typed_search") {
     ts_tables = std::make_shared<typed_search::TypedSearchTables>();
     // Copy entries via save/load round-trip (simple, avoids exposing internals).
+    eval_ext.save(p_eval_ext + ".tmp");
     eval_main.save(p_eval_main + ".tmp");
     eval_fb.save(p_eval_fb + ".tmp");
     mp_main.save(p_mp_main + ".tmp");
     mp_fb.save(p_mp_fb + ".tmp");
+    ts_tables->eval_extended.load(p_eval_ext + ".tmp");
     ts_tables->eval_main.load(p_eval_main + ".tmp");
     ts_tables->eval_fallback.load(p_eval_fb + ".tmp");
     ts_tables->mp_main.load(p_mp_main + ".tmp");
     ts_tables->mp_fallback.load(p_mp_fb + ".tmp");
+    std::filesystem::remove(p_eval_ext + ".tmp");
     std::filesystem::remove(p_eval_main + ".tmp");
     std::filesystem::remove(p_eval_fb + ".tmp");
     std::filesystem::remove(p_mp_main + ".tmp");
@@ -344,9 +366,10 @@ int main(int argc, char *argv[]) {
             << (100.0 * p0_wins.load() / args.games) << "%\n";
 
   // Merge deltas into the (already decayed) tables.
-  merge_deltas(eval_main, eval_fb, mp_main, mp_fb, eds, mds);
+  merge_deltas(eval_ext, eval_main, eval_fb, mp_main, mp_fb, eds, mds);
 
-  std::cout << "Post-merge: eval_main=" << eval_main.size()
+  std::cout << "Post-merge: eval_ext=" << eval_ext.size()
+            << " eval_main=" << eval_main.size()
             << " eval_fb=" << eval_fb.size() << " mp_main=" << mp_main.size()
             << " mp_fb=" << mp_fb.size() << "\n";
 
@@ -368,6 +391,7 @@ int main(int argc, char *argv[]) {
               << "≥1=" << b1 << " ≥5=" << b5 << " ≥20=" << b20
               << " ≥100=" << b100 << "; total visits=" << sum_v << "\n";
   };
+  eval_histogram(eval_ext, "  eval_ext ", typed_search::kExtendedStateCount);
   eval_histogram(eval_main, "  eval_main", typed_search::kMainStateCount);
   eval_histogram(eval_fb, "  eval_fb  ", typed_search::kFallbackStateCount);
 
@@ -386,6 +410,7 @@ int main(int argc, char *argv[]) {
   std::cout << "  mp_fb    : " << mp_fb.size() << " / " << 468 << " states ("
             << (100.0 * mp_fb.size() / 468.0) << "%)\n";
 
+  eval_ext.save(p_eval_ext);
   eval_main.save(p_eval_main);
   eval_fb.save(p_eval_fb);
   mp_main.save(p_mp_main);
@@ -396,6 +421,7 @@ int main(int argc, char *argv[]) {
   // turn) and write per-decision stats to a CSV for distribution analysis.
   if (args.sample_games > 0 || !args.stats_csv.empty()) {
     auto sample_tables = std::make_shared<typed_search::TypedSearchTables>();
+    sample_tables->eval_extended.load(p_eval_ext);
     sample_tables->eval_main.load(p_eval_main);
     sample_tables->eval_fallback.load(p_eval_fb);
     sample_tables->mp_main.load(p_mp_main);
