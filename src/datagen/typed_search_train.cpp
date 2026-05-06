@@ -131,11 +131,14 @@ struct MpDelta {
             static_cast<std::uint32_t>(ob);
   }
   static std::uint32_t fb_key(int pm) { return static_cast<std::uint32_t>(pm); }
-  static std::uint32_t disc_key(int pm, int oc, int ob, std::uint16_t rel) {
-    return (((static_cast<std::uint32_t>(pm) * 17u +
-                static_cast<std::uint32_t>(oc)) *
+  // disc key matches MoveProbDiscardTable::make_key — 4 opp buckets, 4 our
+  // buckets, 2048 bitmap.
+  static std::uint32_t disc_key(int pm, int opp_b, int our_b,
+                                  std::uint16_t rel) {
+    return (((static_cast<std::uint32_t>(pm) * 4u +
+                static_cast<std::uint32_t>(opp_b)) *
                 4u +
-              static_cast<std::uint32_t>(ob)) *
+              static_cast<std::uint32_t>(our_b)) *
               2048u) +
             static_cast<std::uint32_t>(rel);
   }
@@ -154,9 +157,9 @@ struct MpDelta {
       cf.counts[played] += w;
     }
   }
-  void add_disc(int pm, int oc, int ob, std::uint16_t rel,
+  void add_disc(int pm, int opp_b, int our_b, std::uint16_t rel,
                  const std::vector<int> &feasible, int played, float w) {
-    auto &cd = disc_[disc_key(pm, oc, ob, rel)];
+    auto &cd = disc_[disc_key(pm, opp_b, our_b, rel)];
     for (int y : feasible) {
       if (y >= 0 && y < 468) cd.trials[y] += w;
     }
@@ -239,8 +242,9 @@ void process_game(const GameRecord &rec, int winner_seat, EvalDelta &eval_delta,
                 hand_after, discard_after, opp_count);
         std::uint16_t rel =
             typed_search::MoveProbDiscardTable::mask_relevant(player_move, bm);
-        mp_delta.add_disc(player_move, opp_count, our_b, rel, feasible,
-                           response, 1.0f);
+        int opp_b = typed_search::MoveProbDiscardTable::opp_bucket(opp_count);
+        mp_delta.add_disc(player_move, opp_b, our_b, rel, feasible, response,
+                           1.0f);
       }
     }
   }
@@ -320,19 +324,26 @@ void merge_deltas(typed_search::EvalTable &ext_e,
       std::uint32_t k = kv.first;
       std::uint16_t rel = static_cast<std::uint16_t>(k & 0x7FFu);
       k >>= 11;
-      int ob = static_cast<int>(k % 4u);
+      int our_b = static_cast<int>(k % 4u);
       k /= 4u;
-      int oc = static_cast<int>(k % 17u);
-      int pm = static_cast<int>(k / 17u);
+      int opp_b = static_cast<int>(k % 4u);
+      int pm = static_cast<int>(k / 4u);
+      // The disc table's add_observation expects raw opp_count (it buckets
+      // internally). Pick a representative opp_count in the bucket — any
+      // value in the bucket lands the same key, so use the lower bound.
+      static const int opp_lo[4] = {1, 5, 8, 12};
+      int oc_repr = opp_lo[opp_b];
       const auto &cell = kv.second;
       for (int m = 0; m < 468; ++m) {
         float c = cell.counts[m];
         if (c > 0.0f) {
-          disc_m.add_observation(pm, oc, ob, rel, /*feasible=*/{m}, m, c);
+          disc_m.add_observation(pm, oc_repr, our_b, rel, /*feasible=*/{m}, m,
+                                   c);
         }
         float t_extra = cell.trials[m] - cell.counts[m];
         if (t_extra > 0.0f) {
-          disc_m.add_observation(pm, oc, ob, rel, /*feasible=*/{m}, -1, t_extra);
+          disc_m.add_observation(pm, oc_repr, our_b, rel, /*feasible=*/{m}, -1,
+                                   t_extra);
         }
       }
     }

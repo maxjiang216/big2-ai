@@ -45,6 +45,11 @@ std::uint16_t MoveProbDiscardTable::mask_relevant(int move_id,
   if (rank_idx >= kBitmapWidth) return 0;
   std::uint16_t mask =
       static_cast<std::uint16_t>(~((1u << rank_idx) - 1u)) & 0x7FFu;
+  // Triples: drop the A-bit (bit 10). Triple A is a bomb response, not a
+  // triple, so the A bit doesn't condition triple responses.
+  if (m.combination == Move::Combination::kTriple) {
+    mask = static_cast<std::uint16_t>(mask & 0x3FFu);  // clear bit 10
+  }
   return static_cast<std::uint16_t>(bitmap & mask);
 }
 
@@ -102,7 +107,8 @@ void MoveProbDiscardTable::query(int move_id, int opp_count,
   if (!is_eligible(move_id) || legal_moves.empty()) return;
 
   std::uint16_t rel = mask_relevant(move_id, bitmap_full);
-  std::uint32_t key = make_key(move_id, opp_count, our_hand_size_bucket, rel);
+  std::uint32_t key = make_key(move_id, opp_bucket(opp_count),
+                                 our_hand_size_bucket, rel);
   auto it = entries_.find(key);
   if (it == entries_.end()) return;
 
@@ -136,7 +142,8 @@ void MoveProbDiscardTable::add_observation(int move_id, int opp_count,
                                              float weight) {
   if (!is_eligible(move_id)) return;
   std::uint16_t rel = mask_relevant(move_id, bitmap_full);
-  std::uint32_t key = make_key(move_id, opp_count, our_hand_size_bucket, rel);
+  std::uint32_t key = make_key(move_id, opp_bucket(opp_count),
+                                 our_hand_size_bucket, rel);
   Entry &e = entries_[key];
   for (int y : feasible_set) {
     if (y >= 0 && y < kNumMoves) e.trials[y] += weight;

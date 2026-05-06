@@ -23,9 +23,14 @@ namespace typed_search {
 // Bitmap: 11 bits, bit i = "opp could still hold ≥3 of rank idx (i+1)".
 // (rank idx 1..11 = face 4..A; we don't track rank 2 = idx 12.)
 //
-// For a given player_move with rank idx R, only bits R..10 are relevant
-// (lower bits encode ranks opp can't beat with this combo type, masked out
-// before keying).
+// For a given player_move with rank idx R:
+//   - For singles/doubles, only bits R..10 are relevant (face 4..A).
+//   - For triples, only bits R..9 are relevant (face 4..K) — we exclude
+//     the A bit since triple-A is a bomb response, not a triple.
+// Lower bits and irrelevant high bits are masked out before keying.
+//
+// opp_count and our_hand_size are bucketed (4 each: [1-4][5-7][8-11][12-16])
+// so the practical state space is ~164k (1.05M / 16 ≈ 65k per category).
 //
 // Query is shrinkage-blended with `mp_main` as the prior: if the disc cell
 // has D total observations, the result is
@@ -36,6 +41,8 @@ public:
   static constexpr int kNumMoves = 468;
   static constexpr int kBitmapWidth = 11;
   static constexpr int kBitmapMax = 1 << kBitmapWidth;
+  static constexpr int kOppBuckets = 4;
+  static constexpr int kOurBuckets = 4;
 
   // counts[y]: # of times opp played y when y was deduced-feasible.
   // trials[y]: # of times y was deduced-feasible (whether played or not).
@@ -59,7 +66,9 @@ public:
   void load(const std::string &path);
   void save(const std::string &path) const;
 
-  // Shrinkage-blended query against mp_main as prior.
+  // Shrinkage-blended query against mp_main as prior. opp_count is raw
+  // (1..16); we bucket internally for the disc key, while passing raw to
+  // mp_main (which keys on raw opp_count).
   void query(int move_id, int opp_count, int our_hand_size_bucket,
              std::uint16_t bitmap_full, const std::vector<int> &legal_moves,
              const MoveProbTable &mp_main,
@@ -75,13 +84,21 @@ public:
 
   std::size_t size() const { return entries_.size(); }
 
+  static int opp_bucket(int opp_count) {
+    if (opp_count <= 4) return 0;
+    if (opp_count <= 7) return 1;
+    if (opp_count <= 11) return 2;
+    return 3;
+  }
+
 private:
-  static std::uint32_t make_key(int move_id, int opp_count, int our_b,
+  static std::uint32_t make_key(int move_id, int opp_b, int our_b,
                                  std::uint16_t bitmap_relevant) {
-    // ((move * 17 + opp_count) * 4 + our_b) * 2048 + bitmap (11 bits)
-    return ((((static_cast<std::uint32_t>(move_id) * 17u +
-                 static_cast<std::uint32_t>(opp_count)) *
-                4u) +
+    // ((move * 4 + opp_b) * 4 + our_b) * 2048 + bitmap (11 bits)
+    return ((((static_cast<std::uint32_t>(move_id) *
+                 static_cast<std::uint32_t>(kOppBuckets) +
+                 static_cast<std::uint32_t>(opp_b)) *
+                static_cast<std::uint32_t>(kOurBuckets)) +
               static_cast<std::uint32_t>(our_b)) *
              static_cast<std::uint32_t>(kBitmapMax)) +
             static_cast<std::uint32_t>(bitmap_relevant);
