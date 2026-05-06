@@ -24,6 +24,11 @@ public:
   struct Result {
     int move_id{-1};
     float value{0.0f};
+    // Root-level per-move evaluations, sorted by value descending. Populated
+    // by `run()`. Each entry is (move_id, expected-value).
+    std::vector<std::pair<int, float>> top_moves;
+    // Number of distinct OurNodes memoized during this search call.
+    std::size_t nodes_searched{0};
   };
 
   // our_hand, discard, opp_count, last_move describe the position at our turn.
@@ -46,6 +51,11 @@ private:
 
   std::uint64_t make_key(const std::array<int, 13> &hand, int opp_count,
                          const Move &last_move) const;
+
+  // Set true only during the very first visit_our call inside run(); cleared
+  // before recursing. Used to capture root-level per-move evaluations.
+  bool collect_root_{false};
+  std::vector<std::pair<int, float>> root_evals_;
 
   float visit_our(OurNode &n);
   float visit_opp(const std::array<int, 13> &hand_after_our_move,

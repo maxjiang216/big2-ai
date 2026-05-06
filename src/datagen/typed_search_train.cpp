@@ -50,9 +50,12 @@ struct Args {
   std::uint64_t seed = 0;
   std::string tables_dir = "data/typed_search";
   // Optional: after the main run, play `sample_games` extra typed_search
-  // self-play games with verbose logging to `sample_dir`/game_NNNN.log.
+  // self-play games with verbose annotated logs to `sample_dir`/game_NNNN.log
+  // (top-10 moves with values per turn). Also writes a per-decision stats
+  // CSV to `stats_csv` if non-empty.
   int sample_games = 0;
   std::string sample_dir;
+  std::string stats_csv;
 };
 
 Args parse_args(int argc, char *argv[]) {
@@ -76,6 +79,7 @@ Args parse_args(int argc, char *argv[]) {
     else if (s == "--tables-dir") a.tables_dir = next("--tables-dir");
     else if (s == "--sample-games") a.sample_games = std::stoi(next("--sample-games"));
     else if (s == "--sample-dir") a.sample_dir = next("--sample-dir");
+    else if (s == "--stats-csv") a.stats_csv = next("--stats-csv");
     else {
       std::cerr << "Unknown flag: " << s << "\n";
       std::exit(2);
@@ -388,37 +392,138 @@ int main(int argc, char *argv[]) {
   mp_fb.save(p_mp_fb);
   std::cout << "Saved to " << args.tables_dir << "\n";
 
-  // Optionally play a few extra games with verbose logging using the
-  // freshly-saved tables. Useful for spot-checking and as NN training samples.
-  if (args.sample_games > 0 && !args.sample_dir.empty()) {
-    std::filesystem::create_directories(args.sample_dir);
+  // Optionally play extra games with annotated logs (top-N move values per
+  // turn) and write per-decision stats to a CSV for distribution analysis.
+  if (args.sample_games > 0 || !args.stats_csv.empty()) {
     auto sample_tables = std::make_shared<typed_search::TypedSearchTables>();
     sample_tables->eval_main.load(p_eval_main);
     sample_tables->eval_fallback.load(p_eval_fb);
     sample_tables->mp_main.load(p_mp_main);
     sample_tables->mp_fallback.load(p_mp_fb);
 
-    std::cout << "Logging " << args.sample_games
-              << " sample games to " << args.sample_dir << "/...\n";
+    std::ofstream stats;
+    if (!args.stats_csv.empty()) {
+      stats.open(args.stats_csv);
+      stats << "game_idx,turn_idx,player,tb_case,last_combo,last_rank,"
+               "our_hand_size,opp_size,nodes_searched,n_legal,top1_move,"
+               "top1_value,chosen_move,chosen_value\n";
+    }
+    if (args.sample_games > 0 && !args.sample_dir.empty()) {
+      std::filesystem::create_directories(args.sample_dir);
+    }
+
+    auto fmt_move = [](const Move &m) {
+      std::ostringstream os;
+      os << m;
+      return os.str();
+    };
+    auto fmt_hand = [](const std::array<int, 13> &h) {
+      std::string s = "[";
+      for (int r = 0; r < 13; ++r) {
+        for (int k = 0; k < h[r]; ++k) s += rankToChar(r);
+      }
+      s += "]";
+      return s;
+    };
+
+    std::cout << "Sample/stats run: games=" << args.sample_games
+              << " stats=" << (args.stats_csv.empty() ? "none" : args.stats_csv)
+              << "\n";
     std::mt19937 rng(args.seed + 0xCAFEBABEull);
-    for (int i = 0; i < args.sample_games; ++i) {
+    for (int gi = 0; gi < std::max(args.sample_games, 1); ++gi) {
       auto p0 = std::make_unique<typed_search::TypedSearchPlayer>(
           sample_tables, static_cast<std::uint64_t>(rng()));
       auto p1 = std::make_unique<typed_search::TypedSearchPlayer>(
           sample_tables, static_cast<std::uint64_t>(rng()));
-      char path_buf[64];
-      std::snprintf(path_buf, sizeof(path_buf), "%04d", i);
-      std::string log_prefix = args.sample_dir + "/game_" + path_buf;
-      GameSimulator sim(std::move(p0), std::move(p1), rng, log_prefix);
-      GameRecord rec = sim.run();
-      int winner = rec.turns().empty() ? 0
-                                          : rec.turns().back().current_player;
-      // Append outcome line to the log file (path includes seed suffix).
-      // GameSimulator's log filename pattern is "<prefix>_<seed>.txt".
-      // We can't easily recover the seed, so just print the index.
-      (void)winner;
+      Game game;
+      game.shuffle_deal(rng);
+      p0->accept_deal(game, 0);
+      p1->accept_deal(game, 1);
+
+      std::ofstream log;
+      bool log_this = (gi < args.sample_games) && !args.sample_dir.empty();
+      if (log_this) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%04d", gi);
+        log.open(args.sample_dir + "/game_" + buf + ".log");
+        log << "=== Game " << gi << " ===\n";
+        log << "P0 hand: " << fmt_hand(game.player_hand(0)) << "\n";
+        log << "P1 hand: " << fmt_hand(game.player_hand(1)) << "\n\n";
+      }
+
+      int turn_idx = 0;
+      int last_mover = -1;
+      while (!game.is_over()) {
+        int cp = game.current_player();
+        auto *curr = (cp == 0) ? p0.get() : p1.get();
+        auto *other = (cp == 0) ? p1.get() : p0.get();
+
+        Move last_move = game.last_move();
+        auto our_hand = game.player_hand(cp);
+        int our_size = game.get_player_hand_size(cp);
+        int opp_size = game.get_player_hand_size(1 - cp);
+
+        Move chosen = curr->select_move();
+        int tb_case = curr->last_tb_case();
+        bool used_search = (tb_case == -1);
+
+        const auto &res = curr->last_result();
+        std::size_t n_legal = res.top_moves.size();
+        int top1_move = -1;
+        float top1_val = 0.0f;
+        if (used_search && !res.top_moves.empty()) {
+          top1_move = res.top_moves.front().first;
+          top1_val = res.top_moves.front().second;
+        }
+
+        if (log_this) {
+          log << "Turn " << turn_idx << "  P" << cp
+              << "  hand(" << our_size << ")=" << fmt_hand(our_hand)
+              << "  opp=" << opp_size
+              << "  last=" << fmt_move(last_move) << "\n";
+          if (used_search) {
+            log << "  search: " << res.nodes_searched
+                << " nodes, " << n_legal << " legal moves\n";
+            std::size_t shown = std::min<std::size_t>(10, res.top_moves.size());
+            for (std::size_t i = 0; i < shown; ++i) {
+              Move mv(res.top_moves[i].first);
+              log << "    " << (i + 1) << ". " << fmt_move(mv)
+                  << "  v=" << res.top_moves[i].second << "\n";
+            }
+          } else {
+            log << "  tablebase: case=" << tb_case << "\n";
+          }
+          log << "  -> chosen: " << fmt_move(chosen) << "\n\n";
+        }
+
+        if (stats.is_open()) {
+          stats << gi << "," << turn_idx << "," << cp << "," << tb_case
+                << "," << static_cast<int>(last_move.combination)
+                << "," << last_move.rank
+                << "," << our_size << "," << opp_size
+                << "," << (used_search ? res.nodes_searched : 0)
+                << "," << n_legal
+                << "," << top1_move
+                << "," << top1_val
+                << "," << encodeMove(chosen)
+                << "," << (used_search ? res.value : 0.0f)
+                << "\n";
+        }
+
+        game.apply_move(chosen);
+        other->accept_opponent_move(chosen);
+        last_mover = cp;
+        ++turn_idx;
+      }
+
+      if (log_this) {
+        log << "Winner: P" << last_mover << " after " << turn_idx
+            << " turns\n";
+      }
     }
-    std::cout << "Sample games written.\n";
+    if (stats.is_open()) std::cout << "Stats CSV written.\n";
+    if (args.sample_games > 0 && !args.sample_dir.empty())
+      std::cout << "Annotated sample games written.\n";
   }
   return 0;
 }

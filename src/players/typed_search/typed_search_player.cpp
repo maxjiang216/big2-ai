@@ -17,17 +17,16 @@ Move TypedSearchPlayer::select_move_impl() {
   int opp_count = game_.opponent_hand_size();
   Move last = game_.last_move();
 
-  auto result = search.run(hand, discard, opp_count, last);
-  if (result.move_id < 0) {
-    // No legal recursive choice — should be impossible at a non-terminal turn.
-    // Fall back to PASS if it's legal; else first legal move.
+  last_result_ = search.run(hand, discard, opp_count, last);
+  last_used_search_ = true;
+  if (last_result_.move_id < 0) {
     auto legal = game_.get_legal_moves();
     if (!legal.empty()) {
       return Move(legal.front());
     }
     return Move(Move::Combination::kPass);
   }
-  return Move(result.move_id);
+  return Move(last_result_.move_id);
 }
 
 }  // namespace typed_search

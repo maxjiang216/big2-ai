@@ -174,6 +174,11 @@ float TypedSearch::visit_our(OurNode &n) {
     return n.value;
   }
 
+  // Snapshot the collect flag — only this top-level visit captures root
+  // per-move evals. Disable for any recursive visit_our calls.
+  const bool collect_here = collect_root_;
+  if (collect_here) collect_root_ = false;
+
   auto legal = compute_legal_moves(n.hand, n.last_move);
   // compute_legal_moves at lead position never includes PASS; at response it does.
 
@@ -194,6 +199,7 @@ float TypedSearch::visit_our(OurNode &n) {
         v = visit_opp(new_hand, new_discard, n.opp_count, m);
       }
     }
+    if (collect_here) root_evals_.emplace_back(m, v);
     if (v > best) {
       best = v;
       best_move = m;
@@ -297,8 +303,20 @@ TypedSearch::Result TypedSearch::run(const std::array<int, 13> &our_hand,
   root.opp_count = opp_count;
   root.last_move = last_move;
   auto it = memo_.emplace(key, std::move(root)).first;
+
+  collect_root_ = true;
+  root_evals_.clear();
   float v = visit_our(it->second);
-  return Result{it->second.best_move, v};
+  collect_root_ = false;
+
+  Result r;
+  r.move_id = it->second.best_move;
+  r.value = v;
+  r.nodes_searched = memo_.size();
+  r.top_moves = std::move(root_evals_);
+  std::sort(r.top_moves.begin(), r.top_moves.end(),
+             [](const auto &a, const auto &b) { return a.second > b.second; });
+  return r;
 }
 
 }  // namespace typed_search

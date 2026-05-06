@@ -229,3 +229,24 @@ The wall-clock gain (16.6%) is larger than the instruction-count drop (6.7%) bec
 4. `compute_legal_moves(HandBits, Move)`: 4.39% — central. An `_into` overload that takes a caller buffer (instead of allocating + returning) would let `visit_our` skip its per-call alloc.
 
 The remaining allocator pressure (~10%) is mostly inside `compute_legal_moves` and incidental `std::vector` allocations in `move_grouping_into`'s emit path. The next target with clear payoff is plan #3 (`compute_legal_moves_into` in `src/core/util.cpp`).
+
+---
+
+## Search-node distribution (gen-4 self-play, 200 games / 3711 decisions)
+
+Tablebase fast-path: 4.2% of decisions; the rest go through search.
+
+| Trick context | Decisions | Mean | p25 | p50 | p75 | p95 | Max |
+|---|---|---|---|---|---|---|---|
+| PASS (we lead) | 1186 | **272** | 22 | 121 | 430 | 911 | 1274 |
+| Single response | 1471 | 42 | 1 | 5 | 32 | 264 | 558 |
+| Double response | 417 | 6 | 1 | 1 | 5 | 24 | 106 |
+| Bomb response | 53 | 1.0 | 1 | 1 | 1 | 1 | 1 |
+| Other response | rest | 1-3 | 1 | 1 | 1-2 | 4-13 | 31 |
+
+Heavy skew: initiative leads dominate the search budget; bomb/triple/straight responses are trivial because legal moves are sparse (pass + at most one same-type higher-rank). Singles are moderately expensive due to many candidate beats; pairs less so; everything else essentially constant-time.
+
+By hand size (initiative-only): monotone — hand=1 → 17 nodes, hand=16 → 864.
+By opp size (initiative-only): also monotone — opp=1 → 1 node, opp=16 → 720.
+
+**Implication for budget tuning.** Most search cost is concentrated at full-hand opening + mid-game initiative leads. If we ever want to bound per-move cost, capping the initiative-lead branching (e.g., greedy pre-pruning of clearly-dominated lead options) would buy more than capping responses.
