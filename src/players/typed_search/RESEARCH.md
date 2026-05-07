@@ -1,0 +1,752 @@
+# Typed-Search Research Log
+
+## Algorithm overview
+
+Trick-bounded DAG search for the 2-player Big 2 engine. Key design choices:
+
+- **Truncation at trick boundaries.** Search recurses through our turn → opp turn → our turn → ... until the first PASS, then evaluates the resulting just-passed leaf via a tabular evaluator.
+- **Two tabular evaluators** (sparse hashmap, binary on-disk):
+  - `eval_main` — ~442k state space encoded from hand-shape features (initiative, hand-size buckets, bomb / straight / double-triple-straight tiers, and per-rank counts of singles/doubles/triples bucketed with "guaranteed largest" promotion).
+  - `eval_fallback` — ~9k state space, simpler features. Queried when main has < `min_visits` (default 5) at the queried state.
+- **Two opponent-move-probability tables**:
+  - `mp_main` — keyed on `(player_move_id, opp_count)`.
+  - `mp_fallback` — keyed on `player_move_id` only.
+- **DAG memoization** keyed on `(hand_packed, opp_count, last_move.combination, last_move.rank)` — discard composition intentionally ignored (transposition approximation; same approximation also justifies merging move-groups across opp ranks that produce identical sets of our responses).
+- **Forced-move sub-search** at "we hold initiative" leaves: DFS over our unbeatable moves, evaluates the eval table at every visited node (not just terminals), takes max.
+- **Generations training**: bootstrap gen-0 from random self-play populating `eval_fallback` only; each subsequent generation runs typed-search self-play, decays existing tables by α (default 0.7), then merges new counts.
+
+## Files
+
+| Path | Purpose |
+|---|---|
+| `eval_features.{h,cpp}` | State-ID encoding + impute-terminal + guaranteed-largest helper |
+| `eval_table.{h,cpp}` | Eval table with main+fallback chain, decay, query-stats counters |
+| `move_prob_table.{h,cpp}` | Opp-move distribution table, same shape |
+| `move_grouping.{h,cpp}` | Group opp moves into response-equivalence classes |
+| `forced_search.{h,cpp}` | "We have initiative" leaf forced-move sub-search |
+| `typed_search.{h,cpp}` | DAG search with memoization |
+| `typed_search_player.{h,cpp}` | Player subclass; per-call RNG mix |
+| `typed_search_player_factory.{h,cpp}` | Loads 4 table files, shares across players |
+
+Driver / orchestration:
+- `src/datagen/typed_search_train.cpp` — multithreaded self-play + table updates with decay.
+
+## Reference results
+
+### Strength (after gen-0 random + 4 × 5k typed_search generations, α=0.7)
+
+Paired-deal evaluation, 500 deals = 1000 games, seed 100:
+
+| Generation | vs random | vs greedy |
+|---|---|---|
+| 0 (bootstrap only) | 87.0% | 53.0% (no signal; CI [49.9, 56.1]) |
+| 1 | 89.8% | 59.4% |
+| 2 | 90.7% | 62.0% |
+| 3 | 90.0% | 63.3% |
+
+vs greedy improves monotonically with training. vs random saturates around 90%.
+
+### Throughput (typed_search self-play, current trained tables)
+
+| Threads | Games/sec | Per-game wall | 5k | 50k | 500k |
+|---|---|---|---|---|---|
+| 1 | 75.8 | 13.2 ms | 66 s | 11 min | 110 min |
+| 8 | 736 | 1.36 ms | 6.8 s | 68 s | 11 min |
+
+Parallel efficiency at 8 threads: ~82%.
+
+### Static table coverage (after the runs above)
+
+| Table | Entries / total | Coverage | ≥1 visit | ≥5 visits | ≥20 visits | ≥100 visits |
+|---|---|---|---|---|---|---|
+| `eval_main` | 37,105 / 442,368 | 8.4% | 29,306 | 11,027 | 3,712 | 422 |
+| `eval_fallback` | 3,112 / 9,216 | 33.8% | 2,882 | 2,110 | 1,540 | 727 |
+| `mp_main` | 5,265 / 7,956 | 66.2% | — | — | — | — |
+| `mp_fallback` | 434 / 468 | 92.7% | — | — | — | — |
+
+### Empirical query hit rates (during 5k-game typed_search run)
+
+`eval_table` — 25.3M leaf queries:
+- main hit (≥5 visits): **73.2%**
+- fallback hit: **24.7%**
+- both miss → default 0.5: **2.1%**
+
+`mp_table` — 9.3M opp-distribution queries:
+- main hit: **98.0%**
+- fallback hit: **2.0%**
+- both empty → uniform: ~0%
+
+The empirical hit rates are much higher than static coverage % because game-state distribution is Zipfian: a small core of hot states gets most queries.
+
+## Profiling — baseline
+
+Callgrind on 10 games, single-thread, with trained tables loaded. 1.17B instructions / ~6.1s wall.
+
+```
+12.24%  TypedSearch::visit_opp (self)
+12.08%  opponent_can_respond(int, hand, discard, opp_count)   — array overload, used by find_forced_win
+ 5.52%  compute_legal_moves(HandBits, Move)
+ 5.14%  _int_free
+ 3.78%  malloc
+ 3.53%  Move::Move(int)
+ 3.42%  main_state_id
+ 2.84%  opponent_can_respond(int, HandBits, int)               — fast overload
+ 2.36%  free
+ 2.32%  all_moves()                                            — table accessor
+ 2.10%  _int_malloc
+ 1.65%  fallback_state_id
+ 1.65%  __memcpy_avx_unaligned_erms
+ 1.19%  group_opp_moves (self)
+ 1.08%  compute_r_star
+ ~9%    libstdc++ I/O (one-shot table load + save)
+```
+
+`visit_opp` accounts for ~82.5% cumulative cost (self + recursion). Inside it:
+- The `for (int mid : beating[our_move_id])` filter loop — `opp_could_play` body is the bulk of `visit_opp`'s self time.
+- `group_opp_moves`: 1.82% per call site
+- `mp_table_.query`: 0.06% (cheap)
+
+`main_state_id` cost is dominated by `straight_tier` and `double_triple_straight_tier` calls, each of which calls `compute_legal_moves` on a bomb-rank-stripped hand copy.
+
+## Optimization candidates (baseline: 75.8 g/s single-thread)
+
+| # | Target | Estimated win | Complexity |
+|---|---|---|---|
+| 1 | Cache `main_state_id` / `fallback_state_id` per `OurNode` (don't recompute per leaf visit) | ~6% | low |
+| 2 | Hoist `opp_max[r]` out of `opp_could_play` (precompute once per `visit_opp`) | ~5–8% | low |
+| 3 | Use `HandBits`-based opp-can-hold check (compose with existing fast overloads) | extra on top of #2 | low–med |
+| 4 | Thread-local scratch buffers (eliminate per-call vector allocations in hot path) | ~10% from allocation pressure | medium |
+| 5 | `find_forced_win` uses array-version of `opponent_can_respond`; switch to HandBits-version | ~5% | low |
+| 6 | `Move::Move(int)` accessor inlining / `all_moves()` direct member ref | ~2% | low |
+
+Optimizations applied below are profiled one at a time so we can attribute the delta to each change.
+
+---
+
+## Optimization 1 — Bitset `opp_could_play` (HandBits-based)
+
+**Change:** Replaced the per-move 13-rank loop in `opp_could_play` with an O(1) bitset check using a precomputed `move_needs_table()` (HandBits per move ID). Hoisted `opp_upper_bound_bits` to be computed once per `visit_opp` call instead of once per (move × rank).
+
+**Files:** `src/players/typed_search/typed_search.cpp` only.
+
+**Profile (callgrind, 10 games):**
+
+| Metric | Baseline | After opt 1 | Δ |
+|---|---|---|---|
+| Total instructions | 1,168M | 1,090M | **−6.7%** |
+| `visit_opp` (self) | 12.24% | 6.83% | −5.4 pp |
+| `compute_legal_moves(HandBits, Move)` | 5.52% | 6.02% | +0.5 pp (relative grew) |
+| `opponent_can_respond(arr, arr)` | 12.08% | 13.17% | +1.1 pp (still hot via `find_forced_win`; absolute Ir nearly unchanged at 141M→143M) |
+
+**Wall clock (1 thread, 1000 games, trained tables):** 75.8 g/s → **88.4 g/s** (+16.6%).
+
+The wall-clock gain (16.6%) is larger than the instruction-count drop (6.7%) because the new path is branch-free + cache-friendly: 4 ANDs + 4 equality checks vs. an unrolled 13-iter loop with conditionals.
+
+**Strength check (paired-deal, 500 deals vs greedy, seed 100):** 65.5% (CI excludes 50%) — unchanged within noise vs. baseline 63.3%.
+
+---
+
+## Optimization 2 — Direct bitset straight enumeration in eval_features
+
+**Change:** Replaced `compute_legal_moves(mod_hand, kPass)` calls inside `straight_tier`, `double_triple_straight_tier`, and the `has_straight` check in `fallback_state_id` with direct calls to the existing `straight_moves_for_pass_masks_into(at1, at2, at3, out)` bitmask helper. This skips the bomb/full-house enumeration that we never inspect, and reuses thread-local scratch buffers for the result vector.
+
+**Files:** `src/players/typed_search/eval_features.cpp` only.
+
+**Profile (callgrind, 10 games):**
+
+| Metric | After opt 1 | After opt 2 | Δ vs opt 1 | Δ vs baseline |
+|---|---|---|---|---|
+| Total instructions | 1,090M | 1,038M | −4.8% | **−11.2%** |
+| `Move::Move(int)` | 3.85% | 1.41% | −2.4 pp | −2.1 pp (12.5M of 14.6M Ir avoided in eval-features) |
+| `compute_legal_moves(HandBits, Move)` | 6.02% | 3.13% | −2.9 pp | −2.4 pp |
+| `main_state_id` (self only — internals shifted) | 3.73% | 4.14% | +0.4 pp | +0.7 pp |
+
+**Wall clock (1 thread, 1000 games):** 88.4 g/s → **103.8 g/s** (+17.4% from opt 1; **+37.0% from baseline**).
+
+**Strength check:** 65.8% vs greedy at seed 100 — unchanged within noise.
+
+**New hot spot — `find_forced_win` (`opponent_can_respond(arr, arr)`):** Now 17.08% / 177M Ir, the single largest cost. Each call rebuilds opp's HandBits from scratch via the array overload. Switching `find_forced_win` (in `src/core/util.cpp`) and `forced_search_recursive` (in `forced_search.cpp`) to compute opp_bits once per call site and use `opponent_can_respond(int, HandBits, int)` would target this directly.
+
+---
+
+## Optimization 3 — Hoist opp_bits in find_forced_win and forced_search
+
+**Insight:** During the forced-win recursion the opponent's possible-card upper bound is invariant. Each forced move moves cards from `hand` to `discard`, and `opp_max[r] = max_in_deck[r] − hand[r] − discard[r]` is algebraically conserved. `opp_count` is also invariant (opp passes each turn). So `opp_bits` can be built once at the top of the recursion and reused.
+
+**Change:** Refactored `find_forced_win` in `src/core/util.cpp` to build `opp_bits` once and pass via a `ForcedWinCtx` to a private `find_forced_win_inner`. The inner function uses the HandBits overload of `opponent_can_respond` and no longer needs `discard`. Same refactor in `src/players/typed_search/forced_search.cpp::forced_search_recursive` (it still tracks `discard` for eval_table queries at intermediate nodes, but unbeatability checks use the precomputed `opp_bits`).
+
+**Aborted intermediate variant:** First tried precomputing the full `unbeatable[mid]` boolean array (468 entries) at each `forced_search_value` entry. That was a 3.5× regression — the 468-call precompute was too eager when most invocations only check ~30 moves at ~5 recursion levels. Reverted to lazy per-need bitmask checks.
+
+**Files:** `src/core/util.cpp`, `src/players/typed_search/forced_search.cpp`.
+
+**Profile (callgrind, 10 games):**
+
+| Metric | After opt 2 | After opt 3 | Δ vs opt 2 | Δ vs baseline |
+|---|---|---|---|---|
+| Total instructions | 1,038M | 796M | **−23.3%** | **−31.8%** |
+| `opponent_can_respond(arr, arr)` | 17.08% / 177M | absent from top 20 | gone | gone |
+| `opponent_can_respond(HandBits, int)` | 3.83% | 4.55% (relative grew; absolute ~36M, similar) | — | — |
+| `visit_opp` (self) | 7.33% | 9.41% (relative grew) | — | — |
+
+**Wall clock (1 thread, 1000 games):** 103.8 g/s → **141.1 g/s** (+36% from opt 2; **+86% cumulative from baseline 75.8 g/s**).
+
+**Strength check:** 65.0% vs greedy at seed 100 — unchanged within noise.
+
+**New top hot spot — allocator pressure:** combined malloc/free now ~18% of program total. Per-call vector allocations in `visit_opp` (legal-moves vector, opp_legal, opp_probs, group buckets) and in `compute_legal_moves` are the main contributors. Threadlocal scratch buffers + reservation tuning could halve this.
+
+---
+
+## Optimization 4 — Scratch pool + sort-walk grouping (allocator pressure)
+
+**Two changes in this commit:**
+
+1. Thread-local depth-indexed scratch pool (`SearchScratch` in `typed_search.cpp`) holding reusable `opp_legal`, `opp_probs`, and `groups` buffers per recursion level. RAII `ScratchGuard` pushes/pops. Vectors retain capacity across calls so steady-state pushes don't reallocate.
+
+2. Rewrite `group_opp_moves_into` to use a sort-walk algorithm instead of two `std::unordered_map`s + per-call `vector<Bucket>`. Single pass: build `(combo, rank, orig_idx)` infos in a thread-local scratch vector, sort by `(combo, rank)`, walk consecutive runs to emit groups (collapse over auxiliary for bombs/full-houses, merge consecutive ranks for other combinations when our hand has no in-range response). Output goes into a caller-provided `std::vector<MoveGroup>` (the scratch buffer); recycled `MoveGroup` slots preserve their inner-vector capacity via `clear()` instead of being destroyed.
+
+**Files:** `src/players/typed_search/typed_search.cpp`, `src/players/typed_search/move_grouping.{h,cpp}`.
+
+**Calibration note** — measured both before/after across 5 runs to control for variance. The single-run readings vary by ~10% game-to-game due to RNG-driven exploration depth. Median of 5 runs is the reliable signal.
+
+**Profile (callgrind, 10 games):**
+
+| Metric | After opt 3 | After opt 4 | Δ vs opt 3 | Δ vs baseline |
+|---|---|---|---|---|
+| Total instructions | 796M | 662M | **−16.8%** | **−43.3%** |
+| `_int_free` | 6.78% | 3.24% | −3.5 pp | gone halved |
+| `malloc` | 4.93% | 2.29% | −2.6 pp | halved |
+| `free` | 3.07% | 1.40% | −1.7 pp | halved |
+| Total allocator | ~17.85% | ~9.91% | **−7.9 pp** | (combined malloc/free) |
+
+**Wall clock (1 thread, 1000 games, median of 5 runs):** 141 g/s → **170.6 g/s** (+21% from opt 3; **+125% cumulative from baseline 75.8 g/s**).
+
+**Strength check:** 67.1% vs greedy at seed 100 — unchanged within noise.
+
+**Remaining hot spots** (in order):
+1. `visit_opp` (self): 10.39% — recursion + bookkeeping; not much more to squeeze without algorithmic changes.
+2. `opponent_can_respond(HandBits, int)`: 6.74% — already the fast overload; bound by table-driven walk over `BeatEntry`s.
+3. `main_state_id`: 5.91% — eval-feature encoding; per-leaf computation. Could be cached per memo node (each `OurNode` would compute once, reuse on memo hits).
+4. `compute_legal_moves(HandBits, Move)`: 4.39% — central. An `_into` overload that takes a caller buffer (instead of allocating + returning) would let `visit_our` skip its per-call alloc.
+
+The remaining allocator pressure (~10%) is mostly inside `compute_legal_moves` and incidental `std::vector` allocations in `move_grouping_into`'s emit path. The next target with clear payoff is plan #3 (`compute_legal_moves_into` in `src/core/util.cpp`).
+
+---
+
+## Search-node distribution (gen-4 self-play, 200 games / 3711 decisions)
+
+Tablebase fast-path: 4.2% of decisions; the rest go through search.
+
+| Trick context | Decisions | Mean | p25 | p50 | p75 | p95 | Max |
+|---|---|---|---|---|---|---|---|
+| PASS (we lead) | 1186 | **272** | 22 | 121 | 430 | 911 | 1274 |
+| Single response | 1471 | 42 | 1 | 5 | 32 | 264 | 558 |
+| Double response | 417 | 6 | 1 | 1 | 5 | 24 | 106 |
+| Bomb response | 53 | 1.0 | 1 | 1 | 1 | 1 | 1 |
+| Other response | rest | 1-3 | 1 | 1 | 1-2 | 4-13 | 31 |
+
+Heavy skew: initiative leads dominate the search budget; bomb/triple/straight responses are trivial because legal moves are sparse (pass + at most one same-type higher-rank). Singles are moderately expensive due to many candidate beats; pairs less so; everything else essentially constant-time.
+
+By hand size (initiative-only): monotone — hand=1 → 17 nodes, hand=16 → 864.
+By opp size (initiative-only): also monotone — opp=1 → 1 node, opp=16 → 720.
+
+**Implication for budget tuning.** Most search cost is concentrated at full-hand opening + mid-game initiative leads. If we ever want to bound per-move cost, capping the initiative-lead branching (e.g., greedy pre-pruning of clearly-dominated lead options) would buy more than capping responses.
+
+---
+
+## Bayesian shrinkage + dominance prune (gen-4 inspection follow-up)
+
+User-reported anomaly. At gen-4 game 0 turn 2, the search ranked candidates for an A-bomb by the auxiliary kicker:
+
+```
+hand = [5,5,5,8,9,0,0,K,A,A,A]   (3 fives, 8, 9, two 10s, K, three As)
+opp = 11   last move = 77700 (full house)
+
+  1. AAAK   v=0.663
+  2. AAA0   v=0.445  (single 10 aux — not loose; breaks the pair of 10s)
+  3. AAA00  v=0.445  (pair of 10s aux — loose)
+  4. AAA5   v=0.443  (single 5 aux — not loose; breaks the triple of 5s)
+  5. AAA8   v=0.434
+  6. AAA9   v=0.434
+  7. AAA55  v=0.405
+```
+
+Counterintuitive: keeping the K (`AAA8` or `AAA9`) should *dominate* discarding it (`AAAK`) — playing the higher loose single only loses optionality. The `eval_inspect` probe showed:
+
+| Move | main visits | main wp | fb visits | fb wp |
+|---|---|---|---|---|
+| AAAK | 34 | 0.663 | 91 | 0.338 |
+| AAA8/9 | 11 | 0.434 | 735 | 0.707 |
+| AAA0/00 | 73 | 0.445 | 456 | 0.359 |
+
+`AAAK`'s main entry has only 34 observations, `AAA8/9`'s only 11; both are noisy. The fallback table — coarser features but ~10× more data per entry — points the *opposite* way: `AAAK` is worse than `AAA8/9`. With the original hard threshold (`visit_count ≥ 5` → use main), the noisy main entry shadowed the well-supported fallback.
+
+### Two fixes layered together
+
+**(1) Bayesian shrinkage in `EvalTable::query`.** Replaced the hard threshold with a Beta-Binomial posterior mean:
+
+```
+value = (κ · fb_prior + main_total_wins) / (κ + main_visit_count)
+```
+
+- `fb_prior` = fallback's `total_wins / visit_count` (when `fb_visits ≥ fb_min_visits`, default 5; otherwise `default_value` 0.5).
+- κ = effective prior weight in equivalent visits (default 20).
+- Smooth crossover: at `main_visits ≈ κ`, blend is 50/50; at `main_visits = 5κ`, ~83% main.
+
+User's example, after shrinkage with κ=20:
+
+| Move | raw main | shrunken |
+|---|---|---|
+| AAAK | 0.663 | **0.543** |
+| AAA8/9 | 0.434 | **0.609** |
+| AAA0/00 | 0.445 | 0.427 |
+| AAA5 | 0.443 | 0.426 |
+| AAA55 | 0.405 | 0.400 |
+
+Ranking flips: `AAA8/9` overtakes `AAAK`, matching the dominance argument.
+
+**(2) Dominance prune in `visit_our`.** Strict-domination prune of the legal-move set before recursion. Two complementary rules:
+
+- **Single-move dominance.** A `Single` move at rank X is "loose" iff `hand[X] == 1` *and* removing X doesn't change the set of straight / DS / TS moves available (checked by re-running `straight_moves_for_pass_masks_into` on the modified bitmasks). Among loose-single moves in the legal set, the smallest-rank wins; larger ones are dominated and dropped.
+- **Aux dominance for bombs / full houses.**
+  - For each bomb at rank R, an aux X (single-card with `cost[X] == 1`) is "loose" iff in the post-bomb-base hand `count[X] == 1` and X not in any straight. The smallest loose-single aux per bomb_rank wins; larger loose-single auxes dropped.
+  - Pair auxes (only ace bomb has these, plus all full houses) are "loose" iff `count == 2` post-base and the rank is not in any straight / DS / TS. Smallest loose-pair aux wins per `(bomb_rank | triple_rank)`.
+- **Not pruned**: bare bombs (no aux), non-loose auxes (where the dominance argument doesn't extend without more analysis).
+
+Both rules are applied at *every* `visit_our` call, not just at the root, so the dominance propagates through the search tree.
+
+Why both fixes together:
+
+- Dominance prune removes the "obviously dominated" moves before the table even sees them — so `AAAK` no longer shows up at all when `AAA8` is loose-and-smaller-rank. The table doesn't need to learn this.
+- Shrinkage handles the residual noise where dominance doesn't apply (the bulk of states), keeping the well-evidenced fallback in charge until main accumulates enough data.
+
+### Effects (gen-4 tables, no retraining)
+
+Strength (paired-deal eval, `--p0 typed_search --p0-param 4`):
+
+| Match | gen-4 raw | gen-4 + shrinkage + dominance | Δ |
+|---|---|---|---|
+| vs random (1000 deals) | 92.3% | **93.3%** | +1.0 pp |
+| vs greedy (1000 deals) | 66.8% | **71.3%** | +4.5 pp |
+| vs pimc(20) (200 deals) | 55.0% | **58.5%** | +3.5 pp |
+
+Throughput (1 thread, 1000 games, gen-4 tables):
+
+| | g/s | per-game wall |
+|---|---|---|
+| Before | 141 | 7.10 ms |
+| After | **205** | 4.88 ms |
+
+The +45% throughput is the main surprise: I'd expected a small slowdown from the extra check + the shrinkage-side double-lookup, but the dominance prune drops a meaningful fraction of legal moves at most decision points, which removes recursive `visit_opp` calls that would otherwise inflate the search tree.
+
+#### How often does the prune actually fire?
+
+Measured over 200 gen-4 self-play games (341,246 `visit_our` calls):
+
+| Metric | Value |
+|---|---|
+| Total `visit_our` calls | 341,246 |
+| Calls with >1 legal move | 109,341 (32%) — the rest are forced (1 legal move) |
+| Calls where at least one move was dropped | 31,464 (9.2% of all, **28.8% of multi-move**) |
+| Total moves dropped | 61,660 (avg 0.18/call, 9.3% of legal-set on average) |
+
+Breakdown of drops by kind:
+
+| Kind | Drops | Share |
+|---|---|---|
+| Loose single dominance (the `[89] → 8` rule) | 29,427 | **47.7%** |
+| Bomb aux dominance (the AAAK / AAA8 case) | 31,915 | **51.8%** |
+| Full house aux dominance | 318 | 0.5% |
+
+So the +45% throughput isn't *just* from rare bomb situations — it's about half from single-move dominance, which fires whenever the legal set contains multiple loose-single options (very common for both leads with many singles in hand and responses where multiple singles can beat the last move). Bomb-aux drops contribute the other half because each bomb playable in our hand tends to have many aux variants (10+ for a 4-of-a-kind bomb), and when one of them is the smallest loose aux, all the larger loose-aux variants get dropped at once — *aggressive when it fires, but only fires when a bomb is in the legal set*. Full-house-aux dominance is essentially noise (FHs are rare and usually only have a couple of aux options).
+
+The "30%" claim from the previous note was wrong; the real number is ~9% of all `visit_our` calls (or ~29% of calls that have any choice at all). I'd been guessing without measuring; corrected here.
+
+#### Restricting single-move dominance to the 2-card endgame
+
+The dominance argument for "always prefer the smaller loose single" is only mathematically airtight when we're choosing between two singles and have exactly 2 cards in hand. In mid-game (3+ cards) we may legitimately want to play a *higher* single to force opp to pass and keep initiative — a parity effect the search has to weigh, not a rule we can pre-prune.
+
+Restricted the single-move rule to `hand_size == 2`. Bomb / full-house aux dominance is unchanged (those don't have parity issues; the bomb / FH pins down the trick state too tightly).
+
+Updated prune stats (200 games / 369k visit_our calls):
+
+| Metric | All-singles rule | 2-card-only rule |
+|---|---|---|
+| Calls with drops | 9.22% | 3.32% (10.4% of multi-move) |
+| Total drops | 61,660 | 35,977 |
+| Singles | 29,427 (47.7%) | 36 (0.1%) |
+| Bomb aux | 31,915 (51.8%) | 35,620 (99.0%) |
+| FH aux | 318 (0.5%) | 321 (0.9%) |
+
+Strength side-effect (gen-4 tables, no retraining):
+
+| Match | Both rules | 2-card-only |
+|---|---|---|
+| vs random | 93.3% | 91.6% |
+| vs greedy | 71.3% | 70.7% |
+| vs pimc(20) | 58.5% | 54.75% |
+| Throughput (1 thread) | 205 g/s | 181 g/s |
+
+The broader rule was adding strength against pimc(20) by ~4 points, suggesting it was acting as a useful prior (the search couldn't reliably pick the dominated-but-table-better move). But the rule wasn't actually correct outside `hand_size == 2`, so we accept the regression as the price of correctness. Bomb/FH aux dominance is preserved; that argument doesn't have the same parity hole.
+
+#### Fresh retraining recovers the regression
+
+Ran a new 4-gen training (50k games each, α=0.7) starting from random self-play with the corrected pruning rules. Comparison:
+
+| Match | Old gen-4 (broad rule, 4 gens) | New gen-4 (2-card-only rule, 4 gens) |
+|---|---|---|
+| vs random | 92.30% | **93.05%** (+0.75 pp) |
+| vs greedy | 66.80% | **70.45%** (+3.65 pp) |
+| vs pimc(20) | 55.00% | **57.00%** (+2.00 pp) |
+
+Head-to-head **new gen-4 vs old gen-4** (1000 deals): 49.85%, CI [47.66, 52.04] — statistically a tie. **745/1000 deals are 1-1 splits**, meaning the two players make the same moves in most positions; they only differ where the broad rule was over-pruning, and there the new model is on average as good or slightly better.
+
+So the answer to the trade is: the corrected pruning loses a little against the previously-strong baselines if measured immediately, but a fresh round of training fills in the eval table for the previously-overpruned states and recovers the strength — and in fact the new model is uniformly stronger against every baseline. The parity hole is closed without paying for it in the long run.
+
+Per-gen progression on the new run:
+
+| Gen | vs random | vs greedy | vs pimc(20) | vs prev gen |
+|---|---|---|---|---|
+| 0 | 90.95% | 62.80% | 42.00% | — |
+| 1 | 91.90% | 68.80% | 54.50% | 50.15% (985 split) |
+| 2 | 92.90% | 70.15% | 54.75% | 54.50% |
+| 3 | 93.20% | 69.55% | **59.00%** | 50.20% |
+| 4 | 93.05% | 70.45% | 57.00% | 50.45% |
+
+vs-prev-gen mostly hovers 50-54% with hundreds of split deals each — converging cleanly. The pimc(20) line jiggles around 55-59% in the last three gens; with only 200 deals the per-gen SE is ~2.5 pp so this is consistent with stable performance, not a clear monotone gain. Gen 3 may be a noise-favorable snapshot; for production, picking the gen with the highest average across all baselines is reasonable, otherwise gen 4 is fine.
+
+#### Decisive-only CIs (excluding 1-1 splits)
+
+The overall paired-deal win rate is diluted by split deals (one game each), which contribute exactly 50% by construction. Looking only at decisive deals (one player swept 2-0) is a cleaner signal of "given a chance to demonstrate advantage, who wins?".
+
+| Match | Overall % (CI) | Decisive % (CI) | Splits |
+|---|---|---|---|
+| new gen-4 vs random | 93.35% [92.17, 94.36] | **99.43%** [98.67, 99.76] (872/877) | 12.3% |
+| new gen-4 vs greedy | 70.45% [68.41, 72.41] | **92.16%** [89.43, 94.24] (447/485) | 51.5% |
+| new gen-4 vs pimc(20) | 56.50% [51.60, 61.27] | **69.70%** [57.78, 79.45] (46/66) | 67.0% |
+| new gen-4 vs old gen-4 | 49.65% [47.46, 51.84] | 48.62% [42.52, 54.75] (123/253) | 74.7% |
+
+vs pimc(20) the overall CI [51.6, 61.3] only marginally excludes 50%, but the decisive CI [57.8, 79.5] is firm — when one player demonstrably won the deal, it was the new gen-4 ~70% of the time. The marginal overall number reflects 67% of deals being splits, not actual closeness.
+
+vs the old gen-4 the head-to-head is statistically tied even after removing splits (decisive CI includes 50%, with 253 decisive deals out of 1000). The two models play the same on 75% of deals and roughly equally well on the rest; the dominance fix doesn't make the model strictly stronger against the prior model — it makes it stronger against *external* baselines. Consistent with: both models converge on similar play in most positions, the corrected one's table values generalize better to non-typed_search opponents.
+
+### Risks / caveats
+
+- The dominance argument assumes "remove a loose card → keep a strictly more capable hand." The check uses straight-set equivalence as the loose-test, which is sufficient but not necessary — there are positions where breaking a straight you'd never want to play *would* still be safe. Conservative: we under-prune, never over-prune.
+- Shrinkage with a poorly-calibrated prior (e.g., a coarse fallback whose buckets average over very different positions) can drag well-evidenced main entries toward a worse value. With κ=20 and `main_visits >> 20` the prior gets out-weighted quickly; this should self-correct as gens accrue.
+- κ is hand-tuned; unclear whether 20 is optimal across all states. Could be made adaptive (e.g., scale with fallback's own visit count) in a follow-up.
+
+The strength gains carry forward without retraining, but **a fresh multi-gen run is likely to compound the wins** — generations 1+ will accrue main-table data faster on the *correct* states (no longer wasting visits on dominated moves), and shrinkage means smaller per-state samples translate to usable signal sooner.
+
+---
+
+## Bigger training: 6 generations × 200k games
+
+To check whether the marginal pimc(20) gains from leaf extension surface with more data, retrained 6 generations × 200k games each (1.2M typed_search self-play games total) with all current code (corrected pruning + Bayesian shrinkage + leaf extension).
+
+Per-gen results (1000-deal pimc(20) eval for tighter CIs):
+
+| Gen | vs random | vs greedy | vs pimc(20) | vs prev gen |
+|---|---|---|---|---|
+| 0 | 92.05% | 64.25% | 47.20% | — |
+| 1 | 92.25% | 69.15% | 55.80% | 49.70% |
+| 2 | 93.70% | 71.30% | 56.40% | 53.20% |
+| 3 | **93.95%** | 70.55% | **61.70%** | 50.75% |
+| 4 | 91.50% | 70.70% | 60.70% | 50.10% |
+| 5 | 92.95% | 71.55% | 59.80% | 49.65% |
+| 6 | 93.70% | **71.65%** | 59.90% | 50.10% |
+
+Saturation confirmed at gen 3-4. Cross-gen head-to-heads inside this run:
+- gen-6 vs gen-4: 50.45% [48.26, 52.64], 80% splits — tied
+- gen-6 vs gen-3: 50.05% [47.86, 52.24], 78% splits — tied
+- gen-6 vs gen-3 decisive: 50.22% [43.71, 56.73] — tied even on decisive
+
+So gens 3-6 are statistically indistinguishable from each other; more gens past 4 don't help.
+
+Cross-run: 6×200k gen-6 vs the prior 4×50k+extension gen-4:
+- Overall: 51.60% [49.41, 53.79] — barely tied
+- Decisive: 56.78% [50.40, 62.94] — CI just excludes 50%
+
+So bigger training delivers a small but detectable improvement on decisive deals. ~76% of deals are still split — most positions play the same.
+
+Table coverage at gen 6 (post-merge, ~6.7M total visits):
+
+| Metric | 4×50k gen-4 | 6×200k gen-6 | Δ |
+|---|---|---|---|
+| eval_main coverage | 13.5% | 17.4% | +28% |
+| Entries ≥5 visits | 29,212 | 48,727 | +67% |
+| Entries ≥20 visits | 14,621 | 30,768 | +110% |
+| **Entries ≥100 visits** | **3,439** | **11,567** | **+236%** |
+| eval_fb coverage | 44.2% | 50.5% | +14% |
+| Default-query rate | 0.70% | 0.23% | −3.0× |
+
+The biggest gain from longer training is the well-saturated tail — **3.4× more entries have ≥100 visits**, so the table is noticeably less noisy on the rare-state tail. The default-fallback rate drops from ~0.7% to ~0.2%.
+
+**Best vs pimc(20) across all runs:**
+
+| Run | Best gen | Best % vs pimc(20) | Sample size |
+|---|---|---|---|
+| 4×50k pre-dom-fix | gen-4 | 55.0% | 200 deals |
+| 4×50k corrected pruning | gen-4 | 57.0% | 200 deals |
+| 4×50k + leaf extension | gen-4 | 57.95% [55.77, 60.10] | 1000 deals |
+| **6×200k + leaf extension** | **gen-3** | **61.70%** | 1000 deals |
+
+Cumulative improvement from the chain (corrected pruning + Bayesian shrinkage + leaf extension + bigger training): **+6.7 pp vs pimc(20)** — from 55.0% to 61.7%.
+
+**Production model recommendation:** gen-3 or gen-4 of the 6×200k run (`data/typed_search_v3` or `_v4`). Both saturated and statistically equivalent; gen-3 has the highest pimc result, gen-4 the highest greedy. Pick either.
+
+---
+
+## mp_disc + factored move-prob storage
+
+Two related changes that together produce the cleanest improvement of the
+session.
+
+### mp_disc — discard-conditioned response prediction
+
+Adds a third tier to the move-prob chain (was: `mp_fallback → mp_main`):
+
+```
+mp_fallback (key: player_move only)
+   → mp_main (key: + opp_count + our_size_bucket)
+      → mp_disc (key: + 11-bit "opp could still hold ≥3 of rank X" bitmap)
+```
+
+`mp_disc` is populated only for **eligible moves** (singles 3-K, doubles 3-K,
+triples 3-Q — 32 moves total) since the analyzer showed that for higher-rank
+singles, doubles, full houses, bombs and straights the response is
+PASS-dominated regardless of context (~98% PASS for max_prob ≥ 0.6 cells).
+
+Bitmap masking per move type:
+- Singles / doubles: bits for face 4..A (excluding 2, which we don't track).
+- Triples: bits for face 4..K (excluding A, since triple-A is the bomb).
+- Bits below the move's rank are always masked out (opponent can't beat with
+  same-type at lower rank).
+
+opp_count and our_size are 4-bucketed in the disc key
+(`[1-4][5-7][8-11][12-16]`), giving a worst-case ~164k state space.
+
+### Factored per-cell representation
+
+Each cell in all three mp tables stores **108 floats** (was 936 = 468 counts +
+468 trials):
+
+| Component | size | meaning |
+|---|---|---|
+| `pass_count, pass_trial` | 2 | did opp pass / was passing feasible |
+| `main_count[13], main_trial[13]` | 26 | per-rank, did opp play same-type-higher at R |
+| `bomb_rank_count[13], bomb_rank_trial[13]` | 26 | per-rank, did opp play a bomb at R |
+| `bomb_aux_count[14], bomb_aux_trial[14]` | 28 | per-aux-idx (0=bare, 1..13=rank+1) |
+| `fh_aux_count[13], fh_aux_trial[13]` | 26 | per-pair-aux rank for FH responses |
+
+Each response y decomposes to its component contributions:
+- `y == PASS` → pass component
+- `y` is bomb → `bomb_rank[R]` AND `bomb_aux[A]`
+- `y` is same-type-higher → `main_rank[R]` (and `fh_aux[A]` for FH)
+
+At training time, factor `y_played` and increment its component counts; for
+each y in the deduced-feasible set, factor it and increment touched
+component trials (deduplicated per turn).
+
+At inference, per-component shrunken values are computed:
+
+```
+P(component) = (kappa·prior + count) / (kappa + trial)
+```
+
+with the prior coming from the previous tier (chain). Per-y weight is the
+product of its components' shrunken values; weights normalized over the
+candidate set.
+
+Independence assumption between rank and aux gives substantial
+data-efficiency gain — observing one bomb-3-aux-K informs both
+bomb-3-aux-anything *and* bomb-anything-aux-K.
+
+### Effects (6×200k training)
+
+Disk sizes (gen 6):
+
+| File | Old (dense, 15M ext) | New (factored, mp_disc) | Reduction |
+|---|---|---|---|
+| `mp_main.bin` | ~55 MB | 8.7 MB | 6× |
+| `mp_disc.bin` | n/a | 44 MB | new tier |
+| `eval_extended.bin` | 1.7 MB | 2.8 MB | (slightly bigger from new feature spec) |
+| `eval_main.bin` | 660 KB | 940 KB | similar |
+| **Total** | **~700 MB** (with old 15M ext) | **~57 MB** | **~12×** |
+
+Per-gen vs pimc(20) (1000 deals):
+
+| Gen | vs random | vs greedy | vs pimc(20) | vs prev |
+|---|---|---|---|---|
+| 0 | 93.65% | 65.20% | 46.20% | — |
+| 1 | 92.80% | 71.50% | 58.10% | 50.00% |
+| 2 | 93.00% | 70.75% | 55.60% | 53.05% |
+| 3 | 92.40% | 71.05% | 58.20% | 51.45% |
+| 4 | 93.00% | 70.80% | 57.30% | 50.25% |
+| 5 | 93.00% | 70.75% | **60.40%** | 50.45% |
+| 6 | 92.95% | 71.05% | 59.10% | 51.05% |
+
+Tighter eval at 2000 deals: **gen 5 vs pimc(20) = 60.15% [58.62, 61.66]** (decisive 76.16% [73.04, 79.02]).
+
+**Head-to-head vs prior best model (4×50k extension gen 4):**
+- Overall: **68.60% [66.53, 70.60]** — strongly significant win.
+- Decisive: **92.27% [89.40, 94.42]**.
+- Only 56% splits (vs. typical 75%+ for prior comparisons).
+
+The smaller split share is the cleanest signal that the new model
+**plays meaningfully differently** in many positions. Prior changes mostly
+reproduced the same play with minor table reweighting; this change shifts
+behavior on a substantial fraction of positions, and the new behavior wins
+the vast majority of decisive games.
+
+### Why pimc(20) result didn't move proportionally
+
+Despite the head-to-head showing 92% decisive win, gen 5 vs pimc(20) tops
+at ~60%, similar to prior 6×200k runs. Likely explanation: pimc(20) is its
+own ceiling at this depth — both models max out against it because both
+make near-optimal play in the cases pimc(20) gets wrong, and pimc(20)'s
+own determinization noise puts a floor on what we can win above 50%. The
+head-to-head is a stronger discriminator since the models adversarially
+exploit each other's weaknesses.
+
+**Production-recommended model:** `data/typed_search_v5` (highest pimc and
+similar performance vs others), with `data/typed_search_v6` as backup.
+
+---
+
+## Paired-deal failure analysis
+
+After saturating at ~60% vs pimc(20) for several iterations, we built a paired-deal
+inspection harness to look at *strict* decisive losses — pairs where the same
+shuffle was played both ways (TS at P0 / TS at P1) and TS lost both halves.
+Such pairs prove TS played strictly worse than pimc on the same hand
+distribution: pimc could win as either side, TS could not.
+
+### Tooling: `--paired` mode in `typed_search_train`
+
+Added a paired-analysis option to the sample loop. For each pair index `i`:
+
+1. Capture the pre-shuffle RNG state.
+2. Half A: deal with that state, typed_search at P0, opponent at P1, play game.
+3. Half B: re-seed deal RNG to the same captured state, swap seats, play.
+4. Record outcome A/B; classify pair as TS-won-both / TS-lost-both / split.
+
+The CSV gains `pair_idx` + `ts_seat` columns and the run prints a summary listing
+decisive-loss pair indices for inspection. Paired logs go to
+`game_NNNN_A.log` / `game_NNNN_B.log`.
+
+### Run: 200 paired games vs pimc(20), gen-5 of factored 6×200k
+
+Pair summary:
+- TS won both: 61
+- TS lost both: 12 (decisive losses — 6%)
+- Split: 127
+
+The 12 decisive-loss pair indices: 63, 77, 80, 81, 84, 107, 134, 138, 162, 180, 182, 187.
+
+### Pair 107 walkthrough — the prototypical failure
+
+Same hands, both halves lose. Hand X = `3345678999JJQKAA` (control hand: AA,
+K, Q, JJ, triple-9, dual 3s). Hand Y = `3455667788890JQ2` (connector hand:
+6-card straights from 4-9 / 5-T / 6-J / 7-Q, pairs 55/66/77/88, the deuce).
+
+**Half A — TS holds X.** TS leads `345678` (turn 4, eval v=0.611). Pimc
+counter-leads `7890JQ` from Y, taking initiative. TS passes through 5566.
+Eventually grinds back to `[QKA]` after burning 999JJ, but pimc's deuce
+single + 88 pair + final 7 sweeps. **TS lost.**
+
+**Half B — TS holds Y.** Pimc opens `456789` from X. TS counter-leads
+`567890`. Pimc passes. TS leads `345678`. Pimc passes again. Now TS has
+`[8JQ2]`, evaluates 8-single at v=0.846. Pimc plays Q. TS plays 2 to win
+the trick. Pimc passes. TS leads J. Pimc plays K — and pimc's
+`[3399JJAA]` sweeps end-to-end with 33, 99, JJ, AA. **TS lost.**
+
+**Diagnosis: two systematic failures of the eval table, visible in both halves.**
+
+1. **Over-rates "leading a 6-straight when opponent has 16 cards."** The
+   features see "we have a straight, our_b=12-16, opp_b=12-16" → eval ~0.61.
+   In reality, when opp also has 16 cards, they have *a higher straight by
+   construction* — that's the structural threat the eval doesn't capture.
+   Bucketing `our_b=12-16` is too coarse to distinguish a control hand
+   (AAKQ pair-tower) from a connector hand (long straights).
+2. **Over-rates `[QKA]`-style endgames against a 4-card opponent.** Eval
+   reads `singles_top=1 (A) + singles_large=2 (Q,K) + opp_b=1-4` → ~0.96.
+   But it doesn't know opp has the deuce — discard at that point shows 0
+   deuces played, so all 4 are with opp. A single 2 nullifies the A; opp's
+   pair/single tail clears.
+
+The second failure pointed directly at "the eval should know what high
+cards the opponent might still hold."
+
+---
+
+## Second eval-feature redesign — opp-aware threats
+
+Goal: encode opponent's potential to hold high-rank cards, since those
+determine whether our "control" cards (Q/K/A) actually control or get
+beaten.
+
+### What we changed
+
+| Action | Cost / Benefit |
+|---|---|
+| **Drop `has_str` (radix 2)** | Δ=0.045 in earlier per-feature variance analysis; partly redundant with singles features (cards in straights also contribute to singles counts). Frees ÷2. |
+| **Revert triples from 4 regions × radix 3 → 2 regions × radix 3** | Earlier analysis showed the 4-region split (3-5/6-8/9-J/Q-K) was over-fit; data thin per cell. Frees ×9÷81 = ÷9. |
+| **Add `opp_2_bit` (radix 2)** | Could opponent still hold a deuce? Captures the deuce-kill failure mode directly. |
+| **Add `opp_A_count` (radix 3: 0/1/2+)** | Max aces opp could hold given hand+discard, bucketed. |
+| **Add `opp_high` (radix 3: 0/1/2+)** | `max(opp_max[Q], opp_max[K])` bucketed. Combined Q/K to avoid the ×9 cost of separate features. |
+
+Net: 13.4M ext states unchanged (÷2 × ÷9 × ×18 = ×1).
+
+New radix vector (16 features):
+```
+{2, 4, 4, 2, 2, 2, 4, 3, 3, 3, 3, 3, 3, 2, 3, 3}
+ init,opp_b,our_b,hb, s_3,s_4, s_57,s_med,s_lg,s_top, dbl, trp_sm,trp_lg, opp_2,opp_A,opp_high
+```
+
+### Training: 6 gens × 200k warm-start from the v6 snapshot
+
+Kept main / fb / mp_disc / mp_main / mp_fb tables (unchanged by the eval-feature
+redesign — different keying); deleted the now-stale `eval_extended.bin` and
+populated a fresh extended table under the new encoding from gen 1 onward.
+Per-gen vs pimc(20), 200 paired deals each:
+
+| Gen | Score | TS sweeps | Pimc sweeps | Sweep ratio |
+|---|---|---|---|---|
+| 1 | 57.75% | 50 | 19 | 2.6× |
+| 2 | 59.50% | 52 | 14 | 3.7× |
+| 3 | 53.50% | 45 | 31 | 1.5× |
+| 4 | 58.00% | 51 | 19 | 2.7× |
+| 5 | 55.00% | 43 | 23 | 1.9× |
+| 6 | **60.75%** | 60 | 17 | 3.5× |
+
+### Result: a wash
+
+Best generation (gen 6) is at 60.75% vs pimc(20). The prior run's best
+(gen 5 of factored 6×200k, no opp-aware features) was 60.40%. With
+±~5pp CI at 200 deals, these are statistically indistinguishable.
+
+**Two interpretations for why the new features didn't help:**
+
+1. **Redundancy with existing logic.** The eval already promotes "guaranteed-largest"
+   singles to the top bucket — this *implicitly* uses opp_max via the
+   `compute_r_star` helper. So when opp can't have a 2 (discard exhausted),
+   our A is already promoted. The new explicit `opp_2_bit` adds direct
+   signal for the much more common case where the deuce is *not* exhausted,
+   but the search apparently can't translate that knowledge into different
+   behavior given the existing branching structure.
+2. **Mp-table mismatch.** The mp tables were trained against the old eval.
+   When the new eval sees a "different" position, the mp-driven opp-response
+   model still drives toward the old equilibrium. Six gens may not be enough
+   to fully realign mp + eval.
+
+Either way: the feature-engineering ceiling is close. The TS architecture
+extracts ~all the easy signal from this state space. Further gains likely
+require a fundamentally different approximator — e.g., a neural network that
+can learn arbitrary feature combinations (instead of forcing the engineer
+to pick which 16 dimensions to bucket).
+
+### Production model unchanged
+
+`data/typed_search_v5` (factored 6×200k, gen 5) remains the recommended
+production model. The opp-aware variant is preserved as
+`data/typed_search_v106` (and snapshots `_v101..v106` for the trajectory).

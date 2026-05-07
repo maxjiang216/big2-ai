@@ -88,6 +88,14 @@ $(BUILD_DIR)/src/datagen/generate_nn_data.o: src/datagen/generate_nn_data.cpp | 
 $(BUILD_DIR)/src/datagen/generate_nn_selfplay.o: src/datagen/generate_nn_selfplay.cpp | dirs
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -c $< -o $@
 
+# typed_search module: compile every .cpp under src/players/typed_search/.
+TYPED_SEARCH_CPP := $(wildcard src/players/typed_search/*.cpp)
+TYPED_SEARCH_OBJS := $(patsubst src/players/typed_search/%.cpp,$(BUILD_DIR)/src/players/typed_search/%.o,$(TYPED_SEARCH_CPP))
+
+$(BUILD_DIR)/src/players/typed_search/%.o: src/players/typed_search/%.cpp | dirs
+	@mkdir -p $(BUILD_DIR)/src/players/typed_search
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
 $(BUILD_DIR)/test/%.o: test/%.cpp | dirs
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
@@ -103,6 +111,7 @@ CORE_OBJS := $(patsubst src/core/%.cpp,$(BUILD_DIR)/src/core/%.o,$(CORE_CPP))
 # test_core excludes test_perf.cpp (it has its own main under BENCHMARK_MAIN)
 TEST_OBJS := $(CORE_OBJS) \
              $(BUILD_DIR)/src/simulation/game_simulator.o \
+             $(TYPED_SEARCH_OBJS) \
              $(patsubst test/%.cpp,$(BUILD_DIR)/test/%.o,$(TEST_CPP))
 
 # ============================================================================
@@ -148,6 +157,7 @@ coordinator: dirs $(COORD_OBJS)
 GENDATA_OBJS := $(CORE_OBJS) \
                 $(BUILD_DIR)/src/simulation/game_simulator.o \
                 $(BUILD_DIR)/src/simulation/game_coordinator.o \
+                $(TYPED_SEARCH_OBJS) \
                 $(BUILD_DIR)/src/datagen/parquet_export.o \
                 $(BUILD_DIR)/src/datagen/samples_md.o \
                 $(BUILD_DIR)/src/datagen/generate_data.o
@@ -231,6 +241,7 @@ $(BUILD_DIR)/src/datagen/eval_nn_vs_classic.o: src/datagen/eval_nn_vs_classic.cp
 
 EVALNNVSCLA_OBJS := $(CORE_OBJS) \
                     $(BUILD_DIR)/src/simulation/game_simulator.o \
+                    $(TYPED_SEARCH_OBJS) \
                     $(BUILD_DIR)/src/datagen/eval_nn_vs_classic.o
 
 $(BIN_DIR)/eval_nn_vs_classic: $(EVALNNVSCLA_OBJS)
@@ -238,6 +249,24 @@ $(BIN_DIR)/eval_nn_vs_classic: $(EVALNNVSCLA_OBJS)
 	@echo "✓ $(BIN_DIR)/eval_nn_vs_classic"
 
 eval_nn_vs_classic: dirs $(BIN_DIR)/eval_nn_vs_classic
+
+# ============================================================================
+# bin/typed_search_train — generation training driver (no Arrow)
+# ============================================================================
+
+$(BUILD_DIR)/src/datagen/typed_search_train.o: src/datagen/typed_search_train.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+TYPED_TRAIN_OBJS := $(CORE_OBJS) \
+                    $(BUILD_DIR)/src/simulation/game_simulator.o \
+                    $(TYPED_SEARCH_OBJS) \
+                    $(BUILD_DIR)/src/datagen/typed_search_train.o
+
+$(BIN_DIR)/typed_search_train: $(TYPED_TRAIN_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ $(BIN_DIR)/typed_search_train"
+
+typed_search_train: dirs $(BIN_DIR)/typed_search_train
 
 # ============================================================================
 # bin/eval_match — head-to-head evaluation (no Arrow)
@@ -249,6 +278,7 @@ $(BUILD_DIR)/src/datagen/eval_match.o: src/datagen/eval_match.cpp | dirs
 
 EVALMATCH_OBJS := $(CORE_OBJS) \
                   $(BUILD_DIR)/src/simulation/game_simulator.o \
+                  $(TYPED_SEARCH_OBJS) \
                   $(BUILD_DIR)/src/datagen/eval_match.o
 
 $(BIN_DIR)/eval_match: $(EVALMATCH_OBJS)
@@ -266,6 +296,7 @@ $(BUILD_DIR)/src/datagen/pass_greedy_datagen.o: src/datagen/pass_greedy_datagen.
 
 PASSGREEDY_OBJS := $(CORE_OBJS) \
                   $(BUILD_DIR)/src/simulation/game_simulator.o \
+                  $(TYPED_SEARCH_OBJS) \
                   $(BUILD_DIR)/src/datagen/pass_greedy_datagen.o
 
 $(BIN_DIR)/pass_greedy_datagen: $(PASSGREEDY_OBJS)
