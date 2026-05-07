@@ -610,3 +610,143 @@ exploit each other's weaknesses.
 
 **Production-recommended model:** `data/typed_search_v5` (highest pimc and
 similar performance vs others), with `data/typed_search_v6` as backup.
+
+---
+
+## Paired-deal failure analysis
+
+After saturating at ~60% vs pimc(20) for several iterations, we built a paired-deal
+inspection harness to look at *strict* decisive losses — pairs where the same
+shuffle was played both ways (TS at P0 / TS at P1) and TS lost both halves.
+Such pairs prove TS played strictly worse than pimc on the same hand
+distribution: pimc could win as either side, TS could not.
+
+### Tooling: `--paired` mode in `typed_search_train`
+
+Added a paired-analysis option to the sample loop. For each pair index `i`:
+
+1. Capture the pre-shuffle RNG state.
+2. Half A: deal with that state, typed_search at P0, opponent at P1, play game.
+3. Half B: re-seed deal RNG to the same captured state, swap seats, play.
+4. Record outcome A/B; classify pair as TS-won-both / TS-lost-both / split.
+
+The CSV gains `pair_idx` + `ts_seat` columns and the run prints a summary listing
+decisive-loss pair indices for inspection. Paired logs go to
+`game_NNNN_A.log` / `game_NNNN_B.log`.
+
+### Run: 200 paired games vs pimc(20), gen-5 of factored 6×200k
+
+Pair summary:
+- TS won both: 61
+- TS lost both: 12 (decisive losses — 6%)
+- Split: 127
+
+The 12 decisive-loss pair indices: 63, 77, 80, 81, 84, 107, 134, 138, 162, 180, 182, 187.
+
+### Pair 107 walkthrough — the prototypical failure
+
+Same hands, both halves lose. Hand X = `3345678999JJQKAA` (control hand: AA,
+K, Q, JJ, triple-9, dual 3s). Hand Y = `3455667788890JQ2` (connector hand:
+6-card straights from 4-9 / 5-T / 6-J / 7-Q, pairs 55/66/77/88, the deuce).
+
+**Half A — TS holds X.** TS leads `345678` (turn 4, eval v=0.611). Pimc
+counter-leads `7890JQ` from Y, taking initiative. TS passes through 5566.
+Eventually grinds back to `[QKA]` after burning 999JJ, but pimc's deuce
+single + 88 pair + final 7 sweeps. **TS lost.**
+
+**Half B — TS holds Y.** Pimc opens `456789` from X. TS counter-leads
+`567890`. Pimc passes. TS leads `345678`. Pimc passes again. Now TS has
+`[8JQ2]`, evaluates 8-single at v=0.846. Pimc plays Q. TS plays 2 to win
+the trick. Pimc passes. TS leads J. Pimc plays K — and pimc's
+`[3399JJAA]` sweeps end-to-end with 33, 99, JJ, AA. **TS lost.**
+
+**Diagnosis: two systematic failures of the eval table, visible in both halves.**
+
+1. **Over-rates "leading a 6-straight when opponent has 16 cards."** The
+   features see "we have a straight, our_b=12-16, opp_b=12-16" → eval ~0.61.
+   In reality, when opp also has 16 cards, they have *a higher straight by
+   construction* — that's the structural threat the eval doesn't capture.
+   Bucketing `our_b=12-16` is too coarse to distinguish a control hand
+   (AAKQ pair-tower) from a connector hand (long straights).
+2. **Over-rates `[QKA]`-style endgames against a 4-card opponent.** Eval
+   reads `singles_top=1 (A) + singles_large=2 (Q,K) + opp_b=1-4` → ~0.96.
+   But it doesn't know opp has the deuce — discard at that point shows 0
+   deuces played, so all 4 are with opp. A single 2 nullifies the A; opp's
+   pair/single tail clears.
+
+The second failure pointed directly at "the eval should know what high
+cards the opponent might still hold."
+
+---
+
+## Second eval-feature redesign — opp-aware threats
+
+Goal: encode opponent's potential to hold high-rank cards, since those
+determine whether our "control" cards (Q/K/A) actually control or get
+beaten.
+
+### What we changed
+
+| Action | Cost / Benefit |
+|---|---|
+| **Drop `has_str` (radix 2)** | Δ=0.045 in earlier per-feature variance analysis; partly redundant with singles features (cards in straights also contribute to singles counts). Frees ÷2. |
+| **Revert triples from 4 regions × radix 3 → 2 regions × radix 3** | Earlier analysis showed the 4-region split (3-5/6-8/9-J/Q-K) was over-fit; data thin per cell. Frees ×9÷81 = ÷9. |
+| **Add `opp_2_bit` (radix 2)** | Could opponent still hold a deuce? Captures the deuce-kill failure mode directly. |
+| **Add `opp_A_count` (radix 3: 0/1/2+)** | Max aces opp could hold given hand+discard, bucketed. |
+| **Add `opp_high` (radix 3: 0/1/2+)** | `max(opp_max[Q], opp_max[K])` bucketed. Combined Q/K to avoid the ×9 cost of separate features. |
+
+Net: 13.4M ext states unchanged (÷2 × ÷9 × ×18 = ×1).
+
+New radix vector (16 features):
+```
+{2, 4, 4, 2, 2, 2, 4, 3, 3, 3, 3, 3, 3, 2, 3, 3}
+ init,opp_b,our_b,hb, s_3,s_4, s_57,s_med,s_lg,s_top, dbl, trp_sm,trp_lg, opp_2,opp_A,opp_high
+```
+
+### Training: 6 gens × 200k warm-start from the v6 snapshot
+
+Kept main / fb / mp_disc / mp_main / mp_fb tables (unchanged by the eval-feature
+redesign — different keying); deleted the now-stale `eval_extended.bin` and
+populated a fresh extended table under the new encoding from gen 1 onward.
+Per-gen vs pimc(20), 200 paired deals each:
+
+| Gen | Score | TS sweeps | Pimc sweeps | Sweep ratio |
+|---|---|---|---|---|
+| 1 | 57.75% | 50 | 19 | 2.6× |
+| 2 | 59.50% | 52 | 14 | 3.7× |
+| 3 | 53.50% | 45 | 31 | 1.5× |
+| 4 | 58.00% | 51 | 19 | 2.7× |
+| 5 | 55.00% | 43 | 23 | 1.9× |
+| 6 | **60.75%** | 60 | 17 | 3.5× |
+
+### Result: a wash
+
+Best generation (gen 6) is at 60.75% vs pimc(20). The prior run's best
+(gen 5 of factored 6×200k, no opp-aware features) was 60.40%. With
+±~5pp CI at 200 deals, these are statistically indistinguishable.
+
+**Two interpretations for why the new features didn't help:**
+
+1. **Redundancy with existing logic.** The eval already promotes "guaranteed-largest"
+   singles to the top bucket — this *implicitly* uses opp_max via the
+   `compute_r_star` helper. So when opp can't have a 2 (discard exhausted),
+   our A is already promoted. The new explicit `opp_2_bit` adds direct
+   signal for the much more common case where the deuce is *not* exhausted,
+   but the search apparently can't translate that knowledge into different
+   behavior given the existing branching structure.
+2. **Mp-table mismatch.** The mp tables were trained against the old eval.
+   When the new eval sees a "different" position, the mp-driven opp-response
+   model still drives toward the old equilibrium. Six gens may not be enough
+   to fully realign mp + eval.
+
+Either way: the feature-engineering ceiling is close. The TS architecture
+extracts ~all the easy signal from this state space. Further gains likely
+require a fundamentally different approximator — e.g., a neural network that
+can learn arbitrary feature combinations (instead of forcing the engineer
+to pick which 16 dimensions to bucket).
+
+### Production model unchanged
+
+`data/typed_search_v5` (factored 6×200k, gen 5) remains the recommended
+production model. The opp-aware variant is preserved as
+`data/typed_search_v106` (and snapshots `_v101..v106` for the trajectory).
