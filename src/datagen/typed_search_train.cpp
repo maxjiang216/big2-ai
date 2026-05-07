@@ -20,6 +20,7 @@
 #include "game_simulator.h"
 #include "partial_game.h"
 #include "player_factory.h"
+#include "player_factory_registry.h"
 #include "random/random_player_factory.h"
 #include "typed_search/eval_features.h"
 #include "typed_search/eval_table.h"
@@ -51,12 +52,19 @@ struct Args {
   std::uint64_t seed = 0;
   std::string tables_dir = "data/typed_search";
   // Optional: after the main run, play `sample_games` extra typed_search
-  // self-play games with verbose annotated logs to `sample_dir`/game_NNNN.log
-  // (top-10 moves with values per turn). Also writes a per-decision stats
-  // CSV to `stats_csv` if non-empty.
+  // games with verbose annotated logs to `sample_dir`/game_NNNN.log (top-10
+  // moves with values per turn). Also writes a per-decision stats CSV to
+  // `stats_csv` if non-empty. By default both seats are typed_search; set
+  // `opponent` to play vs another policy (e.g., "pimc" param=20).
   int sample_games = 0;
   std::string sample_dir;
   std::string stats_csv;
+  std::string opponent;          // empty = self-play
+  double opponent_param = 0.0;
+  // Paired analysis: each "game" is actually a pair — same shuffle played
+  // both ways. Logs to game_NNNN_A.log / game_NNNN_B.log. Stats CSV gains
+  // `pair_idx` and `ts_seat` columns. Prints per-pair outcome summary.
+  bool paired = false;
 };
 
 Args parse_args(int argc, char *argv[]) {
@@ -81,6 +89,9 @@ Args parse_args(int argc, char *argv[]) {
     else if (s == "--sample-games") a.sample_games = std::stoi(next("--sample-games"));
     else if (s == "--sample-dir") a.sample_dir = next("--sample-dir");
     else if (s == "--stats-csv") a.stats_csv = next("--stats-csv");
+    else if (s == "--opponent") a.opponent = next("--opponent");
+    else if (s == "--opponent-param") a.opponent_param = std::stod(next("--opponent-param"));
+    else if (s == "--paired") a.paired = true;
     else {
       std::cerr << "Unknown flag: " << s << "\n";
       std::exit(2);
@@ -533,9 +544,19 @@ int main(int argc, char *argv[]) {
     std::ofstream stats;
     if (!args.stats_csv.empty()) {
       stats.open(args.stats_csv);
-      stats << "game_idx,turn_idx,player,tb_case,last_combo,last_rank,"
+      stats << "game_idx,pair_idx,ts_seat,turn_idx,player,tb_case,last_combo,last_rank,"
                "our_hand_size,opp_size,nodes_searched,n_legal,top1_move,"
-               "top1_value,chosen_move,chosen_value\n";
+               "top1_value,chosen_move,chosen_value,winner_seat,top2_value\n";
+    }
+    // Set up opponent factory if specified.
+    std::shared_ptr<PlayerFactory> opp_factory;
+    if (!args.opponent.empty()) {
+      opp_factory = make_player_factory(args.opponent, args.opponent_param,
+                                          static_cast<unsigned int>(args.seed));
+      if (!opp_factory) {
+        std::cerr << "Unknown opponent: " << args.opponent << "\n";
+        std::exit(2);
+      }
     }
     if (args.sample_games > 0 && !args.sample_dir.empty()) {
       std::filesystem::create_directories(args.sample_dir);
@@ -558,30 +579,82 @@ int main(int argc, char *argv[]) {
     };
 
     std::cout << "Sample/stats run: games=" << args.sample_games
+              << " paired=" << (args.paired ? "yes" : "no")
               << " stats=" << (args.stats_csv.empty() ? "none" : args.stats_csv)
               << "\n";
     std::mt19937 rng(args.seed + 0xCAFEBABEull);
-    for (int gi = 0; gi < std::max(args.sample_games, 1); ++gi) {
-      auto p0 = std::make_unique<typed_search::TypedSearchPlayer>(
-          sample_tables, static_cast<std::uint64_t>(rng()));
-      auto p1 = std::make_unique<typed_search::TypedSearchPlayer>(
-          sample_tables, static_cast<std::uint64_t>(rng()));
-      Game game;
-      game.shuffle_deal(rng);
-      p0->accept_deal(game, 0);
-      p1->accept_deal(game, 1);
+    // In paired mode, sample_games counts pairs (so 2× games run). For each
+    // pair we deal once with a fixed seed, then play it twice with seats
+    // swapped using the same starting hands.
+    int outer_iters = std::max(args.sample_games, 1);
+    int halves_per_iter = args.paired ? 2 : 1;
 
-      std::ofstream log;
-      bool log_this = (gi < args.sample_games) && !args.sample_dir.empty();
-      if (log_this) {
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "%04d", gi);
-        log.open(args.sample_dir + "/game_" + buf + ".log");
-        log << "=== Game " << gi << " ===\n";
-        log << "P0 hand: " << fmt_hand(game.player_hand(0)) << "\n";
-        log << "P1 hand: " << fmt_hand(game.player_hand(1)) << "\n\n";
-      }
+    // Track pair outcomes for the summary at the end.
+    struct PairOutcome { int winner_A = -1; int winner_B = -1; };
+    std::vector<PairOutcome> pair_outcomes(args.paired ? outer_iters : 0);
 
+    for (int pair_idx = 0; pair_idx < outer_iters; ++pair_idx) {
+      // Capture the pre-shuffle rng state so half B sees the same shuffle.
+      std::mt19937 shuffle_rng_seed = rng;
+      // In paired mode we still want distinct player rngs across halves to
+      // avoid trivial reproductions, but typed_search is mostly deterministic
+      // given tables anyway. Use distinct seeds per half.
+      for (int half = 0; half < halves_per_iter; ++half) {
+        int gi = args.paired ? (pair_idx * 2 + half) : pair_idx;
+        // ts_seat: in paired mode, half=0 puts typed_search at P0 and half=1
+        // at P1. In non-paired mode, typed_search is always at P0.
+        int ts_seat = args.paired ? half : 0;
+
+        // Reset rng to the pair-shuffle state for this half so cards align.
+        std::mt19937 deal_rng = shuffle_rng_seed;
+        // Player rngs: independent per half to avoid coupled tie-breaks.
+        std::uint64_t pseed_a = static_cast<std::uint64_t>(args.seed +
+            0xA5A5A5A5ull * (pair_idx + 1) + 7u * half);
+        std::uint64_t pseed_b = static_cast<std::uint64_t>(args.seed +
+            0x5A5A5A5Aull * (pair_idx + 1) + 13u * half);
+
+        std::unique_ptr<Player> p0, p1;
+        auto make_ts = [&](std::uint64_t ps) {
+          return std::make_unique<typed_search::TypedSearchPlayer>(
+              sample_tables, ps);
+        };
+        if (ts_seat == 0) {
+          p0 = make_ts(pseed_a);
+          p1 = opp_factory ? opp_factory->create_player() : make_ts(pseed_b);
+        } else {
+          p0 = opp_factory ? opp_factory->create_player() : make_ts(pseed_b);
+          p1 = make_ts(pseed_a);
+        }
+
+        Game game;
+        game.shuffle_deal(deal_rng);
+        p0->accept_deal(game, 0);
+        p1->accept_deal(game, 1);
+
+        std::ofstream log;
+        bool log_this = !args.sample_dir.empty();
+        if (log_this) {
+          char buf[64];
+          if (args.paired) {
+            std::snprintf(buf, sizeof(buf), "%04d_%c", pair_idx,
+                          (half == 0 ? 'A' : 'B'));
+          } else {
+            std::snprintf(buf, sizeof(buf), "%04d", gi);
+          }
+          log.open(args.sample_dir + "/game_" + buf + ".log");
+          if (args.paired) {
+            log << "=== Pair " << pair_idx << " half " << (half == 0 ? "A" : "B")
+                << "  (typed_search at P" << ts_seat << ") ===\n";
+          } else {
+            log << "=== Game " << gi << " ===\n";
+          }
+          log << "P0 hand: " << fmt_hand(game.player_hand(0)) << "\n";
+          log << "P1 hand: " << fmt_hand(game.player_hand(1)) << "\n\n";
+        }
+        // The original code below was indented one level less — preserve.
+
+      // Buffer per-turn stats rows, then append winner_seat after game end.
+      std::vector<std::string> stats_rows;
       int turn_idx = 0;
       int last_mover = -1;
       while (!game.is_over()) {
@@ -596,15 +669,20 @@ int main(int argc, char *argv[]) {
 
         Move chosen = curr->select_move();
         int tb_case = curr->last_tb_case();
-        bool used_search = (tb_case == -1);
 
-        const auto &res = curr->last_result();
-        std::size_t n_legal = res.top_moves.size();
+        // Only typed_search players have last_result(). For others we have
+        // no per-turn search trace (e.g., pimc).
+        auto *ts = dynamic_cast<typed_search::TypedSearchPlayer *>(curr);
+        bool used_search = ts && (tb_case == -1);
+        const typed_search::TypedSearch::Result *res = ts ? &ts->last_result() : nullptr;
+        std::size_t n_legal = (used_search && res) ? res->top_moves.size() : 0;
         int top1_move = -1;
         float top1_val = 0.0f;
-        if (used_search && !res.top_moves.empty()) {
-          top1_move = res.top_moves.front().first;
-          top1_val = res.top_moves.front().second;
+        float top2_val = 0.0f;
+        if (used_search && res && !res->top_moves.empty()) {
+          top1_move = res->top_moves.front().first;
+          top1_val = res->top_moves.front().second;
+          if (res->top_moves.size() >= 2) top2_val = res->top_moves[1].second;
         }
 
         if (log_this) {
@@ -612,33 +690,42 @@ int main(int argc, char *argv[]) {
               << "  hand(" << our_size << ")=" << fmt_hand(our_hand)
               << "  opp=" << opp_size
               << "  last=" << fmt_move(last_move) << "\n";
-          if (used_search) {
-            log << "  search: " << res.nodes_searched
+          if (used_search && res) {
+            log << "  search: " << res->nodes_searched
                 << " nodes, " << n_legal << " legal moves\n";
-            std::size_t shown = std::min<std::size_t>(10, res.top_moves.size());
+            std::size_t shown = std::min<std::size_t>(10, res->top_moves.size());
             for (std::size_t i = 0; i < shown; ++i) {
-              Move mv(res.top_moves[i].first);
+              Move mv(res->top_moves[i].first);
               log << "    " << (i + 1) << ". " << fmt_move(mv)
-                  << "  v=" << res.top_moves[i].second << "\n";
+                  << "  v=" << res->top_moves[i].second << "\n";
             }
-          } else {
+          } else if (ts) {
             log << "  tablebase: case=" << tb_case << "\n";
+          } else {
+            log << "  (opponent's move)\n";
           }
           log << "  -> chosen: " << fmt_move(chosen) << "\n\n";
         }
 
         if (stats.is_open()) {
-          stats << gi << "," << turn_idx << "," << cp << "," << tb_case
+          // Only emit stats rows for typed_search moves so the analysis is
+          // about the typed_search side's decisions.
+          if (ts) {
+            std::ostringstream row;
+            row << gi << "," << pair_idx << "," << ts_seat
+                << "," << turn_idx << "," << cp << "," << tb_case
                 << "," << static_cast<int>(last_move.combination)
                 << "," << last_move.rank
                 << "," << our_size << "," << opp_size
-                << "," << (used_search ? res.nodes_searched : 0)
+                << "," << (used_search && res ? res->nodes_searched : 0)
                 << "," << n_legal
                 << "," << top1_move
                 << "," << top1_val
                 << "," << encodeMove(chosen)
-                << "," << (used_search ? res.value : 0.0f)
-                << "\n";
+                << "," << (used_search && res ? res->value : 0.0f);
+            stats_rows.push_back(row.str());
+            stats_rows.back() += "," + std::to_string(top2_val);
+          }
         }
 
         game.apply_move(chosen);
@@ -647,11 +734,61 @@ int main(int argc, char *argv[]) {
         ++turn_idx;
       }
 
+      // Now we know the winner. Flush buffered stats rows with winner_seat
+      // inserted between chosen_value and top2_value.
+      if (stats.is_open()) {
+        for (auto &r : stats_rows) {
+          // r currently looks like "...,chosen_value,top2_value". Insert
+          // winner_seat just before top2_value.
+          auto pos = r.rfind(',');
+          std::string row = r.substr(0, pos) + "," +
+                              std::to_string(last_mover) + r.substr(pos);
+          stats << row << "\n";
+        }
+      }
       if (log_this) {
         log << "Winner: P" << last_mover << " after " << turn_idx
             << " turns\n";
       }
+
+      // Record pair outcome for the summary at the end. Translate winner_seat
+      // to "did typed_search win?" based on ts_seat.
+      if (args.paired) {
+        bool ts_won = (last_mover == ts_seat);
+        if (half == 0) pair_outcomes[pair_idx].winner_A = ts_won ? 1 : 0;
+        else pair_outcomes[pair_idx].winner_B = ts_won ? 1 : 0;
+      }
+      }  // close per-half loop
+
+      // Advance the outer rng past the deal so the next pair gets fresh cards.
+      // We need to consume the same amount the deal consumed; the simplest
+      // way is to do the deal once on `rng` itself.
+      Game throwaway;
+      throwaway.shuffle_deal(rng);
     }
+
+    // Print pair-outcome summary.
+    if (args.paired) {
+      int both_lost = 0, both_won = 0, split = 0;
+      for (const auto &po : pair_outcomes) {
+        if (po.winner_A == 0 && po.winner_B == 0) ++both_lost;
+        else if (po.winner_A == 1 && po.winner_B == 1) ++both_won;
+        else ++split;
+      }
+      std::cout << "\nPair summary (" << pair_outcomes.size() << " pairs):\n";
+      std::cout << "  TS won both:  " << both_won << "\n";
+      std::cout << "  TS lost both: " << both_lost
+                << "  <-- decisive losses (worth inspecting)\n";
+      std::cout << "  Split:        " << split << "\n";
+      std::cout << "\nDecisive-loss pair indices: ";
+      for (std::size_t i = 0; i < pair_outcomes.size(); ++i) {
+        if (pair_outcomes[i].winner_A == 0 && pair_outcomes[i].winner_B == 0) {
+          std::cout << i << " ";
+        }
+      }
+      std::cout << "\n";
+    }
+
     if (stats.is_open()) std::cout << "Stats CSV written.\n";
     if (args.sample_games > 0 && !args.sample_dir.empty())
       std::cout << "Annotated sample games written.\n";
