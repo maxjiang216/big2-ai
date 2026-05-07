@@ -34,6 +34,24 @@ void test_state_id_in_range() {
   uint32_t mid2 = typed_search::main_state_id(ctx);
   assert(mid2 < typed_search::kMainStateCount);
   assert(mid2 != mid);  // initiative changes the encoding
+
+  // Extended encoding: stress with several hand/discard configurations.
+  std::array<int, 13> hand2{};
+  std::array<int, 13> disc2{};
+  hand2[0] = 4; hand2[5] = 3; hand2[11] = 1;  // bomb 3s, triple 8, single A
+  typed_search::LeafContext ctx2{hand2, disc2, 12, 0};
+  uint32_t eid = typed_search::extended_state_id(ctx2);
+  assert(eid < typed_search::kExtendedStateCount);
+
+  // Ensure new opp-aware features actually move the state ID. Same hand,
+  // different discard (deuces all in discard) should change the state id
+  // (opp_2_bit drops 1 -> 0).
+  std::array<int, 13> disc_no_2 = disc2;
+  disc_no_2[12] = 1;
+  typed_search::LeafContext ctx3{hand2, disc_no_2, 12, 0};
+  uint32_t eid2 = typed_search::extended_state_id(ctx3);
+  assert(eid2 < typed_search::kExtendedStateCount);
+  assert(eid != eid2);
 }
 
 void test_impute_terminal() {

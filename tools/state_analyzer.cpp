@@ -25,70 +25,47 @@ using typed_search::EvalTable;
 namespace {
 
 // Mixed-radix encoding used by extended_state_id (in this exact order):
-//   init(2) opp_b(4) our_b(4) hb(2) st(3) ds(3)
-//   sm(4) med(3) lg(3) top(3)            -- singles
-//   dsm(3) dmed(3) dlg(3)                -- doubles
-//   tsm(3) tlg(3)                        -- triples
-constexpr int kRadices[15] = {2, 4, 4, 2, 3, 3, 4, 3, 3, 3, 3, 3, 3, 3, 3};
-constexpr const char *kNames[15] = {"init", "opp_b", "our_b", "bomb", "str",
-                                      "ds_ts", "sm",   "med",   "lg",  "top",
-                                      "dbl_sm", "dbl_med", "dbl_lg",
-                                      "trp_sm", "trp_lg"};
+//   init(2) opp_b(4) our_b(4) hb(2)
+//   s_3(2) s_4(2) s_57(4) s_med(3) s_lg(3) s_top(3)        -- singles
+//   doubles(3)                                              -- all doubles
+//   trip_sm(3) trip_lg(3)                                   -- triples (2 regions)
+//   opp_2(2) opp_A(3) opp_high(3)                           -- opp threat features
+constexpr int kRadices[16] = {2, 4, 4, 2, 2, 2, 4, 3, 3, 3, 3, 3, 3, 2, 3, 3};
+constexpr const char *kNames[16] = {"init", "opp_b", "our_b", "bomb",
+                                      "s_3", "s_4", "s_57", "s_med", "s_lg",
+                                      "s_top", "dbl",
+                                      "trp_sm", "trp_lg",
+                                      "opp_2", "opp_A", "opp_high"};
 
-// Decode ext state ID to a 15-vector of feature bucket values.
-void decode_ext(uint32_t s, int out[15]) {
-  for (int i = 14; i >= 0; --i) {
+// Decode ext state ID to a 16-vector of feature bucket values.
+void decode_ext(uint32_t s, int out[16]) {
+  for (int i = 15; i >= 0; --i) {
     out[i] = static_cast<int>(s % kRadices[i]);
     s /= kRadices[i];
   }
 }
 
-// Encode the same 15-vector to a state ID (round-trip check).
-uint32_t encode_ext(const int v[15]) {
+// Encode the same 16-vector to a state ID (round-trip check).
+uint32_t encode_ext(const int v[16]) {
   uint32_t s = 0;
-  for (int i = 0; i < 15; ++i) s = s * kRadices[i] + v[i];
-  return s;
-}
-
-// Map each ext bucket index to a coarsened main-table bucket. Main has:
-//   sm: 0/1/2+   (radix 3 — clamp ext sm 0-3 -> 0,1,2,2)
-//   med/lg/top:  0/1+ (radix 2 — clamp 0/1/2 -> 0,1,1)
-//   dsm/dmed/dlg: 0/1+ (clamp)
-//   tsm/tlg:      0/1+ (clamp)
-// The doubles boundary differs: ext medium=8-J, main medium=8-10. We can't
-// recover that without the original hand, so we just clamp here. Result is a
-// best-effort "main proxy" bucket; useful for spotting divergence.
-void coarsen_to_main(const int ext[15], int main_v[15]) {
-  for (int i = 0; i < 6; ++i) main_v[i] = ext[i];
-  // ext singles_small (radix 4) -> main (radix 3): clamp 3 -> 2
-  main_v[6] = std::min(ext[6], 2);
-  // The remaining 8 features are radix-3 in ext, radix-2 in main: clamp 2 -> 1
-  for (int i = 7; i < 15; ++i) main_v[i] = std::min(ext[i], 1);
-}
-
-// Encode 15-vector with main radices (different from ext).
-constexpr int kMainRadices[15] = {2, 4, 4, 2, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2};
-uint32_t encode_main(const int v[15]) {
-  uint32_t s = 0;
-  for (int i = 0; i < 15; ++i) s = s * kMainRadices[i] + v[i];
+  for (int i = 0; i < 16; ++i) s = s * kRadices[i] + v[i];
   return s;
 }
 
 const char *bucket_label(int idx, int v) {
-  // Compact human-readable bucket value names.
   static const char *init_n[] = {"opp_pass", "we_pass"};
   static const char *size_n[] = {"1-4", "5-7", "8-11", "12-16"};
-  static const char *bomb_n[] = {"no", "yes"};
-  static const char *tier_n[] = {"none", "weak", "strong"};
+  static const char *yn_n[] = {"no", "yes"};
   static const char *bk3[] = {"0", "1", "2+"};
   static const char *bk4[] = {"0", "1", "2", "3+"};
   switch (idx) {
-    case 0: return init_n[v];
-    case 1: case 2: return size_n[v];
-    case 3: return bomb_n[v];
-    case 4: case 5: return tier_n[v];
-    case 6: return bk4[v];
-    default: return bk3[v];
+    case 0: return init_n[v];                  // init
+    case 1: case 2: return size_n[v];          // opp_b, our_b
+    case 3: return yn_n[v];                    // bomb
+    case 4: case 5: return yn_n[v];            // s_3, s_4
+    case 6: return bk4[v];                     // s_57
+    case 13: return yn_n[v];                   // opp_2
+    default: return bk3[v];                    // radix-3 features
   }
 }
 
@@ -111,7 +88,7 @@ int main(int argc, char *argv[]) {
     uint32_t sid;
     float visits;
     float win_prob;
-    int features[15];
+    int features[16];
   };
   std::vector<Row> rows;
   rows.reserve(ext.size());
@@ -131,52 +108,10 @@ int main(int argc, char *argv[]) {
     const Row &r = rows[i];
     printf("#%-3d sid=%-9u visits=%7.0f wp=%.3f  ", i + 1, r.sid, r.visits,
             r.win_prob);
-    for (int j = 0; j < 15; ++j) {
+    for (int j = 0; j < 16; ++j) {
       printf("%s=%s ", kNames[j], bucket_label(j, r.features[j]));
     }
     printf("\n");
-  }
-
-  printf("\n=== Most divergent ext cells vs main proxy (visits>=100) ===\n");
-  // For each ext cell with >=100 visits, compute the main-proxy state ID and
-  // look up main's win_prob there. Sort by |ext_wp - main_wp| desc.
-  struct DivRow {
-    uint32_t sid;
-    float visits;
-    float ext_wp;
-    float main_wp;
-    float main_visits;
-    int features[15];
-  };
-  std::vector<DivRow> divs;
-  for (const Row &r : rows) {
-    if (r.visits < 100) continue;
-    int main_v[15];
-    coarsen_to_main(r.features, main_v);
-    uint32_t main_sid = encode_main(main_v);
-    auto m = main_t.lookup(main_sid);
-    DivRow d;
-    d.sid = r.sid;
-    d.visits = r.visits;
-    d.ext_wp = r.win_prob;
-    d.main_wp = m.found ? m.win_prob : 0.5f;
-    d.main_visits = m.found ? m.visit_count : 0.0f;
-    std::memcpy(d.features, r.features, sizeof(int) * 15);
-    divs.push_back(d);
-  }
-  std::sort(divs.begin(), divs.end(), [](const DivRow &a, const DivRow &b) {
-    return std::abs(a.ext_wp - a.main_wp) > std::abs(b.ext_wp - b.main_wp);
-  });
-  printf("%-3s %-9s %-7s %-6s %-6s %-7s  features\n", "#", "sid", "visits",
-          "ext_wp", "main_wp", "Δ");
-  for (int i = 0; i < std::min<int>(25, divs.size()); ++i) {
-    const DivRow &d = divs[i];
-    printf("%-3d %-9u %7.0f %.3f  %.3f  %+.3f  ", i + 1, d.sid, d.visits,
-            d.ext_wp, d.main_wp, d.ext_wp - d.main_wp);
-    for (int j = 0; j < 15; ++j) {
-      printf("%s=%s ", kNames[j], bucket_label(j, d.features[j]));
-    }
-    printf("(main_visits=%.0f)\n", d.main_visits);
   }
 
   printf("\n=== Per-feature variance: how much does each feature dimension "
@@ -184,7 +119,7 @@ int main(int argc, char *argv[]) {
   // For each feature dimension f and each value v of that dimension, group
   // ext cells (≥100 visits) by f=v and compute mean win_prob. The spread
   // across values of f tells us whether dimension f matters.
-  for (int f = 0; f < 15; ++f) {
+  for (int f = 0; f < 16; ++f) {
     double sum_per_v[5] = {};
     double cnt_per_v[5] = {};
     double sum_visits_per_v[5] = {};

@@ -9,12 +9,15 @@ namespace typed_search {
 // Total state space sizes (used by tables for sizing / sanity).
 constexpr uint32_t kMainStateCount = 442368u;
 constexpr uint32_t kFallbackStateCount = 9216u;
-// Extended state encoding. Trims `ds_ts` and the per-region doubles split
-// (replaced by a single 0/1/2+ doubles count). Splits singles into per-rank
-// indicators for 3 and 4, plus 5-7/8-10/J-K/A-2-and-GL regions. Splits
-// triples into 4 regions (3-5/6-8/9-J/Q-K).
+// Extended state encoding. Drops the binary "has_straight" (Δ≈0.045 in the
+// previous schema, mostly redundant with singles features). Reverts triples
+// to a 2-region split (small=3-8, large=9-K) at radix 3, like in earlier
+// generations. Adds three opponent-aware features that capture high-card
+// threats: opp_2_bit (could opp hold a 2?), opp_A_count (max aces opp could
+// hold, bucketed 0/1/2+), and opp_high (max(opp_max_Q, opp_max_K), 0/1/2+).
 //
-// Total: 2 * 4 * 4 * 2 * 2 * 2 * 2 * 4 * 3 * 3 * 3 * 3 * 3 * 3 * 3 * 3 = 13_436_928
+// Total: 2 * 4 * 4 * 2  * 2 * 2 * 4 * 3 * 3 * 3 * 3 * 3 * 3  * 2 * 3 * 3
+//      = 13_436_928 (same as the previous schema by construction)
 constexpr uint32_t kExtendedStateCount = 13436928u;
 
 // Inputs needed to compute eval state at a leaf (just-passed) position.

@@ -247,20 +247,13 @@ uint32_t main_state_id(const LeafContext &ctx) {
 
 uint32_t extended_state_id(const LeafContext &ctx) {
   const auto &h = ctx.player_hand;
+  const auto &d = ctx.discard_pile;
   const int our_total = hand_total(h);
 
   const int init = ctx.initiative ? 1 : 0;
   const int opp_b = size_bucket(ctx.opp_count);
   const int our_b = size_bucket(our_total);
   const int hb = has_bomb(h) ? 1 : 0;
-
-  // has_straight: any straight / DS / TS (binary). Uses the bitset helper to
-  // avoid the heavier compute_legal_moves path.
-  HandBits hb_bits = hand_bits_from_counts(h);
-  thread_local std::vector<int> straight_buf;
-  straight_moves_for_pass_masks_into(hb_bits.at1, hb_bits.at2, hb_bits.at3,
-                                       straight_buf);
-  const int has_str = straight_buf.empty() ? 0 : 1;
 
   GuaranteedLargestThresholds gl =
       compute_r_star(h, ctx.discard_pile, ctx.opp_count);
@@ -286,16 +279,29 @@ uint32_t extended_state_id(const LeafContext &ctx) {
     if (h[r] == 2) ++doubles;
   }
 
-  // Triples: 3-5 / 6-8 / 9-J / Q-K (idx 0-2 / 3-5 / 6-8 / 9-10). No GL
-  // promotion; A is a bomb (excluded), 2 can't form a triple.
-  int trip_sm = 0, trip_med = 0, trip_lg = 0, trip_top = 0;
+  // Triples: 2 regions (small=3-8, large=9-K) at radix 3 (0/1/2+). A excluded
+  // (triple-A is a bomb), 2 can't form a triple.
+  int trip_sm = 0, trip_lg = 0;
   for (int r = 0; r < 11; ++r) {
     if (h[r] != 3) continue;
-    if (r <= 2) ++trip_sm;
-    else if (r <= 5) ++trip_med;
-    else if (r <= 8) ++trip_lg;
-    else ++trip_top;  // r in 9..10 (Q-K)
+    if (r <= 5) ++trip_sm;       // 3-8
+    else ++trip_lg;              // 9-K (A and 2 excluded by loop bound)
   }
+
+  // Opponent-aware features. opp_max[r] = max cards opp could still hold of
+  // rank r, given our hand and the discard pile, capped by opp_count.
+  auto opp_max_for = [&](int r) {
+    int mx = max_cards_in_deck_for_rank(r) - h[r] - d[r];
+    if (mx < 0) mx = 0;
+    if (mx > ctx.opp_count) mx = ctx.opp_count;
+    return mx;
+  };
+  // The 2 (rank 12) only has 1 copy in deck; opp_max is 0 or 1.
+  const int opp_2_bit = (opp_max_for(12) > 0) ? 1 : 0;
+  const int opp_A_max = opp_max_for(11);
+  const int opp_Q_max = opp_max_for(9);
+  const int opp_K_max = opp_max_for(10);
+  const int opp_high_max = std::max(opp_Q_max, opp_K_max);
 
   auto b2 = [](int n) { return n > 0 ? 1 : 0; };
   auto b3 = [](int n) { return n <= 0 ? 0 : (n == 1 ? 1 : 2); };
@@ -311,7 +317,6 @@ uint32_t extended_state_id(const LeafContext &ctx) {
   s = s * 4 + opp_b;
   s = s * 4 + our_b;
   s = s * 2 + hb;
-  s = s * 2 + has_str;
   s = s * 2 + b2(s_3);
   s = s * 2 + b2(s_4);
   s = s * 4 + b4(s_57);
@@ -320,9 +325,10 @@ uint32_t extended_state_id(const LeafContext &ctx) {
   s = s * 3 + b3(s_top);
   s = s * 3 + b3(doubles);
   s = s * 3 + b3(trip_sm);
-  s = s * 3 + b3(trip_med);
   s = s * 3 + b3(trip_lg);
-  s = s * 3 + b3(trip_top);
+  s = s * 2 + opp_2_bit;
+  s = s * 3 + b3(opp_A_max);
+  s = s * 3 + b3(opp_high_max);
   return s;
 }
 
