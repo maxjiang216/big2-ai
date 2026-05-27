@@ -31,7 +31,7 @@ em++ -O3 -std=c++17 -DNDEBUG \
   -s ALLOW_MEMORY_GROWTH=1 -s INITIAL_MEMORY=67108864 \
   -s FORCE_FILESYSTEM=1 \
   -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","FS","HEAP32"]' \
-  -s EXPORTED_FUNCTIONS='["_ts_load_tables","_ts_select_move","_malloc","_free"]' \
+  -s EXPORTED_FUNCTIONS='["_ts_load_tables","_ts_select_move","_ts_legal_move_count","_malloc","_free"]' \
   -s ENVIRONMENT=web \
   -o "$OUT_DIR/big2ai.js"
 

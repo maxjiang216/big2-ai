@@ -206,6 +206,16 @@ nav a:hover { text-decoration: underline; }
 }
 #turn-indicator.your-turn { background: #166534; color: #bbf7d0; }
 #turn-indicator.cpu-turn  { background: #78350f; color: #fde68a; }
+#turn-indicator.review-turn { background: #374151; color: #e5e7eb; }
+#turn-indicator.must-pass {
+  background: #7f1d1d;
+  color: #fecaca;
+  animation: must-pass-pulse 1.1s ease-in-out infinite;
+}
+@keyframes must-pass-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
 
 /* Player area */
 #player-area {

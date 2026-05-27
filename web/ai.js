@@ -72,5 +72,19 @@ const Big2 = (() => {
     return { moveId, cards };
   }
 
-  return { init, selectMove, isReady: () => ready };
+  // Number of legal non-pass moves `hand` has against `trick`. 0 = must pass.
+  function legalMoveCount(hand, trick) {
+    const toHeap = (arr) => {
+      const p = Module._malloc(13 * 4);
+      Module.HEAP32.set(Int32Array.from(arr), p >> 2);
+      return p;
+    };
+    const hp = toHeap(hand), tp = toHeap(trick);
+    const n = Module.ccall('ts_legal_move_count', 'number',
+      ['number', 'number'], [hp, tp]);
+    [hp, tp].forEach((p) => Module._free(p));
+    return n;
+  }
+
+  return { init, selectMove, legalMoveCount, isReady: () => ready };
 })();

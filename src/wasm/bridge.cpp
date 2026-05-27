@@ -123,4 +123,26 @@ int ts_select_move(const int *hand_p, const int *discard_p, int opp_count,
   return move_id;
 }
 
+// Number of legal non-pass moves `hand` has against the trick on the table.
+// 0 means the holder is forced to pass. Used by the UI to flag forced passes.
+EMSCRIPTEN_KEEPALIVE
+int ts_legal_move_count(const int *hand_p, const int *trick_p) {
+  std::array<int, 13> hand{};
+  int trick_total = 0;
+  for (int r = 0; r < 13; ++r) {
+    hand[r] = hand_p[r];
+    trick_total += trick_p[r];
+  }
+  Move last(Move::Combination::kPass);
+  if (trick_total > 0) {
+    int tmid = find_move_id_by_counts(trick_p, trick_total);
+    if (tmid > 0) last = Move(tmid);
+  }
+  int n = 0;
+  for (int mid : compute_legal_moves(hand, last)) {
+    if (mid != kPASS) ++n;
+  }
+  return n;
+}
+
 }  // extern "C"

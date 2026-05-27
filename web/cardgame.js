@@ -306,7 +306,8 @@ function bonusPoints(remaining) {
 function endGame(winner) {
   const loserRemaining = winner === 'player' ? state.cpu.length : state.player.length;
   const bonus  = bonusPoints(loserRemaining);
-  const points = loserRemaining + bonus;
+  // A high card-count bonus *replaces* the base score — it does not add to it.
+  const points = bonus > 0 ? bonus : loserRemaining;
 
   pushHistory('system', winner === 'player' ? 'You won the hand.' : 'CPU won the hand.');
 
@@ -319,7 +320,9 @@ function endGame(winner) {
                      : state.cpuScore    >= 50 ? 'cpu' : null;
 
   state.gameResult = { winner, loserRemaining, bonus, points, seriesWon, seriesWinner };
-  state.gamePhase  = 'gameover';
+  // Pause on the final board (last move + revealed hands visible) until the
+  // player clicks through to the result popup.
+  state.gamePhase  = 'review';
 }
 
 function pushHistory(who, text) {
@@ -463,29 +466,49 @@ function typeName(ct) {
 }
 
 function renderBoard() {
-  if (state.gamePhase !== 'play') return;
+  if (state.gamePhase !== 'play' && state.gamePhase !== 'review') return;
+  const reviewing = state.gamePhase === 'review';
 
   // Scores
   document.getElementById('player-score').textContent = state.playerScore;
   document.getElementById('cpu-score').textContent    = state.cpuScore;
 
-  // CPU hand (face-down card backs)
-  renderHand(state.cpu, document.getElementById('cpu-hand'), true, null);
+  // CPU hand (face-down during play; revealed face-up at hand's end)
+  renderHand(state.cpu, document.getElementById('cpu-hand'), !reviewing, null);
   document.getElementById('cpu-count').textContent = state.cpu.length;
 
   // Trick area
   renderTrick(state.current, document.getElementById('current-trick'));
   const label = document.getElementById('trick-label');
-  if (state.currType[0] === 0) {
+  if (reviewing) {
+    const winner = state.gameResult && state.gameResult.winner === 'player' ? 'You' : 'CPU';
+    label.textContent = `Hand over — ${winner} played the final ${typeName(state.currType) || 'card'}`;
+  } else if (state.currType[0] === 0) {
     label.textContent = state.turn ? 'Your lead — play any combination' : 'CPU is leading…';
   } else {
     label.textContent = typeName(state.currType) + ' on the table';
   }
 
+  // Does the player have a legal response, or are they forced to pass?
+  const yourTurn = state.turn && state.gamePhase === 'play';
+  let mustPass = false;
+  if (yourTurn && state.currType[0] !== 0 && Big2.isReady()) {
+    mustPass = Big2.legalMoveCount(countsFromCards(state.player),
+                                   countsFromCards(state.current)) === 0;
+  }
+
   // Turn indicator
   const ind = document.getElementById('turn-indicator');
-  ind.textContent = state.turn ? 'Your turn' : 'CPU is thinking…';
-  ind.className   = state.turn ? 'your-turn' : 'cpu-turn';
+  if (reviewing) {
+    ind.textContent = 'Hand over';
+    ind.className = 'review-turn';
+  } else if (mustPass) {
+    ind.textContent = 'No legal play — you must pass';
+    ind.className = 'must-pass';
+  } else {
+    ind.textContent = state.turn ? 'Your turn' : 'CPU is thinking…';
+    ind.className   = state.turn ? 'your-turn' : 'cpu-turn';
+  }
 
   // Player hand with click handlers
   renderHand(state.player, document.getElementById('player-hand'), false, (i) => {
@@ -495,14 +518,22 @@ function renderBoard() {
     renderBoard();
   });
 
-  // Button states
-  const yourTurn = state.turn && state.gamePhase === 'play';
-  const playBtn  = document.getElementById('play-btn');
-  const passBtn  = document.getElementById('pass-btn');
-  const clearBtn = document.getElementById('clear-btn');
+  // Button states: normal controls during play, a single "see result" in review.
+  const playBtn   = document.getElementById('play-btn');
+  const passBtn   = document.getElementById('pass-btn');
+  const clearBtn  = document.getElementById('clear-btn');
+  const rulesBtn  = document.getElementById('rules-btn');
+  const resultBtn = document.getElementById('result-btn');
+  [playBtn, passBtn, clearBtn, rulesBtn].forEach(b => {
+    b.style.display = reviewing ? 'none' : '';
+  });
+  resultBtn.style.display = reviewing ? '' : 'none';
+
   playBtn.disabled  = !yourTurn;
   passBtn.disabled  = !yourTurn || state.currType[0] === 0;
   clearBtn.disabled = !yourTurn;
+  passBtn.classList.toggle('btn-green', mustPass);
+  passBtn.classList.toggle('btn-gray', !mustPass);
 
   if (state.invalidMove) {
     playBtn.textContent = 'Invalid!';
@@ -545,7 +576,9 @@ function renderOverlay() {
     return;
   }
 
-  if (state.gamePhase === 'play') {
+  // During play and the end-of-hand review, the overlay stays out of the way
+  // so the board (and final move) is visible.
+  if (state.gamePhase === 'play' || state.gamePhase === 'review') {
     overlay.classList.add('hidden');
     return;
   }
@@ -566,14 +599,10 @@ function renderOverlay() {
       <div class="overlay-btns">
         <button id="start-btn" class="btn btn-green">New Game</button>
         <button id="rules-btn-menu" class="btn btn-indigo">Rules</button>
-        <button id="exit-btn" class="btn btn-gray" type="button">← Back to Fun</button>
       </div>
     `;
     document.getElementById('start-btn').addEventListener('click', startGame);
     document.getElementById('rules-btn-menu').addEventListener('click', showRulesOverlay);
-    document.getElementById('exit-btn').addEventListener('click', () => {
-      window.location.href = '/fun';
-    });
 
   } else if (state.gamePhase === 'gameover') {
     const r = state.gameResult;
@@ -581,7 +610,7 @@ function renderOverlay() {
     content.innerHTML = `
       <h1 class="overlay-title">${youWon ? 'You Win!' : 'CPU Wins'}</h1>
       <p class="overlay-sub">${youWon ? 'CPU' : 'You'} had <strong>${r.loserRemaining}</strong> card${r.loserRemaining !== 1 ? 's' : ''} remaining</p>
-      <p class="overlay-sub">Points earned: <strong>${r.loserRemaining}${r.bonus ? ` + ${r.bonus} bonus` : ''} = ${r.points}</strong></p>
+      <p class="overlay-sub">Points earned: <strong>${r.points}</strong>${r.bonus ? ` (${r.loserRemaining}-card bonus)` : ''}</p>
       <div class="overlay-scores">
         <span>You: <strong>${state.playerScore}</strong> pts</span>
         <span class="series-note">First to 50 pts wins series</span>
@@ -688,12 +717,12 @@ function getRulesPages() {
       title: 'Scoring & Series',
       content: `
         <p>The first player to play all their cards wins the game.</p>
-        <p><strong>Points:</strong> Winner earns points equal to the opponent's remaining cards, plus a bonus:</p>
+        <p><strong>Points:</strong> The winner scores the number of cards left in the loser's hand. If the loser barely played, a fixed bonus score applies <em>instead</em> (it replaces the count, it doesn't add to it):</p>
         <ul>
-          <li>16 cards remaining (never played): +50 bonus</li>
-          <li>15 cards remaining: +40 bonus</li>
-          <li>14 cards remaining: +30 bonus</li>
-          <li>13 cards remaining: +20 bonus</li>
+          <li>16 cards remaining (never played): 50 points</li>
+          <li>15 cards remaining: 40 points</li>
+          <li>14 cards remaining: 30 points</li>
+          <li>13 cards remaining: 20 points</li>
         </ul>
         <p><strong>Series:</strong> The first player to reach <strong>50 points</strong> wins the series. The winner of each game leads the next.</p>
         <p>Use the <em>New Series</em> button at any time to reset scores and start fresh.</p>
@@ -789,13 +818,25 @@ document.getElementById('clear-btn').addEventListener('click', () => {
 
 document.getElementById('rules-btn').addEventListener('click', showRulesOverlay);
 
+document.getElementById('result-btn').addEventListener('click', () => {
+  if (state.gamePhase !== 'review') return;
+  state.gamePhase = 'gameover';
+  renderAll();
+});
+
 document.getElementById('history-clear-btn').addEventListener('click', () => {
   state.history = [];
   renderHistory();
 });
 
 document.addEventListener('keydown', e => {
-  if (state.showRules || state.gamePhase !== 'play' || !state.turn) return;
+  if (state.showRules) return;
+  if (state.gamePhase === 'review' && (e.key === ' ' || e.key === 'Enter')) {
+    e.preventDefault();
+    document.getElementById('result-btn').click();
+    return;
+  }
+  if (state.gamePhase !== 'play' || !state.turn) return;
   if (e.key === ' ' || e.key === 'Enter') {
     e.preventDefault();
     document.getElementById('play-btn').click();
