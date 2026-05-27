@@ -8,6 +8,7 @@ void run_random_game_tests();
 void run_tablebase_tests();
 void run_legal_moves_tests();
 void run_typed_search_tests();
+void run_az_search_tests();
 
 int main() {
   std::cout << "[ move        ] ";
@@ -40,6 +41,10 @@ int main() {
 
   std::cout << "[ typed_search] ";
   run_typed_search_tests();
+  std::cout << "PASS\n";
+
+  std::cout << "[ az_search   ] ";
+  run_az_search_tests();
   std::cout << "PASS\n";
 
   std::cout << "All tests passed.\n";

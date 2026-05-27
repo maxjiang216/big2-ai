@@ -368,6 +368,205 @@ class Big2SelfPlayDataset(Dataset):
         )
 
 
+# ===========================================================================
+# AlphaZero (az_search) datasets
+#
+# Two Parquet schemas, one per net (emitted by src/datagen/az_selfplay.cpp):
+#
+# Player file (az_player_genN.parquet) — one row per searched our-turn decision
+# (tablebase turns excluded):
+#   game_id, turn_idx                int32
+#   hand_0..hand_12                  int32  our hand at the decision (pre-move)
+#   opp_max_0..opp_max_12            int32  opponent max-cards-per-rank (thermo)
+#   trick_0..trick_12                int32  current trick rank counts (0 == lead)
+#   opp_size, our_size               int32  hand sizes
+#   value                            float  1.0 if we won the game else 0.0
+#   legal_moves                      list<int32>  legal engine move ids (mask)
+#   visit_moves, visit_counts        list<int32>  MCTS root visits (policy target)
+#
+# Opponent file (az_opp_genN.parquet) — one row per real opponent decision:
+#   game_id, turn_idx                int32
+#   opp_max_0..opp_max_12            int32  mover max-cards-per-rank (thermo)
+#   trick_0..trick_12                int32  current trick rank counts
+#   opp_size, our_size               int32  mover / observer hand sizes
+#   value                            float  1.0 if the observer (searcher) won
+#   legal_moves                      list<int32>  plausible opp move ids (mask)
+#   move_id                          int32  the move actually played (one-hot tgt)
+# ===========================================================================
+
+from nn.model_az import (  # noqa: E402
+    OPP_HEAD_DIM,
+    PLAYER_HEAD_DIM,
+    az_opp_head_index,
+    az_player_head_index,
+)
+
+
+def _counts(df: pd.DataFrame, prefix: str) -> np.ndarray:
+    return df[[f"{prefix}_{r}" for r in range(13)]].to_numpy(dtype=np.int32)
+
+
+def _as_int_list(v) -> np.ndarray:
+    return np.asarray(v, dtype=np.int64)
+
+
+class Big2AZPlayerDataset(Dataset):
+    """Player-net samples: value target + MCTS visit-distribution policy target.
+
+    Densifies the legal mask and visit distribution onto the PLAYER_HEAD_DIM
+    head per item (collapsing TS5; DS8 ids never appear as player targets).
+    Returns (hand, opp, trick, opp_size, our_size, value, mask, policy).
+    """
+
+    def __init__(
+        self,
+        parquet_path: str,
+        val_game_ids: Optional[set] = None,
+        train: bool = True,
+        subsample_frac: float = 1.0,
+        seed: int = 0,
+    ) -> None:
+        df = pd.read_parquet(parquet_path)
+        if val_game_ids is not None:
+            df = df[~df["game_id"].isin(val_game_ids)] if train else df[
+                df["game_id"].isin(val_game_ids)
+            ]
+        if subsample_frac < 1.0:
+            df = df.sample(frac=subsample_frac, random_state=seed)
+        df = df.reset_index(drop=True)
+
+        self.hand_enc = torch.from_numpy(encode_exact_np(_counts(df, "hand")))
+        self.opp_enc = torch.from_numpy(encode_upper_bound_np(_counts(df, "opp_max")))
+        self.trick_enc = torch.from_numpy(encode_exact_np(_counts(df, "trick")))
+        self.opp_size = torch.tensor(
+            df["opp_size"].to_numpy(np.float32) / 16.0, dtype=torch.float32
+        )
+        self.our_size = torch.tensor(
+            df["our_size"].to_numpy(np.float32) / 16.0, dtype=torch.float32
+        )
+        self.value = torch.tensor(df["value"].to_numpy(np.float32), dtype=torch.float32)
+        self.legal = [_as_int_list(v) for v in df["legal_moves"].to_list()]
+        self.vmoves = [_as_int_list(v) for v in df["visit_moves"].to_list()]
+        self.vcounts = [_as_int_list(v) for v in df["visit_counts"].to_list()]
+
+    def __len__(self) -> int:
+        return len(self.value)
+
+    def __getitem__(self, idx: int):
+        mask = torch.zeros(PLAYER_HEAD_DIM, dtype=torch.bool)
+        for m in self.legal[idx]:
+            hi = az_player_head_index(int(m))
+            if hi >= 0:
+                mask[hi] = True
+        policy = torch.zeros(PLAYER_HEAD_DIM, dtype=torch.float32)
+        for m, c in zip(self.vmoves[idx], self.vcounts[idx]):
+            hi = az_player_head_index(int(m))
+            if hi >= 0:
+                policy[hi] += float(c)
+        total = policy.sum()
+        if total > 0:
+            policy /= total
+        return (
+            self.hand_enc[idx],
+            self.opp_enc[idx],
+            self.trick_enc[idx],
+            self.opp_size[idx],
+            self.our_size[idx],
+            self.value[idx],
+            mask,
+            policy,
+        )
+
+
+class Big2AZOppDataset(Dataset):
+    """Opponent-net samples: value target + one-hot behavior (imitation) target.
+
+    Returns (opp, trick, opp_size, our_size, value, mask, target_idx).
+    """
+
+    def __init__(
+        self,
+        parquet_path: str,
+        val_game_ids: Optional[set] = None,
+        train: bool = True,
+        subsample_frac: float = 1.0,
+        seed: int = 0,
+    ) -> None:
+        df = pd.read_parquet(parquet_path)
+        if val_game_ids is not None:
+            df = df[~df["game_id"].isin(val_game_ids)] if train else df[
+                df["game_id"].isin(val_game_ids)
+            ]
+        if subsample_frac < 1.0:
+            df = df.sample(frac=subsample_frac, random_state=seed)
+        df = df.reset_index(drop=True)
+
+        self.opp_enc = torch.from_numpy(encode_upper_bound_np(_counts(df, "opp_max")))
+        self.trick_enc = torch.from_numpy(encode_exact_np(_counts(df, "trick")))
+        self.opp_size = torch.tensor(
+            df["opp_size"].to_numpy(np.float32) / 16.0, dtype=torch.float32
+        )
+        self.our_size = torch.tensor(
+            df["our_size"].to_numpy(np.float32) / 16.0, dtype=torch.float32
+        )
+        self.value = torch.tensor(df["value"].to_numpy(np.float32), dtype=torch.float32)
+        self.legal = [_as_int_list(v) for v in df["legal_moves"].to_list()]
+        self.target_idx = torch.tensor(
+            [az_opp_head_index(int(m)) for m in df["move_id"].to_numpy(np.int64)],
+            dtype=torch.long,
+        )
+
+    def __len__(self) -> int:
+        return len(self.value)
+
+    def __getitem__(self, idx: int):
+        mask = torch.zeros(OPP_HEAD_DIM, dtype=torch.bool)
+        for m in self.legal[idx]:
+            mask[az_opp_head_index(int(m))] = True
+        # The played move is always legal; guarantee it is unmasked.
+        mask[self.target_idx[idx]] = True
+        return (
+            self.opp_enc[idx],
+            self.trick_enc[idx],
+            self.opp_size[idx],
+            self.our_size[idx],
+            self.value[idx],
+            mask,
+            self.target_idx[idx],
+        )
+
+
+def make_az_split(
+    parquet_paths: "str | list[str]",
+    kind: str,
+    val_frac: float = 0.1,
+    seed: int = 0,
+    mix_decay: float = 1.0,
+) -> "tuple[Dataset, Dataset]":
+    """(train, val) split by game_id for an AZ player ('player') or opp ('opp')
+    dataset, with mix_decay subsampling of older-generation files."""
+    from torch.utils.data import ConcatDataset
+
+    if isinstance(parquet_paths, str):
+        parquet_paths = [parquet_paths]
+    Cls = Big2AZPlayerDataset if kind == "player" else Big2AZOppDataset
+
+    train_parts, val_parts = [], []
+    for i, p in enumerate(parquet_paths):
+        gids = pd.read_parquet(p, columns=["game_id"])["game_id"].unique()
+        rng = np.random.default_rng(seed + i)
+        rng.shuffle(gids)
+        n_val = max(1, int(len(gids) * val_frac))
+        val_ids = set(gids[:n_val].tolist())
+        frac = mix_decay**i
+        train_parts.append(Cls(p, val_ids, True, frac, seed + i))
+        val_parts.append(Cls(p, val_ids, False, frac, seed + i))
+
+    train_ds = train_parts[0] if len(train_parts) == 1 else ConcatDataset(train_parts)
+    val_ds = val_parts[0] if len(val_parts) == 1 else ConcatDataset(val_parts)
+    return train_ds, val_ds
+
+
 def _split_one(
     parquet_path: str, val_frac: float, seed: int, subsample_frac: float = 1.0
 ) -> tuple[Dataset, Dataset]:
