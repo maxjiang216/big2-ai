@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Big 2 — play the AI</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <nav>
+    <span>Big 2 — vs. typed-search AI</span>
+    <a href="https://github.com/maxjiang216/big2-ai" target="_blank" rel="noopener noreferrer">Big 2 AI (repo)</a>
+  </nav>
+
+  <!-- AI loading screen: blocks play until the WASM engine + tables are ready. -->
+  <div id="ai-loading">
+    <div class="ai-loading-card">
+      <h1>Big 2</h1>
+      <p>Loading the AI opponent…</p>
+      <div id="ai-progress-track"><div id="ai-progress-bar"></div></div>
+      <p id="ai-progress-text">0%</p>
+      <p class="ai-loading-note">First load downloads ~54&nbsp;MB of trained tables (cached afterward).</p>
+    </div>
+  </div>
+
+  <!-- Overlay: menu / game-over / rules sit on top of the board -->
+  <div id="overlay">
+    <div id="overlay-backdrop"></div>
+    <div id="overlay-content"></div>
+  </div>
+
+  <div id="layout">
+  <!-- Game board (always in DOM; overlay covers it when needed) -->
+  <div id="game-board">
+    <div id="score-bar">
+      <div>CPU: <strong><span id="cpu-score">0</span></strong> pts</div>
+      <div id="series-status">First to 50 pts wins the series</div>
+      <div>You: <strong><span id="player-score">0</span></strong> pts</div>
+    </div>
+
+    <div id="cpu-area">
+      <div id="cpu-hand"></div>
+      <div id="cpu-info">CPU — <span id="cpu-count">16</span> cards</div>
+    </div>
+
+    <div id="trick-area">
+      <div id="trick-label">Waiting for play…</div>
+      <div id="current-trick"></div>
+    </div>
+
+    <div id="turn-indicator"></div>
+
+    <div id="player-area">
+      <div id="player-hand"></div>
+      <div id="controls">
+        <button id="clear-btn" class="btn btn-gray">Clear</button>
+        <button id="play-btn" class="btn btn-green">Play</button>
+        <button id="pass-btn" class="btn btn-gray">Pass</button>
+        <button id="rules-btn" class="btn btn-indigo">Rules</button>
+        <button id="result-btn" class="btn btn-green" style="display:none">See result →</button>
+      </div>
+    </div>
+  </div>
+
+  <aside id="history-panel" aria-label="Game log">
+    <div class="history-header">
+      <h2>Game log</h2>
+      <button type="button" id="history-clear-btn" class="btn-history-clear" title="Clear log">Clear</button>
+    </div>
+    <div id="history-list" role="log" aria-live="polite" aria-relevant="additions"></div>
+  </aside>
+  </div>
+
+  <script src="wasm/big2ai.js"></script>
+  <script src="ai.js"></script>
+  <script src="cardgame.js"></script>
+</body>
+</html>
