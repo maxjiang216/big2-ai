@@ -13,6 +13,14 @@ public:
 
   PartialGame(const std::array<int, 13> &player_hand, int turn);
 
+  // Full-state snapshot constructor: builds a partial-game view directly from
+  // hand counts, discard counts, opponent size, the trick to beat, and whose
+  // turn it is (0 = this player to move). Used by analysis/bridge code that
+  // already holds a complete imperfect-information view.
+  PartialGame(const std::array<int, 13> &player_hand,
+              const std::array<int, 13> &discard_pile, int opponent_card_count,
+              const Move &last_move, int turn);
+
   PartialGame(const Game &game, int player_num);
 
   void apply_move(const Move &move);

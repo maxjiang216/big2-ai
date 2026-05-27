@@ -12,6 +12,14 @@ PartialGame::PartialGame(const std::array<int, 13> &player_hand, int turn)
   }
 }
 
+PartialGame::PartialGame(const std::array<int, 13> &player_hand,
+                         const std::array<int, 13> &discard_pile,
+                         int opponent_card_count, const Move &last_move,
+                         int turn)
+    : turn_(turn), player_hand_(player_hand),
+      opponent_card_count_(opponent_card_count), discard_pile_(discard_pile),
+      last_move_(last_move) {}
+
 PartialGame::PartialGame(const Game &game, int player_num)
     : turn_(game.current_player() == player_num ? 0 : 1),
       player_hand_(game.player_hand(player_num)),
