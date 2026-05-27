@@ -29,7 +29,7 @@ TEST_CPP    := $(wildcard test/*.cpp)
 RESEARCH_BIN_NAMES := best_hand multi_comb play_probs count_turn_states
 RESEARCH_BINS      := $(addprefix $(BUILD_DIR)/research/,$(RESEARCH_BIN_NAMES))
 
-.PHONY: all clean dirs test_core coordinator generate_data generate_nn_data eval_match eval_nn_match eval_nn_vs_classic play_games pass_greedy_datagen move_agreement benchmark tablebase_opp1_gen move_audit az_nn_check az_search_smoke research help
+.PHONY: all clean dirs test_core coordinator generate_data generate_nn_data eval_match eval_nn_match eval_nn_vs_classic play_games pass_greedy_datagen move_agreement benchmark tablebase_opp1_gen move_audit az_nn_check az_search_smoke az_play_check research help
 
 all: help
 
@@ -99,10 +99,12 @@ $(BUILD_DIR)/src/players/typed_search/%.o: src/players/typed_search/%.cpp | dirs
 # az_search module: torch-free core (search/grouping/forced search) links into
 # test_core; nn_eval.cpp is torch-dependent (explicit override below). Defined
 # here (before TEST_OBJS) because TEST_OBJS expands AZ_SEARCH_CORE_OBJS immediately.
-AZ_SEARCH_NN_CPP    := src/players/az_search/nn_eval.cpp
+# Torch-dependent az_search sources (LibTorch / NN). Everything else under
+# az_search/ is the torch-free core that links into test_core.
+AZ_SEARCH_NN_CPP    := src/players/az_search/nn_eval.cpp src/players/az_search/az_search_player.cpp
 AZ_SEARCH_CORE_CPP  := $(filter-out $(AZ_SEARCH_NN_CPP),$(wildcard src/players/az_search/*.cpp))
 AZ_SEARCH_CORE_OBJS := $(patsubst src/players/az_search/%.cpp,$(BUILD_DIR)/src/players/az_search/%.o,$(AZ_SEARCH_CORE_CPP))
-AZ_SEARCH_NN_OBJS   := $(BUILD_DIR)/src/players/az_search/nn_eval.o
+AZ_SEARCH_NN_OBJS   := $(patsubst src/players/az_search/%.cpp,$(BUILD_DIR)/src/players/az_search/%.o,$(AZ_SEARCH_NN_CPP))
 AZ_SEARCH_OBJS      := $(AZ_SEARCH_CORE_OBJS) $(AZ_SEARCH_NN_OBJS)
 
 # Torch-free pattern rule for az_search core sources.
@@ -110,8 +112,9 @@ $(BUILD_DIR)/src/players/az_search/%.o: src/players/az_search/%.cpp | dirs
 	@mkdir -p $(BUILD_DIR)/src/players/az_search
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
-# Explicit torch override for nn_eval.cpp (more specific than the pattern rule).
-$(BUILD_DIR)/src/players/az_search/nn_eval.o: src/players/az_search/nn_eval.cpp | dirs
+# Static pattern rule (overrides the pattern above for the listed targets):
+# torch-dependent az_search objects get TORCH_INCLUDES + -DBIG2_WITH_TORCH.
+$(AZ_SEARCH_NN_OBJS): $(BUILD_DIR)/src/players/az_search/%.o: src/players/az_search/%.cpp | dirs
 	@mkdir -p $(BUILD_DIR)/src/players/az_search
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
 
@@ -427,6 +430,25 @@ $(BIN_DIR)/az_search_smoke: $(AZ_SEARCH_SMOKE_OBJS)
 	@echo "✓ $(BIN_DIR)/az_search_smoke"
 
 az_search_smoke: dirs $(BIN_DIR)/az_search_smoke
+
+# ============================================================================
+# bin/az_play_check — AzSearchPlayer vs greedy via GameSimulator (needs LibTorch)
+# ============================================================================
+
+$(BUILD_DIR)/research/az_play_check.o: research/az_play_check.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
+
+AZ_PLAY_CHECK_OBJS := $(CORE_OBJS) \
+                      $(BUILD_DIR)/src/simulation/game_simulator.o \
+                      $(TYPED_SEARCH_OBJS) \
+                      $(AZ_SEARCH_OBJS) \
+                      $(BUILD_DIR)/research/az_play_check.o
+
+$(BIN_DIR)/az_play_check: $(AZ_PLAY_CHECK_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS_TORCH)
+	@echo "✓ $(BIN_DIR)/az_play_check"
+
+az_play_check: dirs $(BIN_DIR)/az_play_check
 
 # ============================================================================
 # bin/move_audit — az_search move-set audit dump + structural checks (no Arrow)
