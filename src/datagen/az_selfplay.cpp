@@ -33,6 +33,7 @@
 #include <arrow/io/api.h>
 #include <arrow/table.h>
 #include <parquet/arrow/writer.h>
+#include <torch/cuda.h>
 
 #include <algorithm>
 #include <atomic>
@@ -615,6 +616,14 @@ int main(int argc, char **argv) {
   const int slots = std::atoi(arg(argc, argv, "--slots", "256"));
   const float start_frac = std::atof(arg(argc, argv, "--start-frac", "0.2"));
   const unsigned seed = (unsigned)std::strtoul(arg(argc, argv, "--seed", "0"), nullptr, 10);
+  // Inference device: the NN forward dominates self-play wall time, so CUDA is a
+  // big win (the batched-across-slots forward is exactly the GPU's strength).
+  std::string device_str = arg(argc, argv, "--device", "cpu");
+  if (device_str == "cuda" && !torch::cuda::is_available()) {
+    std::printf("[az_selfplay] CUDA requested but unavailable; falling back to CPU\n");
+    device_str = "cpu";
+  }
+  torch::Device device(device_str == "cuda" ? torch::kCUDA : torch::kCPU);
 
   std::vector<PlayerSample> ps;
   std::vector<OppSample> os;
@@ -624,8 +633,9 @@ int main(int argc, char **argv) {
     std::printf("[az_selfplay] gen0 random self-play: %d games (start_frac=%.2f)\n", games, start_frac);
     run_random_selfplay(games, start_frac, seed, ps, os);
   } else {
-    std::printf("[az_selfplay] NN self-play: %d games, sims=%d, slots=%d\n", games, sims, slots);
-    NNEvaluator nn(player_model, opp_model, torch::Device(torch::kCPU));
+    std::printf("[az_selfplay] NN self-play: %d games, sims=%d, slots=%d, device=%s\n",
+                games, sims, slots, device_str.c_str());
+    NNEvaluator nn(player_model, opp_model, device);
     run_search_selfplay(nn, games, slots, sims, start_frac, seed, ps, os);
   }
 
