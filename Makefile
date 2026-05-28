@@ -29,7 +29,7 @@ TEST_CPP    := $(wildcard test/*.cpp)
 RESEARCH_BIN_NAMES := best_hand multi_comb play_probs count_turn_states
 RESEARCH_BINS      := $(addprefix $(BUILD_DIR)/research/,$(RESEARCH_BIN_NAMES))
 
-.PHONY: all clean dirs test_core coordinator generate_data generate_nn_data eval_match eval_nn_match eval_nn_vs_classic play_games pass_greedy_datagen move_agreement benchmark tablebase_opp1_gen move_audit az_compose_gen az_nn_check az_search_smoke az_play_check az_selfplay eval_az_match research help
+.PHONY: all clean dirs test_core coordinator generate_data generate_nn_data eval_match eval_nn_match eval_nn_vs_classic play_games pass_greedy_datagen move_agreement benchmark tablebase_opp1_gen move_audit az_compose_gen az_vs_teacher_agree az_nn_check az_search_smoke az_play_check az_selfplay eval_az_match research help
 
 all: help
 
@@ -403,6 +403,7 @@ $(BUILD_DIR)/src/datagen/az_selfplay.o: src/datagen/az_selfplay.cpp | dirs
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
 
 AZ_SELFPLAY_OBJS := $(CORE_OBJS) \
+                    $(BUILD_DIR)/src/simulation/game_simulator.o \
                     $(TYPED_SEARCH_OBJS) \
                     $(AZ_SEARCH_OBJS) \
                     $(BUILD_DIR)/src/datagen/az_selfplay.o
@@ -518,6 +519,25 @@ $(BIN_DIR)/az_compose_gen: $(AZ_COMPOSE_GEN_OBJS)
 	@echo "✓ $(BIN_DIR)/az_compose_gen"
 
 az_compose_gen: dirs $(BIN_DIR)/az_compose_gen
+
+# ============================================================================
+# bin/az_vs_teacher_agree — az(net+search) vs typed_search move-disagreement dump
+# ============================================================================
+
+$(BUILD_DIR)/research/az_vs_teacher_agree.o: research/az_vs_teacher_agree.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
+
+AZ_AGREE_OBJS := $(CORE_OBJS) \
+                 $(BUILD_DIR)/src/simulation/game_simulator.o \
+                 $(TYPED_SEARCH_OBJS) \
+                 $(AZ_SEARCH_OBJS) \
+                 $(BUILD_DIR)/research/az_vs_teacher_agree.o
+
+$(BIN_DIR)/az_vs_teacher_agree: $(AZ_AGREE_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS_TORCH)
+	@echo "✓ $(BIN_DIR)/az_vs_teacher_agree"
+
+az_vs_teacher_agree: dirs $(BIN_DIR)/az_vs_teacher_agree
 
 # ============================================================================
 # bin/tablebase_opp1_gen — precompute tablebase binary (no Arrow)

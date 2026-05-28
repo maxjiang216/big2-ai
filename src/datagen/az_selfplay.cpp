@@ -1,9 +1,10 @@
 // az_selfplay: self-play data generation for the az_search nets.
 //
-// Two modes:
-//   * gen0 bootstrap (no --player-model): uniform-random self-play. Policy /
-//     behavior targets are the one-hot played move; this mainly bootstraps the
-//     value heads from realized outcomes.
+// Modes:
+//   * gen0 bootstrap (no --player-model): self-play with policy/behavior targets
+//     = the one-hot played move. Either uniform-random (default) or, with
+//     --teacher NAME (e.g. typed_search, the strongest non-az player), driven by
+//     a registry policy so the NN imitates a strong teacher from the start.
 //   * gen N>=1 (--player-model / --opp-model): NN-guided MCTS self-play. NN leaf
 //     evaluations are BATCHED ACROSS MANY CONCURRENT GAMES (the throughput win):
 //     every game advances its current search by simulations, leaf requests are
@@ -31,7 +32,10 @@
 #include "az_search/nn_eval.h"
 
 #include "game.h"
+#include "game_record.h"
+#include "game_simulator.h"
 #include "move.h"
+#include "player_factory_registry.h"
 #include "tablebase_opp1.h"
 #include "util.h"
 
@@ -161,25 +165,6 @@ struct OppSample {
   float value = 0.0f;
 };
 
-// ---------------------------------------------------------------------------
-// Start-state sampler: most games start from a full deal; a fraction start from
-// a mid-game state, obtained by playing a random number of uniform-random legal
-// moves forward from a fresh deal. This guarantees deck + last-trick consistency
-// by construction (the state is reachable) while broadening coverage of smaller
-// hands / arbitrary current tricks.
-// ---------------------------------------------------------------------------
-static void setup_game(Game &game, std::mt19937 &rng, float start_frac) {
-  game.shuffle_deal(rng);
-  if (std::uniform_real_distribution<float>(0, 1)(rng) >= start_frac) return;
-  // Mid-game: play a random prefix of random legal moves.
-  int steps = std::uniform_int_distribution<int>(1, 12)(rng);
-  for (int i = 0; i < steps && !game.is_over(); ++i) {
-    auto legal = game.get_legal_moves();
-    if (legal.empty()) break;
-    game.apply_move(legal[std::uniform_int_distribution<int>(0, (int)legal.size() - 1)(rng)]);
-  }
-}
-
 static SearchState mover_state(const Game &game, int mover) {
   SearchState s;
   s.our_hand = game.player_hand(mover);
@@ -191,10 +176,10 @@ static SearchState mover_state(const Game &game, int mover) {
 }
 
 // Player-net sample (the mover's view). `visits` is the MCTS visit distribution
-// (the policy target); pass an EMPTY list for a value-only sample (tablebase /
-// single-forced positions) — the zero policy target contributes no policy
-// gradient, so the value head trains while the policy head is untouched.
-static void record_player_sample(Game &game, int mover,
+// (the policy target); pass an EMPTY list for a value-only sample (tablebase
+// positions) — the zero policy target contributes no policy gradient, so the
+// value head trains while the policy head is untouched.
+static void record_player_sample(const Game &game, int mover,
                                  const std::vector<std::pair<int, long>> &visits,
                                  int game_id, int turn_idx,
                                  std::vector<PlayerSample> &psamples) {
@@ -216,7 +201,7 @@ static void record_player_sample(Game &game, int mover,
 }
 
 // Opponent-net sample (the observer's public view of the mover's actual move).
-static void record_opp_sample(Game &game, int mover, int chosen_move,
+static void record_opp_sample(const Game &game, int mover, int chosen_move,
                               int game_id, int turn_idx,
                               std::vector<OppSample> &osamples) {
   const int obs = 1 - mover;
@@ -297,13 +282,13 @@ static std::vector<int> advance_to_decision(Game &game, int game_id, int &turn,
 // ---------------------------------------------------------------------------
 // gen0: uniform-random self-play (no search).
 // ---------------------------------------------------------------------------
-static void run_random_selfplay(int total_games, float start_frac, unsigned seed,
+static void run_random_selfplay(int total_games, unsigned seed,
                                 std::vector<PlayerSample> &ps,
                                 std::vector<OppSample> &os) {
   std::mt19937 rng(seed);
   for (int g = 0; g < total_games; ++g) {
     Game game;
-    setup_game(game, rng, start_frac);
+    game.shuffle_deal(rng);
     const std::size_t pf = ps.size(), of = os.size();
     int turn = 0;
     while (true) {
@@ -315,6 +300,51 @@ static void run_random_selfplay(int total_games, float start_frac, unsigned seed
       game.apply_move(m);
     }
     if (game.is_over()) backfill_values(game.get_winner(), pf, of, ps, os);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// gen0/gen1 teacher bootstrap: self-play by a registry policy (e.g. typed_search,
+// the strongest non-az player). Each game is played by two teacher instances via
+// GameSimulator; az samples are then extracted from the GameRecord turns under
+// the same per-head filter as the search path, with the policy / behavior target
+// being the move the teacher actually played (one-hot imitation). Games start
+// from full deals (no start-state mixing). The teacher's own tablebase moves are
+// recorded honestly per classify_position (value-only player at tablebase, etc.).
+// ---------------------------------------------------------------------------
+static void run_classic_selfplay(const std::string &policy, double param,
+                                 int total_games, unsigned seed,
+                                 std::vector<PlayerSample> &ps,
+                                 std::vector<OppSample> &os) {
+  auto factory = make_player_factory(policy, param, seed);
+  std::mt19937 rng(seed);
+  for (int g = 0; g < total_games; ++g) {
+    GameSimulator sim(factory->create_player(), factory->create_player(), rng);
+    GameRecord rec = sim.run();
+    const std::size_t pf = ps.size(), of = os.size();
+    int turn = 0;
+    for (const TurnRecord &tr : rec.turns()) {
+      const Game &game = tr.game;        // full pre-move state at this turn
+      const int mover = tr.current_player;
+      auto legal = game.get_legal_moves();
+      int fm = -1;
+      const PosType t = classify_position(game, legal, fm);
+      const int played = encodeMove(tr.move);  // what the teacher actually played
+      if (t == POS_REAL) {
+        record_player_sample(game, mover, {{played, 1}}, g, turn, ps);  // one-hot
+        record_opp_sample(game, mover, played, g, turn, os);
+        ++turn;
+      } else if (t == POS_TABLEBASE) {
+        record_player_sample(game, mover, {}, g, turn, ps);  // value-only
+        record_opp_sample(game, mover, played, g, turn, os);
+        ++turn;
+      } else if (t == POS_FORCED_WIN) {
+        record_opp_sample(game, mover, played, g, turn, os);
+        ++turn;
+      }
+      // POS_INSTA_WIN / POS_FORCED_PASS: no NN head queried -> no sample.
+    }
+    backfill_values(rec.game().get_winner(), pf, of, ps, os);
   }
 }
 
@@ -369,7 +399,7 @@ struct EvalReq {
 };
 
 static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
-                                int sims, float start_frac, unsigned seed,
+                                int sims, unsigned seed,
                                 std::vector<PlayerSample> &ps,
                                 std::vector<OppSample> &os) {
   const int hw = std::max(1, (int)std::thread::hardware_concurrency() - 1);
@@ -408,7 +438,7 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
       s.game_id = (int)gid;
       s.turn = 0;
       s.rng.seed((unsigned)(seed ^ (0x9E3779B9u * (unsigned)(gid + 1))));
-      setup_game(s.game, s.rng, start_frac);
+      s.game.shuffle_deal(s.rng);
       s.p_from = lps.size();
       s.o_from = los.size();
       s.active = true;
@@ -698,7 +728,11 @@ int main(int argc, char **argv) {
   const int games = std::atoi(arg(argc, argv, "--games", "1000"));
   const int sims = std::atoi(arg(argc, argv, "--sims", "100"));
   const int slots = std::atoi(arg(argc, argv, "--slots", "256"));
-  const float start_frac = std::atof(arg(argc, argv, "--start-frac", "0.2"));
+  // gen0 bootstrap teacher: a registry policy (e.g. typed_search) plays self-play
+  // and the NN imitates it. Empty -> uniform-random gen0 (only relevant when no
+  // --player-model/--opp-model is given).
+  const std::string teacher = arg(argc, argv, "--teacher", "");
+  const double teacher_param = std::atof(arg(argc, argv, "--teacher-param", "0"));
   const unsigned seed = (unsigned)std::strtoul(arg(argc, argv, "--seed", "0"), nullptr, 10);
   // Inference device: the NN forward dominates self-play wall time, so CUDA is a
   // big win (the batched-across-slots forward is exactly the GPU's strength).
@@ -713,14 +747,18 @@ int main(int argc, char **argv) {
   std::vector<OppSample> os;
 
   const bool gen0 = player_model.empty() || opp_model.empty();
-  if (gen0) {
-    std::printf("[az_selfplay] gen0 random self-play: %d games (start_frac=%.2f)\n", games, start_frac);
-    run_random_selfplay(games, start_frac, seed, ps, os);
+  if (gen0 && !teacher.empty()) {
+    std::printf("[az_selfplay] gen0 teacher self-play (%s, param=%.3g): %d games\n",
+                teacher.c_str(), teacher_param, games);
+    run_classic_selfplay(teacher, teacher_param, games, seed, ps, os);
+  } else if (gen0) {
+    std::printf("[az_selfplay] gen0 random self-play: %d games\n", games);
+    run_random_selfplay(games, seed, ps, os);
   } else {
     std::printf("[az_selfplay] NN self-play: %d games, sims=%d, slots=%d, device=%s\n",
                 games, sims, slots, device_str.c_str());
     NNEvaluator nn(player_model, opp_model, device);
-    run_search_selfplay(nn, games, slots, sims, start_frac, seed, ps, os);
+    run_search_selfplay(nn, games, slots, sims, seed, ps, os);
   }
 
   std::printf("[az_selfplay] samples: player=%zu opp=%zu -> %s, %s\n",
