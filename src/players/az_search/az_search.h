@@ -98,7 +98,13 @@ public:
   void apply_eval(const PlayerEval &e);  // expands a player leaf + backs up
   void apply_eval(const OppEval &e);     // expands an opp leaf + backs up
   void run(Evaluator &ev);
-  void finalize();  // post-search forced-win extension (run() calls it)
+  // Post-search forced extensions. Always runs the (eval-free) forced-WIN proof.
+  // When an evaluator is supplied (play/eval path), also runs the NN-valued
+  // forced-move expansion: play our provably-unbeatable lead moves and raise the
+  // root value to the max over every forced-reachable node (not just the leaves),
+  // overriding the root move when a forced line beats the searched value. Self-
+  // play passes none (win proof only), keeping its visit-based policy targets.
+  void finalize(Evaluator *ev = nullptr);
 
   // Subtree reuse: re-root onto the node for `true_next` (rebuilt from the real
   // game state, not the compressed key), reusing any prior search via the memo.
@@ -123,6 +129,7 @@ private:
   void expand_opp(Node *n, const float *move_value, const float *logits);
   void build_groups(Node *n);
   void apply_root_forced_win();
+  void forced_expand_root(Evaluator &ev);  // NN-valued unbeatable-move extension
   Edge *select_edge(Node *n);
   Node *resolve_child(Node *parent, Edge &e);
   void recompute_value(Node *n);

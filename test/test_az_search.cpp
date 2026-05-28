@@ -301,6 +301,33 @@ void test_forced_win_extension() {
   assert(s.best_move() == kSINGLE_START + 12);  // play the 2 first
 }
 
+void test_forced_move_expansion() {
+  // Lead hand {3, 4, 2}, opp has 2 cards. The single '2' is unbeatable (highest
+  // single; opp can't hold a 4-bomb with 2 cards), but playing it is NOT a proven
+  // win (opp may beat our 3/4 afterward), so find_forced_win does not fire. With
+  // sims=0 the search contributes nothing, so any value/move here comes purely
+  // from the NN-valued forced-move expansion. The stub values the post-'2'
+  // (size-2) position at 0.9, so the extension must raise the root to ~0.9 and
+  // commit the single '2'.
+  SearchState root{counts({{0, 1}, {1, 1}, {12, 1}}), 2, {}, kPASS, kUs};
+  StubEval ev;
+  ev.pv = [](const PlayerFeatures &f) { return f.our_size == 2 ? 0.9f : 0.3f; };
+  Search s(root, {1.5f, /*sims=*/0});
+  s.run(ev);
+  assert(std::abs(s.root_value() - 0.9f) < 1e-4);
+  assert(s.best_move() == kSINGLE_START + 12);  // play the unbeatable single '2'
+
+  // Negative control: at a RESPONSE position (we lack the initiative) the
+  // extension must not fire — nothing to force.
+  SearchState resp{counts({{0, 1}, {1, 1}, {12, 1}}), 2, counts({{2, 1}}),
+                   kSINGLE_START, kUs};
+  StubEval ev2;
+  ev2.pv = [](const PlayerFeatures &) { return 0.9f; };
+  Search s2(resp, {1.5f, /*sims=*/0});
+  s2.run(ev2);
+  assert(s2.root_value() < 0.9f);  // unchanged from the unexpanded default
+}
+
 void test_hierarchical_groups_partition() {
   // Rich lead hand: singles, a pair, a triple -> several trick types -> groups.
   SearchState root{counts({{0, 1}, {1, 1}, {2, 2}, {5, 3}}), 7, {}, kPASS, kUs};
@@ -470,6 +497,7 @@ void run_az_search_tests() {
   test_transposition_merge();
   test_tablebase_oracle();
   test_forced_win_extension();
+  test_forced_move_expansion();
   test_hierarchical_groups_partition();
   test_opp_node_grouping_wellformed();
   test_caching_evaluator();

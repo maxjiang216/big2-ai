@@ -468,12 +468,12 @@ void Search::run(Evaluator &ev) {
     else
       apply_eval(ev.eval_opp(req.ofeat));
   }
-  finalize();
+  finalize(&ev);
 }
 
-// Post-search forced-move extension: at the (lead) root, if we can prove a win,
+// Post-search forced-win proof: at the (lead) root, if we can prove a win,
 // override the searched value to 1.0 and commit the winning first move. This
-// runs after the simulation budget is spent.
+// runs after the simulation budget is spent and needs no evaluator.
 void Search::apply_root_forced_win() {
   if (root_->terminal) return;
   int fm;
@@ -483,7 +483,94 @@ void Search::apply_root_forced_win() {
   }
 }
 
-void Search::finalize() { apply_root_forced_win(); }
+namespace {
+
+// Opponent's possible per-rank holdings (public deduction), as a HandBits
+// thermometer. INVARIANT down a forced line: each of our moves removes a card
+// from our hand and adds it to the discard, leaving max_in_deck - hand - discard
+// unchanged; and the opponent only ever passes. So build it once at the root.
+HandBits opp_possible_bits(const std::array<int, 13> &hand,
+                           const std::array<int, 13> &discard) {
+  HandBits b{};
+  for (int r = 0; r < 13; ++r) {
+    int om = max_cards_in_deck_for_rank(r) - hand[r] - discard[r];
+    if (om <= 0) continue;
+    b.at1 |= static_cast<uint16_t>(1u << r);
+    if (om >= 2) b.at2 |= static_cast<uint16_t>(1u << r);
+    if (om >= 3) b.at3 |= static_cast<uint16_t>(1u << r);
+    if (om >= 4) b.at4 |= static_cast<uint16_t>(1u << r);
+  }
+  return b;
+}
+
+constexpr int kForcedDepthCap = 4;
+
+// Max value reachable from this (our-initiative) position by playing only moves
+// the opponent provably cannot beat — the max over THIS node's NN value and the
+// values of every forced-reachable descendant (1.0 on any hand-emptying line).
+// `opp_bits` / `opp_size` are constant down the line (see opp_possible_bits).
+float forced_subtree_value(const std::array<int, 13> &hand,
+                           const std::array<int, 13> &discard,
+                           const HandBits &opp_bits, int opp_size,
+                           Evaluator &ev, int depth) {
+  if (hand_size(hand) == 0) return 1.0f;
+  PlayerFeatures f{hand, opp_max_counts(hand, discard), trick_counts(kPASS),
+                   opp_size, hand_size(hand)};
+  float best = ev.eval_player(f).value;  // option: stop here, trust this position
+  if (best >= 1.0f || depth <= 0) return best;
+
+  auto legal = compute_legal_moves(hand, Move(kPASS));
+  for (int m : legal) {
+    if (m == kPASS) continue;
+    if (opponent_can_respond(m, opp_bits, opp_size)) continue;  // beatable, skip
+    std::array<int, 13> nh = hand, nd = discard;
+    const auto &cost = MOVE_TO_CARDS[m];
+    for (int r = 0; r < 13; ++r) { nh[r] -= cost[r]; nd[r] += cost[r]; }
+    if (hand_size(nh) == 0) return 1.0f;
+    best = std::max(best,
+                    forced_subtree_value(nh, nd, opp_bits, opp_size, ev, depth - 1));
+    if (best >= 1.0f) return best;
+  }
+  return best;
+}
+
+}  // namespace
+
+// NN-valued forced-move extension at the (lead) root: if playing an unbeatable
+// move leads to a position (or forced descendant) the net values above the
+// searched root value, raise the root value and commit that move. Per the
+// max-over-all-nodes rule, a forced child is judged by the best stopping point
+// in its forced subtree, so we never over-commit to a full forced sequence.
+void Search::forced_expand_root(Evaluator &ev) {
+  if (root_->terminal || root_->forced_win_move != -1) return;  // win proof wins
+  if (root_->st.last_move != kPASS) return;  // only with the initiative
+
+  const HandBits ob =
+      opp_possible_bits(root_->st.our_hand, root_->st.discard);
+  const int osz = root_->st.opp_size;
+
+  float best = root_->value;  // floor: never downgrade the searched value
+  int best_move = -1;
+  for (int m : compute_legal_moves(root_->st.our_hand, Move(kPASS))) {
+    if (m == kPASS) continue;
+    if (opponent_can_respond(m, ob, osz)) continue;
+    std::array<int, 13> nh = root_->st.our_hand, nd = root_->st.discard;
+    const auto &cost = MOVE_TO_CARDS[m];
+    for (int r = 0; r < 13; ++r) { nh[r] -= cost[r]; nd[r] += cost[r]; }
+    float v = (hand_size(nh) == 0)
+                  ? 1.0f
+                  : forced_subtree_value(nh, nd, ob, osz, ev, kForcedDepthCap - 1);
+    if (v > best) { best = v; best_move = m; }
+    if (best >= 1.0f) break;
+  }
+  root_->value = best;
+  if (best_move != -1) root_->forced_win_move = best_move;
+}
+
+void Search::finalize(Evaluator *ev) {
+  apply_root_forced_win();          // eval-free forced-WIN proof (both paths)
+  if (ev) forced_expand_root(*ev);  // NN-valued extension (play/eval path only)
+}
 
 void Search::advance_root(const SearchState &true_next) {
   pending_ = nullptr;
