@@ -395,10 +395,9 @@ class Big2SelfPlayDataset(Dataset):
 # ===========================================================================
 
 from nn.model_az import (  # noqa: E402
+    NUM_MOVES,
     OPP_HEAD_DIM,
-    PLAYER_HEAD_DIM,
     az_opp_head_index,
-    az_player_head_index,
 )
 
 
@@ -413,8 +412,12 @@ def _as_int_list(v) -> np.ndarray:
 class Big2AZPlayerDataset(Dataset):
     """Player-net samples: value target + MCTS visit-distribution policy target.
 
-    Densifies the legal mask and visit distribution onto the PLAYER_HEAD_DIM
-    head per item (collapsing TS5; DS8 ids never appear as player targets).
+    Policy targets live in the CONCRETE engine move-id space (NUM_MOVES). The
+    factored player head emits PLAYER_HEAD_DIM shared component logits; the loss
+    composes them to per-move logits via the composition matrix C (head @ C.T),
+    masks the exact legal concrete-move set, and cross-entropies against the
+    visit distribution. So this dataset does NO collapse — it just densifies the
+    legal mask and visit distribution onto the 468-wide move space.
     Returns (hand, opp, trick, opp_size, our_size, value, mask, policy).
     """
 
@@ -453,16 +456,13 @@ class Big2AZPlayerDataset(Dataset):
         return len(self.value)
 
     def __getitem__(self, idx: int):
-        mask = torch.zeros(PLAYER_HEAD_DIM, dtype=torch.bool)
+        # Exact legal concrete-move mask + visit distribution over NUM_MOVES.
+        mask = torch.zeros(NUM_MOVES, dtype=torch.bool)
         for m in self.legal[idx]:
-            hi = az_player_head_index(int(m))
-            if hi >= 0:
-                mask[hi] = True
-        policy = torch.zeros(PLAYER_HEAD_DIM, dtype=torch.float32)
+            mask[int(m)] = True
+        policy = torch.zeros(NUM_MOVES, dtype=torch.float32)
         for m, c in zip(self.vmoves[idx], self.vcounts[idx]):
-            hi = az_player_head_index(int(m))
-            if hi >= 0:
-                policy[hi] += float(c)
+            policy[int(m)] += float(c)
         total = policy.sum()
         if total > 0:
             policy /= total

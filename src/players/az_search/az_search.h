@@ -62,11 +62,14 @@ struct Edge {
   float move_value = 0.5f;  // opp-parent edges: NN per-move value q_a baseline
 };
 
-// Hierarchical selection grouping: edges sharing a trick type (full houses and
-// bombs also split by rank, so the within-group choice is the auxiliary).
+// Hierarchical selection grouping. Opponent nodes use a flat 2-level structure
+// (group by trick type via `idx`). Player nodes use a 3-level factored tree:
+// Level-1 family groups, each holding Level-2 `sub` subgroups (primary axis:
+// rank / straight high card / bomb kicker), each holding leaf edge `idx`.
 struct EdgeGroup {
   int key;
-  std::vector<int> idx;  // indices into Node::edges
+  std::vector<int> idx;        // leaf edge indices (Node::edges)
+  std::vector<EdgeGroup> sub;  // Level-2 subgroups (player nodes only)
   float prior_sum = 0.0f;
 };
 

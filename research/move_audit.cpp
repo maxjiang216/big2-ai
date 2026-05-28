@@ -113,12 +113,19 @@ int main() {
     for (int b = a + 1; b < az_search::kDS8RangeEnd; ++b)
       check(min_hand_for_pair(a, b) > 16, "at most one DS8 fits in 16 cards");
 
-  // Round-trip the index mapping.
+  // Opponent head: flat index in range. Player head: factored — every id maps
+  // to a valid family and 1-2 in-range path-logit indices.
   for (int id = 0; id < LEGAL_MOVES_SIZE; ++id) {
     int oi = az_search::az_opp_head_index(id);
-    int pi = az_search::az_player_head_index(id);
     check(oi >= 0 && oi < AZ_OPP_HEAD_DIM, "opp index in range");
-    check(pi == -1 || (pi >= 0 && pi < AZ_PLAYER_HEAD_DIM), "player index in range/-1");
+    int fam = az_search::player_family_id(id);
+    check(fam >= az_search::kFamPass && fam <= az_search::kFamTplStraight,
+          "player family in range");
+    az_search::PathLogits p = az_search::player_path_logits(id);
+    check(p.n == 1 || p.n == 2, "player path has 1-2 logits");
+    for (int k = 0; k < p.n; ++k)
+      check(p.idx[k] >= 0 && p.idx[k] < AZ_PLAYER_HEAD_DIM,
+            "player path logit in range");
   }
 
   std::printf("\n%s\n", failures == 0 ? "Audit OK." : "AUDIT FAILED.");

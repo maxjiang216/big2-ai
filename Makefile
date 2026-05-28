@@ -29,7 +29,7 @@ TEST_CPP    := $(wildcard test/*.cpp)
 RESEARCH_BIN_NAMES := best_hand multi_comb play_probs count_turn_states
 RESEARCH_BINS      := $(addprefix $(BUILD_DIR)/research/,$(RESEARCH_BIN_NAMES))
 
-.PHONY: all clean dirs test_core coordinator generate_data generate_nn_data eval_match eval_nn_match eval_nn_vs_classic play_games pass_greedy_datagen move_agreement benchmark tablebase_opp1_gen move_audit az_nn_check az_search_smoke az_play_check az_selfplay eval_az_match research help
+.PHONY: all clean dirs test_core coordinator generate_data generate_nn_data eval_match eval_nn_match eval_nn_vs_classic play_games pass_greedy_datagen move_agreement benchmark tablebase_opp1_gen move_audit az_compose_gen az_nn_check az_search_smoke az_play_check az_selfplay eval_az_match research help
 
 all: help
 
@@ -502,6 +502,22 @@ $(BIN_DIR)/move_audit: $(MOVE_AUDIT_OBJS)
 	@echo "✓ $(BIN_DIR)/move_audit"
 
 move_audit: dirs $(BIN_DIR)/move_audit
+
+# ============================================================================
+# bin/az_compose_gen — dump the player-policy composition map (nn/az_compose.json)
+# ============================================================================
+
+$(BUILD_DIR)/research/az_compose_gen.o: research/az_compose_gen.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+AZ_COMPOSE_GEN_OBJS := $(CORE_OBJS) \
+                       $(BUILD_DIR)/research/az_compose_gen.o
+
+$(BIN_DIR)/az_compose_gen: $(AZ_COMPOSE_GEN_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ $(BIN_DIR)/az_compose_gen"
+
+az_compose_gen: dirs $(BIN_DIR)/az_compose_gen
 
 # ============================================================================
 # bin/tablebase_opp1_gen — precompute tablebase binary (no Arrow)

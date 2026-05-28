@@ -47,30 +47,45 @@ from nn.model import ENCODING_DIM, ResBlock, _init_selu, _init_swish
 TS5_BEGIN = 456   # kTRIPLESTRAIGHT5_START
 DS8_BEGIN = 463   # kDOUBLESTRAIGHT8_START
 LEGAL_MOVES = 468
+NUM_MOVES = LEGAL_MOVES  # concrete engine move-id space (player policy targets)
 
 TS5_SLOT = TS5_BEGIN
 OPP_DS8_SLOT = TS5_BEGIN + 1
 
-PLAYER_HEAD_DIM = TS5_BEGIN + 1  # 457
+# Player policy head is FACTORED (see src/players/az_search/considered_moves.h):
+# the net emits PLAYER_HEAD_DIM shared component logits and a concrete move's
+# logit is the SUM of its path components (family -> rank/high -> aux/low),
+# applied via the composition matrix C (load_compose_matrix). Opponent head is
+# flat: one logit per move id with the TS5/DS8 long-combination collapses.
+PLAYER_HEAD_DIM = 138
 OPP_HEAD_DIM = TS5_BEGIN + 2     # 458
 
 
-def az_player_head_index(move_id: int) -> int:
-    """Engine move id -> player policy head index, or -1 if dropped (DS8)."""
-    if move_id < TS5_BEGIN:
-        return move_id
-    if move_id < DS8_BEGIN:
-        return TS5_SLOT
-    return -1
-
-
 def az_opp_head_index(move_id: int) -> int:
-    """Engine move id -> opponent behavior head index (always valid)."""
+    """Engine move id -> opponent behavior/value head index (always valid)."""
     if move_id < TS5_BEGIN:
         return move_id
     if move_id < DS8_BEGIN:
         return TS5_SLOT
     return OPP_DS8_SLOT
+
+
+def load_compose_matrix(path: str = "nn/az_compose.json") -> torch.Tensor:
+    """Binary composition matrix C[NUM_MOVES, PLAYER_HEAD_DIM] from the C++ dump
+    (research/az_compose_gen, the single source of truth). The composed per-move
+    policy logits are `head @ C.T`, so a concrete move's logit is the sum of its
+    factored-head path components. Keeps C++ search and Python training in sync."""
+    import json
+
+    with open(path) as f:
+        d = json.load(f)
+    assert d["player_head_dim"] == PLAYER_HEAD_DIM, "compose dim mismatch"
+    paths = d["paths"]
+    C = torch.zeros(len(paths), PLAYER_HEAD_DIM, dtype=torch.float32)
+    for m, idxs in enumerate(paths):
+        for i in idxs:
+            C[m, i] = 1.0
+    return C
 
 
 # ---------------------------------------------------------------------------

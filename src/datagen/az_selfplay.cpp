@@ -9,13 +9,19 @@
 //     every game advances its current search by simulations, leaf requests are
 //     pooled into player-net / opp-net batches, flushed, and distributed back.
 //
-// Each real decision (>=2 legal moves, not a tablebase/forced position — those
-// are excluded) emits two samples:
-//   * a PLAYER sample (the mover's view): MCTS visit distribution policy target;
-//   * an OPP sample (the observer's public view): the move actually played, the
-//     behavior (imitation) target.
-// Both value targets are backfilled from the game winner. The move played is
-// sampled proportional to the root visit counts (exploration).
+// Samples are recorded per head only where the search would actually query that
+// head's NN (classify_position / PosType) — we don't train a head on positions
+// it resolves trivially:
+//   * PLAYER policy (visit distribution): real decisions only.
+//   * PLAYER value: real decisions AND tablebase (opp-1) positions (the move is
+//     pinned but the leaf VALUE is still used); recorded as a value-only player
+//     sample (empty visit list -> no policy gradient). Excluded at insta-win /
+//     forced-win (value trivially 1) and forced-pass (node fused).
+//   * OPP behavior + value: every position except the mover's forced-pass or
+//     hand-emptying insta-win (the observer can't tell forced-win / tablebase
+//     positions from public info, so it must model them).
+// Both value targets are backfilled from the game winner. At real decisions the
+// move played is sampled proportional to the root visit counts (exploration).
 //
 // Output: two Parquet files matching the nn/dataset.py schemas
 // (az_player_genN.parquet, az_opp_genN.parquet).
@@ -85,18 +91,51 @@ static int tablebase_move_id(const Game &game, int cp,
   return -1;
 }
 
-// Advance the game through tablebase / single-legal moves (excluded from
-// training) until a real decision point. Returns the legal moves there, or an
-// empty vector if the game ended first.
-static std::vector<int> advance_to_decision(Game &game) {
-  while (!game.is_over()) {
-    auto legal = game.get_legal_moves();
-    int tb = tablebase_move_id(game, game.current_player(), legal);
-    if (tb >= 0) { game.apply_move(tb); continue; }
-    if (legal.size() == 1) { game.apply_move(legal[0]); continue; }
-    return legal;
+// Position classification for the mover, used to decide which heads (if any) get
+// a training sample — the rule is "will the search ever query that head's NN on
+// this kind of position?" (don't train heads on positions the search resolves
+// trivially). See advance_to_decision below for the per-type recording.
+enum PosType {
+  POS_REAL,        // >=2 genuine choices: player policy + value + opp recorded
+  POS_TABLEBASE,   // opp-1 line: move pinned but VALUE used -> value + opp (no policy)
+  POS_FORCED_WIN,  // proven win: player value=1 trivial -> opp only
+  POS_INSTA_WIN,   // hand-emptying move: terminal before NN -> nothing
+  POS_FORCED_PASS, // must pass: node fused in search -> nothing
+};
+
+// Classify the mover's position; for non-real positions also yield the forced
+// move the mover will play. Mirrors expand_player's short-circuits.
+static PosType classify_position(const Game &game, const std::vector<int> &legal,
+                                 int &forced_move) {
+  const int mover = game.current_player();
+  const int our_size = game.get_player_hand_size(mover);
+  for (int m : legal)
+    if (m != kPASS && MOVE_TO_CARDS[m][13] == our_size) {
+      forced_move = m;
+      return POS_INSTA_WIN;
+    }
+  if (legal.size() == 1 && legal[0] == kPASS) {
+    forced_move = kPASS;
+    return POS_FORCED_PASS;
   }
-  return {};
+  const bool lead = (game.last_move().combination == Move::Combination::kPass);
+  if (lead) {
+    auto hand = game.player_hand(mover);
+    auto discard = game.discard_pile();
+    const int opp_size = game.get_player_hand_size(1 - mover);
+    if (auto seq = find_forced_win(hand, discard, opp_size)) {
+      forced_move = (*seq)[0];
+      return POS_FORCED_WIN;
+    }
+    if (opp_size == 1) {
+      int tb = tablebase_move_id(game, mover, legal);  // opp-1 line (move known)
+      if (tb >= 0) { forced_move = tb; return POS_TABLEBASE; }
+    }
+  }
+  // A size-1 legal set is always either {pass} (forced pass) or, on the lead
+  // with 1 card, the hand-emptying single (insta-win) — both caught above; any
+  // genuine ">=1 move" position with real cards has >=2 single plays.
+  return POS_REAL;
 }
 
 // ---------------------------------------------------------------------------
@@ -151,20 +190,18 @@ static SearchState mover_state(const Game &game, int mover) {
   return s;
 }
 
-// Record the player + opp samples for a decision, given the chosen move and the
-// (possibly empty) MCTS visit distribution. For gen0 random play the visit list
-// is a single (move, 1) entry.
-static void record_decision(Game &game, int mover, int chosen_move,
-                            const std::vector<std::pair<int, long>> &visits,
-                            int game_id, int turn_idx,
-                            std::vector<PlayerSample> &psamples,
-                            std::vector<OppSample> &osamples) {
+// Player-net sample (the mover's view). `visits` is the MCTS visit distribution
+// (the policy target); pass an EMPTY list for a value-only sample (tablebase /
+// single-forced positions) — the zero policy target contributes no policy
+// gradient, so the value head trains while the policy head is untouched.
+static void record_player_sample(Game &game, int mover,
+                                 const std::vector<std::pair<int, long>> &visits,
+                                 int game_id, int turn_idx,
+                                 std::vector<PlayerSample> &psamples) {
   const int obs = 1 - mover;
   auto hand = game.player_hand(mover);
-  auto ohand = game.player_hand(obs);
   auto discard = game.discard_pile();
   const int last = encodeMove(game.last_move());
-
   PlayerSample ps;
   ps.game_id = game_id; ps.turn_idx = turn_idx;
   ps.hand = hand;
@@ -176,7 +213,16 @@ static void record_decision(Game &game, int mover, int chosen_move,
   for (auto &[m, n] : visits) { ps.visit_moves.push_back(m); ps.visit_counts.push_back((int)n); }
   ps.mover = mover;
   psamples.push_back(std::move(ps));
+}
 
+// Opponent-net sample (the observer's public view of the mover's actual move).
+static void record_opp_sample(Game &game, int mover, int chosen_move,
+                              int game_id, int turn_idx,
+                              std::vector<OppSample> &osamples) {
+  const int obs = 1 - mover;
+  auto ohand = game.player_hand(obs);
+  auto discard = game.discard_pile();
+  const int last = encodeMove(game.last_move());
   OppSample os;
   os.game_id = game_id; os.turn_idx = turn_idx;
   os.hand = ohand;                               // observer's exact hand (NN input)
@@ -189,6 +235,16 @@ static void record_decision(Game &game, int mover, int chosen_move,
   os.move_id = chosen_move;
   os.observer = obs;
   osamples.push_back(std::move(os));
+}
+
+// Real-decision recording: player policy+value sample (with visits) + opp sample.
+static void record_decision(Game &game, int mover, int chosen_move,
+                            const std::vector<std::pair<int, long>> &visits,
+                            int game_id, int turn_idx,
+                            std::vector<PlayerSample> &psamples,
+                            std::vector<OppSample> &osamples) {
+  record_player_sample(game, mover, visits, game_id, turn_idx, psamples);
+  record_opp_sample(game, mover, chosen_move, game_id, turn_idx, osamples);
 }
 
 static int sample_from_visits(const std::vector<std::pair<int, long>> &visits,
@@ -210,6 +266,34 @@ static void backfill_values(int winner, std::size_t p_from, std::size_t o_from,
     os[i].value = (os[i].observer == winner) ? 1.0f : 0.0f;
 }
 
+// Advance through forced positions to the next real decision, recording exactly
+// the heads the search would query at each forced position (classify_position):
+// value-only player + opp at tablebase, opp only at forced-win, nothing at
+// insta-win / forced-pass. Returns the legal moves at the real
+// decision, or {} if the game ended first.
+static std::vector<int> advance_to_decision(Game &game, int game_id, int &turn,
+                                            std::vector<PlayerSample> &ps,
+                                            std::vector<OppSample> &os) {
+  while (!game.is_over()) {
+    auto legal = game.get_legal_moves();
+    int fm = -1;
+    const PosType t = classify_position(game, legal, fm);
+    if (t == POS_REAL) return legal;
+    const int mover = game.current_player();
+    if (t == POS_TABLEBASE) {
+      record_player_sample(game, mover, {}, game_id, turn, ps);  // value-only
+      record_opp_sample(game, mover, fm, game_id, turn, os);
+      ++turn;
+    } else if (t == POS_FORCED_WIN) {
+      record_opp_sample(game, mover, fm, game_id, turn, os);  // observer learns the loss
+      ++turn;
+    }
+    // POS_INSTA_WIN / POS_FORCED_PASS: the search never queries an NN head here.
+    game.apply_move(fm);
+  }
+  return {};
+}
+
 // ---------------------------------------------------------------------------
 // gen0: uniform-random self-play (no search).
 // ---------------------------------------------------------------------------
@@ -223,7 +307,7 @@ static void run_random_selfplay(int total_games, float start_frac, unsigned seed
     const std::size_t pf = ps.size(), of = os.size();
     int turn = 0;
     while (true) {
-      auto legal = advance_to_decision(game);
+      auto legal = advance_to_decision(game, g, turn, ps, os);
       if (legal.empty()) break;  // game ended
       const int mover = game.current_player();
       const int m = legal[std::uniform_int_distribution<int>(0, (int)legal.size() - 1)(rng)];
@@ -335,7 +419,7 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
     };
 
     auto setup_decision = [&](Slot &s) -> bool {
-      auto legal = advance_to_decision(s.game);
+      auto legal = advance_to_decision(s.game, s.game_id, s.turn, lps, los);
       if (legal.empty()) return false;
       s.mover = s.game.current_player();
       SearchState st = mover_state(s.game, s.mover);

@@ -167,39 +167,12 @@ void Search::finalize_terminal(Node *n) {
   }
 }
 
-// Masked softmax over `logits`, picking each move's slot via idx_fn; writes the
-// per-edge priors (parallel to `moves`). Moves whose idx_fn returns -1 are
-// skipped (no edge). Returns the surviving (move_id, prior) edges.
-template <typename IdxFn>
-static std::vector<Edge> softmax_edges(const std::vector<int> &moves,
-                                       const float *logits, IdxFn idx_fn) {
-  std::vector<Edge> edges;
-  edges.reserve(moves.size());
-  float maxl = -1e30f;
-  for (int m : moves) {
-    int hi = idx_fn(m);
-    if (hi < 0) continue;
-    maxl = std::max(maxl, logits[hi]);
-  }
-  float sum = 0.0f;
-  for (int m : moves) {
-    int hi = idx_fn(m);
-    if (hi < 0) continue;
-    float e = std::exp(logits[hi] - maxl);
-    edges.push_back(Edge{m, e, nullptr});
-    sum += e;
-  }
-  if (sum > 0)
-    for (auto &e : edges) e.prior /= sum;
-  return edges;
-}
-
 void Search::expand_player(Node *n, const float *logits) {
   const int our_size = hand_size(n->st.our_hand);
   auto legal = compute_legal_moves(n->st.our_hand, Move(n->st.last_move));
 
   // Auto-win: any move that empties our hand wins outright (subsumes DS8, which
-  // is dropped from the policy head). Prefer the largest such move, lowest id.
+  // is never a policy choice). Prefer the largest such move, lowest id.
   int win = -1, win_cards = -1;
   for (int m : legal) {
     if (m == kPASS) continue;
@@ -221,7 +194,22 @@ void Search::expand_player(Node *n, const float *logits) {
     return;
   }
 
-  n->edges = softmax_edges(legal, logits, az_player_head_index);
+  // Factored / hierarchical policy prior: each concrete legal move's logit is
+  // the SUM of its path components (family -> rank/high -> aux/low, see
+  // considered_moves.h); softmax over the legal concrete set. This masked
+  // softmax over composed logits is mathematically the nested softmax
+  // P(family)*P(rank|family)*P(aux|family,rank). One edge per concrete move.
+  float maxl = -1e30f;
+  for (int m : legal) maxl = std::max(maxl, player_composed_logit(m, logits));
+  float sum = 0.0f;
+  n->edges.reserve(legal.size());
+  for (int m : legal) {
+    float e = std::exp(player_composed_logit(m, logits) - maxl);
+    n->edges.push_back(Edge{m, e, nullptr});
+    sum += e;
+  }
+  if (sum > 0.0f)
+    for (auto &e : n->edges) e.prior /= sum;
   build_groups(n);
 }
 
@@ -299,72 +287,121 @@ static int group_key(int move_id) {
 
 void Search::build_groups(Node *n) {
   n->groups.clear();
+  if (n->st.side != kUs) {
+    // Opponent node: flat 2-level grouping by trick type (FH/bombs by rank).
+    for (int i = 0; i < (int)n->edges.size(); ++i) {
+      const int k = group_key(n->edges[i].move_id);
+      EdgeGroup *g = nullptr;
+      for (auto &eg : n->groups)
+        if (eg.key == k) { g = &eg; break; }
+      if (!g) { n->groups.push_back(EdgeGroup{k, {}, {}, 0.0f}); g = &n->groups.back(); }
+      g->idx.push_back(i);
+      g->prior_sum += n->edges[i].prior;
+    }
+    return;
+  }
+  // Player node: factored 3-level tree — Level-1 family, Level-2 subgroup
+  // (primary axis: rank / straight high / bomb kicker), Level-3 leaf edges.
   for (int i = 0; i < (int)n->edges.size(); ++i) {
-    const int k = group_key(n->edges[i].move_id);
+    const int fam = player_family_id(n->edges[i].move_id);
+    const int sk = player_subgroup_key(n->edges[i].move_id);
     EdgeGroup *g = nullptr;
     for (auto &eg : n->groups)
-      if (eg.key == k) { g = &eg; break; }
-    if (!g) { n->groups.push_back(EdgeGroup{k, {}, 0.0f}); g = &n->groups.back(); }
-    g->idx.push_back(i);
+      if (eg.key == fam) { g = &eg; break; }
+    if (!g) { n->groups.push_back(EdgeGroup{fam, {}, {}, 0.0f}); g = &n->groups.back(); }
     g->prior_sum += n->edges[i].prior;
+    EdgeGroup *sg = nullptr;
+    for (auto &s : g->sub)
+      if (s.key == sk) { sg = &s; break; }
+    if (!sg) { g->sub.push_back(EdgeGroup{sk, {}, {}, 0.0f}); sg = &g->sub.back(); }
+    sg->prior_sum += n->edges[i].prior;
+    sg->idx.push_back(i);
   }
 }
 
 // Visit count an edge contributes (0 until its child is created).
 static inline long edge_n(const Edge &e) { return e.child ? e.child->N : 0; }
 
-Edge *Search::select_edge(Node *n) {
-  if (n->edges.empty()) return nullptr;
-  if (n->groups.empty()) build_groups(n);  // safety (older nodes)
-
-  const bool player = (n->st.side == kUs);
-
-  // --- Level 1: pick a group (trick type) ---
-  long Ntot = 0;
-  for (const auto &e : n->edges) Ntot += edge_n(e);
-  const double sqTot = std::sqrt((double)Ntot + 1.0);
-
+// Opponent node: flat 2-level most-undersampled selection (prob/(visits+1)),
+// over response-equivalence classes built by group_opp_moves.
+static Edge *select_opp(Node *n) {
   const EdgeGroup *bg = nullptr;
   double bg_score = -1e30;
   for (const auto &g : n->groups) {
     long Ng = 0;
-    double Qg = -1.0;  // player: max child value (FPU = node value)
-    for (int i : g.idx) {
-      const Edge &e = n->edges[i];
-      Ng += edge_n(e);
-      if (player) {
-        double q = (e.child && e.child->expanded) ? e.child->value : n->value;
-        Qg = std::max(Qg, q);
-      }
-    }
-    double score;
-    if (player)
-      score = Qg + cfg_.c_puct * g.prior_sum * sqTot / (1.0 + (double)Ng);
-    else
-      score = (double)g.prior_sum / (double)(Ng + 1);  // most-undersampled class
+    for (int i : g.idx) Ng += edge_n(n->edges[i]);
+    double score = (double)g.prior_sum / (double)(Ng + 1);
     if (score > bg_score) { bg_score = score; bg = &g; }
   }
-
-  // --- Level 2: pick an edge within the group ---
-  long Ng = 0;
-  for (int i : bg->idx) Ng += edge_n(n->edges[i]);
-  const double sqG = std::sqrt((double)Ng + 1.0);
-
   Edge *best = nullptr;
   double best_score = -1e30;
   for (int i : bg->idx) {
     Edge &e = n->edges[i];
-    const long cn = edge_n(e);
-    double score;
-    if (player) {
-      const double q = (e.child && e.child->expanded) ? e.child->value : n->value;
-      score = q + cfg_.c_puct * e.prior * sqG / (1.0 + (double)cn);
-    } else {
-      score = (double)e.prior / (double)(cn + 1);
-    }
+    double score = (double)e.prior / (double)(edge_n(e) + 1);
     if (score > best_score) { best_score = score; best = &e; }
   }
   return best;
+}
+
+// Player node: hierarchical PUCT down the factored tree (family -> subgroup ->
+// edge). Each level uses the CONDITIONAL prior (child prior_sum / parent
+// prior_sum) and that level's summed visits, so e.g. the aux distribution within
+// a full-house rank is a proper softmax over the aux logits that sums to 1.
+static Edge *select_player(Node *n, double c_puct) {
+  auto childQ = [&](const Edge &e) -> double {
+    return (e.child && e.child->expanded) ? (double)e.child->value
+                                          : (double)n->value;
+  };
+  // Level 1: family.
+  long Ntot = 0;
+  for (const auto &e : n->edges) Ntot += edge_n(e);
+  const double sqTot = std::sqrt((double)Ntot + 1.0);
+  const EdgeGroup *bg = nullptr;
+  double bgs = -1e30;
+  for (const auto &g : n->groups) {
+    long Ng = 0;
+    double Qg = -1.0;
+    for (const auto &sg : g.sub)
+      for (int i : sg.idx) { Ng += edge_n(n->edges[i]); Qg = std::max(Qg, childQ(n->edges[i])); }
+    double score = Qg + c_puct * (double)g.prior_sum * sqTot / (1.0 + (double)Ng);
+    if (score > bgs) { bgs = score; bg = &g; }
+  }
+  // Level 2: subgroup (conditional prior within the family).
+  long Ng = 0;
+  for (const auto &sg : bg->sub)
+    for (int i : sg.idx) Ng += edge_n(n->edges[i]);
+  const double sqG = std::sqrt((double)Ng + 1.0);
+  const double invBg = bg->prior_sum > 0.0f ? 1.0 / (double)bg->prior_sum : 0.0;
+  const EdgeGroup *bsg = nullptr;
+  double bsgs = -1e30;
+  for (const auto &sg : bg->sub) {
+    long Ns = 0;
+    double Qs = -1.0;
+    for (int i : sg.idx) { Ns += edge_n(n->edges[i]); Qs = std::max(Qs, childQ(n->edges[i])); }
+    double pcond = (double)sg.prior_sum * invBg;
+    double score = Qs + c_puct * pcond * sqG / (1.0 + (double)Ns);
+    if (score > bsgs) { bsgs = score; bsg = &sg; }
+  }
+  // Level 3: leaf edge (conditional prior within the subgroup).
+  long Ns = 0;
+  for (int i : bsg->idx) Ns += edge_n(n->edges[i]);
+  const double sqS = std::sqrt((double)Ns + 1.0);
+  const double invSg = bsg->prior_sum > 0.0f ? 1.0 / (double)bsg->prior_sum : 0.0;
+  Edge *best = nullptr;
+  double bes = -1e30;
+  for (int i : bsg->idx) {
+    Edge &e = n->edges[i];
+    double pcond = (double)e.prior * invSg;
+    double score = childQ(e) + c_puct * pcond * sqS / (1.0 + (double)edge_n(e));
+    if (score > bes) { bes = score; best = &e; }
+  }
+  return best;
+}
+
+Edge *Search::select_edge(Node *n) {
+  if (n->edges.empty()) return nullptr;
+  if (n->groups.empty()) build_groups(n);  // safety (older nodes)
+  return (n->st.side == kUs) ? select_player(n, cfg_.c_puct) : select_opp(n);
 }
 
 Node *Search::resolve_child(Node *parent, Edge &e) {

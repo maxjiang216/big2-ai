@@ -33,51 +33,96 @@ int min_hand_for_pair(int a, int b) {
 }
 
 void test_head_dims() {
-  // Identity range is [0, kTRIPLESTRAIGHT5_START); player adds the TS5 slot,
-  // opponent adds TS5 + DS8 slots.
-  assert(AZ_PLAYER_HEAD_DIM == kTRIPLESTRAIGHT5_START + 1);
+  // Opponent head (flat): identity range + TS5 + DS8 slots.
   assert(AZ_OPP_HEAD_DIM == kTRIPLESTRAIGHT5_START + 2);
-  assert(AZ_OPP_HEAD_DIM == AZ_PLAYER_HEAD_DIM + 1);
-  // Sanity against the documented numbers.
-  assert(AZ_PLAYER_HEAD_DIM == 457);
   assert(AZ_OPP_HEAD_DIM == 458);
+  // Player head (factored / hierarchical).
+  assert(AZ_PLAYER_HEAD_DIM == 138);
 }
 
-void test_index_mapping_roundtrips() {
+void test_opp_index_mapping() {
   int ts5_count = 0, ds8_count = 0;
   for (int id = 0; id < LEGAL_MOVES_SIZE; ++id) {
-    const int pi = az_player_head_index(id);
     const int oi = az_opp_head_index(id);
-
-    // Opponent index always valid; player index either valid or -1 (dropped).
     assert(oi >= 0 && oi < AZ_OPP_HEAD_DIM);
-    assert(pi == -1 || (pi >= 0 && pi < AZ_PLAYER_HEAD_DIM));
-
     if (id < kTS5RangeBegin) {
-      // Kept verbatim in both heads.
-      assert(pi == id);
       assert(oi == id);
-      assert(az_player_move_for_index(pi) == id);
       assert(az_opp_move_for_index(oi) == id);
     } else if (id < kTS5RangeEnd) {
-      // TS5 collapses to one shared slot in both heads.
       ++ts5_count;
-      assert(pi == kTS5Slot);
       assert(oi == kTS5Slot);
     } else {
-      // DS8: dropped from the player head, single slot in the opponent head.
       ++ds8_count;
-      assert(pi == -1);
       assert(oi == kOppDS8Slot);
     }
   }
-  assert(ts5_count == 7);  // 7 TS5 ids collapse to 1
-  assert(ds8_count == 5);  // 5 DS8 ids collapse to 1 (opp) / drop (player)
-
-  // Reverse maps for the collapsed slots land on canonical engine ids.
-  assert(az_player_move_for_index(kTS5Slot) == kTS5CanonicalMove);
+  assert(ts5_count == 7);
+  assert(ds8_count == 5);
   assert(az_opp_move_for_index(kTS5Slot) == kTS5CanonicalMove);
   assert(az_opp_move_for_index(kOppDS8Slot) == kDS8CanonicalMove);
+}
+
+void test_player_factored_head() {
+  using C = Move::Combination;
+  // Every id resolves to a valid family + in-range path-logit indices.
+  for (int id = 0; id < LEGAL_MOVES_SIZE; ++id) {
+    const int fam = player_family_id(id);
+    assert(fam >= kFamPass && fam <= kFamTplStraight);
+    const PathLogits p = player_path_logits(id);
+    assert(p.n == 1 || p.n == 2);
+    for (int k = 0; k < p.n; ++k)
+      assert(p.idx[k] >= 0 && p.idx[k] < AZ_PLAYER_HEAD_DIM);
+  }
+  // Full house: triple rank -> shared fh_rank slot; pair -> distinct fh_aux slot.
+  for (int id = kFULL_HOUSE_START; id < kBOMB_START; ++id) {
+    const Move m = all_moves()[id];
+    assert(m.combination == C::kFullHouse);
+    assert(player_family_id(id) == kFamFullHouse);
+    const PathLogits p = player_path_logits(id);
+    assert(p.n == 2);
+    assert(p.idx[0] == kPHfhRank + (m.rank - 3));
+    assert(p.idx[1] == kPHfhAux + (m.auxiliary - 3));
+  }
+  // Bomb: every bomb shares the bomb_entry; bare vs kicker distinct; rank uniform.
+  for (int id = kBOMB_START; id < kSTRAIGHT5_START; ++id) {
+    const Move m = all_moves()[id];
+    assert(player_family_id(id) == kFamBomb);
+    const PathLogits p = player_path_logits(id);
+    assert(p.n == 2 && p.idx[0] == kPHbombEntry);
+    if (m.auxiliary == 0) assert(p.idx[1] == kPHbombBare);
+    else assert(p.idx[1] == kPHbombKicker + (m.auxiliary - 3));
+  }
+  // Straights: families + high/low indices in range.
+  for (int id = kSTRAIGHT5_START; id < kDOUBLESTRAIGHT2_START; ++id) {
+    assert(player_family_id(id) == kFamSglStraight);
+    const PathLogits p = player_path_logits(id);
+    assert(p.idx[0] >= kPHsglHigh && p.idx[0] < kPHsglHigh + 10);
+    assert(p.idx[1] >= kPHsglLow && p.idx[1] < kPHsglLow + 10);
+  }
+  for (int id = kDOUBLESTRAIGHT2_START; id < kTRIPLESTRAIGHT2_START; ++id) {
+    assert(player_family_id(id) == kFamDblStraight);
+    const PathLogits p = player_path_logits(id);
+    assert(p.idx[0] >= kPHdblHigh && p.idx[0] < kPHdblHigh + 11);
+    assert(p.idx[1] >= kPHdblLow && p.idx[1] < kPHdblLow + 11);
+  }
+  for (int id = kTRIPLESTRAIGHT2_START; id < kDOUBLESTRAIGHT8_START; ++id) {
+    assert(player_family_id(id) == kFamTplStraight);
+    const PathLogits p = player_path_logits(id);
+    assert(p.idx[0] >= kPHtplHigh && p.idx[0] < kPHtplHigh + 10);
+    assert(p.idx[1] >= kPHtplLow && p.idx[1] < kPHtplLow + 10);
+  }
+  // 2-wrap endpoints: "23456" (lowest S5, eng hi=6, lo=2) and "JQKA2" (eng hi=15).
+  {
+    const PathLogits p = player_path_logits(kSTRAIGHT5_START);
+    assert(all_moves()[kSTRAIGHT5_START].rank == 6);
+    assert(p.idx[0] == kPHsglHigh + 0 && p.idx[1] == kPHsglLow + 0);
+  }
+  {
+    const int id = kSTRAIGHT6_START - 1;  // highest S5
+    assert(all_moves()[id].rank == 15);
+    const PathLogits p = player_path_logits(id);
+    assert(p.idx[0] == kPHsglHigh + 9 && p.idx[1] == kPHsglLow + 9);
+  }
 }
 
 void test_collapsed_groups_structural() {
@@ -118,12 +163,13 @@ struct StubEval : Evaluator {
     return 0.5f;
   };
   int player_calls = 0, opp_calls = 0;
+  std::array<float, AZ_PLAYER_HEAD_DIM> plogits{};  // factored player head logits
 
   PlayerEval eval_player(const PlayerFeatures &f) override {
     ++player_calls;
     PlayerEval e;
     e.value = pv(f);
-    e.logits.fill(0.0f);
+    e.logits = plogits;
     return e;
   }
   OppEval eval_opp(const OppFeatures &f) override {
@@ -328,6 +374,33 @@ void test_forced_move_expansion() {
   assert(s2.root_value() < 0.9f);  // unchanged from the unexpanded default
 }
 
+void test_player_composed_prior() {
+  // The player edge priors are the masked softmax of COMPOSED logits (sum of the
+  // factored-head path components per concrete move), summing to 1.
+  SearchState root{counts({{0, 1}, {1, 1}, {2, 2}}), 6, {}, kPASS, kUs};
+  StubEval ev;
+  for (int i = 0; i < AZ_PLAYER_HEAD_DIM; ++i) ev.plogits[i] = 0.013f * i - 0.5f;
+  Search s(root, {1.5f, 1});  // one sim expands the root
+  s.run(ev);
+  const Node *r = s.root_node();
+  assert(r->expanded && !r->edges.empty() && r->forced_win_move == -1);
+
+  double maxl = -1e30;
+  for (const auto &e : r->edges)
+    maxl = std::max(maxl, (double)player_composed_logit(e.move_id, ev.plogits.data()));
+  double Z = 0.0;
+  for (const auto &e : r->edges)
+    Z += std::exp((double)player_composed_logit(e.move_id, ev.plogits.data()) - maxl);
+  double psum = 0.0;
+  for (const auto &e : r->edges) {
+    double expct =
+        std::exp((double)player_composed_logit(e.move_id, ev.plogits.data()) - maxl) / Z;
+    assert(std::abs((double)e.prior - expct) < 1e-5);
+    psum += e.prior;
+  }
+  assert(std::abs(psum - 1.0) < 1e-4);
+}
+
 void test_hierarchical_groups_partition() {
   // Rich lead hand: singles, a pair, a triple -> several trick types -> groups.
   SearchState root{counts({{0, 1}, {1, 1}, {2, 2}, {5, 3}}), 7, {}, kPASS, kUs};
@@ -337,16 +410,25 @@ void test_hierarchical_groups_partition() {
   const Node *r = s.root_node();
   assert(!r->terminal && r->expanded);
 
-  // Groups partition the edges exactly once each.
+  // Player groups are a 3-level tree (family -> subgroup -> leaf edges) that
+  // partitions the edges exactly once each, with prior_sum aggregating up.
   std::size_t covered = 0;
-  std::vector<int> seen_keys;
+  std::vector<int> seen_fam;
   for (const auto &g : r->groups) {
-    covered += g.idx.size();
-    float ps = 0.0f;
-    for (int i : g.idx) ps += r->edges[i].prior;
-    assert(std::abs(ps - g.prior_sum) < 1e-4);
-    assert(std::find(seen_keys.begin(), seen_keys.end(), g.key) == seen_keys.end());
-    seen_keys.push_back(g.key);
+    assert(g.idx.empty());  // player families hold subgroups, not direct edges
+    assert(std::find(seen_fam.begin(), seen_fam.end(), g.key) == seen_fam.end());
+    seen_fam.push_back(g.key);
+    float fam_ps = 0.0f;
+    std::vector<int> seen_sk;
+    for (const auto &sg : g.sub) {
+      assert(std::find(seen_sk.begin(), seen_sk.end(), sg.key) == seen_sk.end());
+      seen_sk.push_back(sg.key);
+      float sg_ps = 0.0f;
+      for (int i : sg.idx) { ++covered; sg_ps += r->edges[i].prior; }
+      assert(std::abs(sg_ps - sg.prior_sum) < 1e-4);
+      fam_ps += sg.prior_sum;
+    }
+    assert(std::abs(fam_ps - g.prior_sum) < 1e-4);
   }
   assert(covered == r->edges.size());
   assert(r->groups.size() >= 2);  // singles + double + triple at least
@@ -488,7 +570,8 @@ void test_advance_root_gc() {
 
 void run_az_search_tests() {
   test_head_dims();
-  test_index_mapping_roundtrips();
+  test_opp_index_mapping();
+  test_player_factored_head();
   test_collapsed_groups_structural();
   test_transition_and_key();
   test_forced_win();
@@ -498,6 +581,7 @@ void run_az_search_tests() {
   test_tablebase_oracle();
   test_forced_win_extension();
   test_forced_move_expansion();
+  test_player_composed_prior();
   test_hierarchical_groups_partition();
   test_opp_node_grouping_wellformed();
   test_caching_evaluator();

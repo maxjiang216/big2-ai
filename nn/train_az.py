@@ -30,7 +30,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from nn.dataset import make_az_split
-from nn.model_az import Big2NetAZ, Big2NetOpp
+from nn.model_az import Big2NetAZ, Big2NetOpp, load_compose_matrix
 
 NEG = -1e30  # stand-in for -inf in masked logits (rows always have >=1 legal)
 
@@ -90,6 +90,10 @@ def train_player(paths, out_path, cfg, device):
     tl, vl = _loaders(train_ds, val_ds, cfg.batch, cfg.workers)
 
     model = Big2NetAZ().to(device)
+    # Fixed composition matrix C[NUM_MOVES, PLAYER_HEAD_DIM]: composed per-move
+    # policy logits = head @ C.T (factored head -> concrete moves). The masked
+    # softmax over the legal concrete moves IS the nested hierarchical softmax.
+    C = load_compose_matrix().to(device)
     opt = _make_optim(model, cfg.lr, cfg.weight_decay)
     sched = _scheduler(opt, cfg.lr, cfg.epochs * len(tl), cfg.lr_warmup, cfg.final_div_factor)
     eps = 1e-7
@@ -102,9 +106,9 @@ def train_player(paths, out_path, cfg, device):
             osz, usz, value = osz.to(device), usz.to(device), value.to(device)
             mask, policy = mask.to(device), policy.to(device)
 
-            v, logits = model(hand, opp, trick, osz, usz)
+            v, head = model(hand, opp, trick, osz, usz)
             loss_v = F.binary_cross_entropy(v.clamp(eps, 1 - eps), value)
-            logp = masked_log_softmax(logits, mask)
+            logp = masked_log_softmax(head @ C.t(), mask)
             loss_p = -(policy * logp).sum(-1).mean()
             loss = loss_v + loss_p
 
@@ -123,9 +127,9 @@ def train_player(paths, out_path, cfg, device):
                 hand, opp, trick = hand.to(device), opp.to(device), trick.to(device)
                 osz, usz, value = osz.to(device), usz.to(device), value.to(device)
                 mask, policy = mask.to(device), policy.to(device)
-                v, logits = model(hand, opp, trick, osz, usz)
+                v, head = model(hand, opp, trick, osz, usz)
                 lv = F.binary_cross_entropy(v.clamp(eps, 1 - eps), value)
-                lp = -(policy * masked_log_softmax(logits, mask)).sum(-1).mean()
+                lp = -(policy * masked_log_softmax(head @ C.t(), mask)).sum(-1).mean()
                 bs = len(value)
                 vl_loss += float(lv + lp) * bs
                 vv += float(lv) * bs
