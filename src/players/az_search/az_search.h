@@ -78,6 +78,7 @@ struct Node {
   float nn_value = 0.5f;     // leaf estimate, P(root wins)
   float value = 0.5f;        // backed-up expectimax value
   long N = 0;                // visit count
+  int in_edges = 0;          // reference count for GC (resolved in-edges + root)
   std::vector<Edge> edges;
   std::vector<EdgeGroup> groups;  // hierarchical selection over `edges`
 };
@@ -111,6 +112,7 @@ public:
 
   // Introspection (tests).
   std::size_t num_nodes() const { return memo_.size(); }
+  std::size_t free_count() const { return free_list_.size(); }
   long root_n() const { return root_->N; }
   const Node *root_node() const { return root_; }
 
@@ -125,10 +127,12 @@ private:
   Node *resolve_child(Node *parent, Edge &e);
   void recompute_value(Node *n);
   void backup();
+  void release(Node *n);  // eager-cascade free of an unreachable subtree (GC)
 
   SearchConfig cfg_;
   std::mt19937 rng_;                             // opponent representative sampling
   std::deque<Node> arena_;                       // stable-address node pool
+  std::vector<Node *> free_list_;                // freed slots, reused by alloc_node
   std::unordered_map<uint64_t, Node *> memo_;    // transposition table
   Node *root_ = nullptr;
   Node *pending_ = nullptr;                      // leaf awaiting apply_eval

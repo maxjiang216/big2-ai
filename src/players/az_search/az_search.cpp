@@ -138,13 +138,23 @@ std::optional<int> az_definitive_move(const SearchState &s, bool allow_forced_wi
 Search::Search(const SearchState &root_state, const SearchConfig &cfg)
     : cfg_(cfg), rng_(cfg.seed) {
   root_ = alloc_node(root_state);
+  root_->in_edges = 1;  // synthetic ref: the live root is never GC'd
   memo_[state_key(root_state)] = root_;
   finalize_terminal(root_);
 }
 
+// Reuse a freed slot when available (the deque never relocates, so addresses
+// stay stable for any still-live pointers); otherwise grow the arena.
 Node *Search::alloc_node(const SearchState &s) {
-  arena_.push_back(Node{});
-  Node *n = &arena_.back();
+  Node *n;
+  if (!free_list_.empty()) {
+    n = free_list_.back();
+    free_list_.pop_back();
+    *n = Node{};
+  } else {
+    arena_.push_back(Node{});
+    n = &arena_.back();
+  }
   n->st = s;
   return n;
 }
@@ -372,6 +382,7 @@ Node *Search::resolve_child(Node *parent, Edge &e) {
     finalize_terminal(c);
   }
   e.child = c;
+  ++c->in_edges;  // this edge now references c (counted once, at first resolve)
   return c;
 }
 
@@ -478,16 +489,43 @@ void Search::advance_root(const SearchState &true_next) {
   pending_ = nullptr;
   path_.clear();
   const uint64_t k = state_key(true_next);
+  Node *old_root = root_;
   auto it = memo_.find(k);
+  Node *new_root;
   if (it != memo_.end()) {
     // Reuse the prior subtree; refresh the (key-invariant) discard / trick aux
     // from the real game state.
     it->second->st = true_next;
-    root_ = it->second;
+    new_root = it->second;
   } else {
-    root_ = alloc_node(true_next);
-    memo_[k] = root_;
-    finalize_terminal(root_);
+    new_root = alloc_node(true_next);
+    memo_[k] = new_root;
+    finalize_terminal(new_root);
+  }
+  // Transfer the synthetic root ref to the new root, then drop it from the old
+  // root. If the old root is now unreferenced, GC it and everything that becomes
+  // unreachable. The DAG is acyclic, so the old root cannot lie under the new
+  // root, and refcount cascade is leak-free / complete.
+  ++new_root->in_edges;
+  root_ = new_root;
+  if (--old_root->in_edges == 0) release(old_root);
+}
+
+// Eager-cascade free of a subtree that just became unreachable. Worklist (not
+// recursion) over the acyclic DAG: when an edge's child loses its last in-edge
+// it is enqueued. Freed nodes leave the memo and return to the free list. Lazy
+// reclamation is unsound here — a node reachable only through a freed parent
+// would keep a phantom in-edge and could be reused for a stale key.
+void Search::release(Node *start) {
+  std::vector<Node *> stack{start};
+  while (!stack.empty()) {
+    Node *cur = stack.back();
+    stack.pop_back();
+    for (auto &e : cur->edges)
+      if (e.child && --e.child->in_edges == 0 && e.child != root_)
+        stack.push_back(e.child);
+    memo_.erase(state_key(cur->st));
+    free_list_.push_back(cur);
   }
 }
 

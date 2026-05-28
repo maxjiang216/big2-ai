@@ -411,15 +411,50 @@ void test_advance_root_reuse() {
 
   const std::size_t before = s.num_nodes();
   s.advance_root(visited);
-  assert(s.num_nodes() == before);           // reused, nothing allocated
+  assert(s.num_nodes() <= before);            // kept subtree reused; rest GC'd
   assert(s.root_n() == visited_n);            // prior visits preserved
 
-  // Re-rooting onto an unseen state allocates a fresh (unvisited) root.
+  // Re-rooting onto an unseen state allocates a fresh (unvisited) root; the old
+  // subtree, now fully unreachable, is reclaimed (only the fresh root remains).
   SearchState fresh = visited;
   fresh.opp_size = 1;  // a key not in the memo
   s.advance_root(fresh);
-  assert(s.num_nodes() == before + 1);
   assert(s.root_n() == 0);
+  assert(s.num_nodes() == 1);
+}
+
+void test_advance_root_gc() {
+  // Two distinct singles at lead -> two top-level children whose subtrees are
+  // mutually unreachable (a played single can't return to the hand). Re-rooting
+  // onto one must free the other (and its exclusive nodes), preserve the kept
+  // subtree's visits, recycle freed slots, and leave the search deterministic.
+  SearchState root{counts({{0, 1}, {5, 1}}), 8, {}, kPASS, kUs};
+
+  auto run_and_advance = [&](unsigned seed) {
+    StubEval ev;
+    Search s(root, {1.5f, 300, seed, /*training=*/true});
+    s.run(ev);
+    const std::size_t before = s.num_nodes();
+    const Node *r = s.root_node();
+    SearchState target{};
+    long target_n = -1;
+    const Node *keep = nullptr;
+    for (const auto &e : r->edges)
+      if (e.child && e.child->N > 0) { target = e.child->st; target_n = e.child->N; keep = e.child; break; }
+    assert(target_n > 0);
+
+    s.advance_root(target);
+    assert(s.root_node() == keep);             // re-rooted onto the existing node
+    assert(s.root_n() == target_n);            // kept subtree's visits preserved
+    assert(s.num_nodes() < before);            // sibling subtree freed
+    assert(s.free_count() > 0);                // freed slots available for reuse
+    assert(s.root_value() >= 0.0f && s.root_value() <= 1.0f);
+
+    s.run(ev);                                 // follow-up search still runs
+    return s.best_move();
+  };
+
+  assert(run_and_advance(123u) == run_and_advance(123u));  // GC preserves determinism
 }
 
 }  // namespace
@@ -440,4 +475,5 @@ void run_az_search_tests() {
   test_caching_evaluator();
   test_play_mode_is_seed_independent();
   test_advance_root_reuse();
+  test_advance_root_gc();
 }
