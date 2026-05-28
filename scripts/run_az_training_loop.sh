@@ -24,8 +24,12 @@
 #   --mix-decay F    subsample fraction per older gen(default: 0.5)
 #   --eval-deals N   paired deals per eval          (default: 400)
 #   --eval-sims N    search sims per turn at eval   (default: 200)
+#   --device D       self-play inference device     (default: cuda; falls back to cpu)
 #   --seed N         RNG seed                       (default: 42)
 #   --log FILE       append log here                (default: logs/az_training.log)
+#
+# Self-play runs the NN forward on --device (GPU ~2.7x faster; the forward
+# dominates wall time). Evals use batch-1 forwards, pinned to one torch thread.
 
 set -euo pipefail
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:.venv/lib/python3.13/site-packages/nvidia/cu13/lib"
@@ -43,6 +47,7 @@ MIX_GENS=3
 MIX_DECAY=0.5
 EVAL_DEALS=400
 EVAL_SIMS=200
+DEVICE=cuda
 SEED=42
 LOG_FILE="logs/az_training.log"
 
@@ -61,6 +66,7 @@ while [[ $# -gt 0 ]]; do
         --mix-decay)  MIX_DECAY=$2;  shift 2 ;;
         --eval-deals) EVAL_DEALS=$2; shift 2 ;;
         --eval-sims)  EVAL_SIMS=$2;  shift 2 ;;
+        --device)     DEVICE=$2;     shift 2 ;;
         --seed)       SEED=$2;       shift 2 ;;
         --log)        LOG_FILE=$2;   shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
@@ -95,6 +101,7 @@ ensure_gen0() {
         echo "── gen0 bootstrap: random self-play ($GAMES games) ──" | tee_log
         bin/az_selfplay \
             --games "$GAMES" --slots "$SLOTS" --start-frac "$START_FRAC" --seed "$SEED" \
+            --device "$DEVICE" \
             --player-out "$(pf "$PLAYER_DATA" 0)" --opp-out "$(pf "$OPP_DATA" 0)" \
             2>&1 | tee_log
         uv run python -m nn.train_az \
@@ -136,11 +143,11 @@ for GEN in $(seq "$START" "$END"); do
     echo "  [1/4] Self-play $GAMES games vs champion (sims=$SIMS)..." | tee_log
     T0=$(date +%s)
     bin/az_selfplay \
-        --games "$GAMES" --sims "$SIMS" --slots "$SLOTS" \
+        --games "$GAMES" --sims "$SIMS" --slots "$SLOTS" --device "$DEVICE" \
         --start-frac "$START_FRAC" --seed "$((SEED + GEN))" \
         --player-model models/az_player.pt --opp-model models/az_opp.pt \
         --player-out "$PD" --opp-out "$OD" \
-        2>&1 | grep -E 'samples:' | tee_log
+        2>&1 | grep -E 'samples:|device=' | tee_log
     echo "      self-play time: $(( $(date +%s) - T0 ))s" | tee_log
 
     # ── 2. Train (mixed over the last MIX_GENS gens) ─────────────────────────
