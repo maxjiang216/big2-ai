@@ -34,12 +34,18 @@
 #include <arrow/table.h>
 #include <parquet/arrow/writer.h>
 
+#include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace az_search;
@@ -228,18 +234,31 @@ static void run_random_selfplay(int total_games, float start_frac, unsigned seed
 }
 
 // ---------------------------------------------------------------------------
-// gen N>=1: batched NN-guided MCTS self-play across concurrent game slots.
+// gen N>=1: batched NN-guided MCTS self-play, async producer/consumer.
 //
-// Each slot keeps ONE persistent search tree per seat for the whole game. When
-// a seat moves again, advance_root re-roots onto the current state, reusing the
-// subtree (and its accumulated visits) that the seat already explored on earlier
-// turns — more effective search per fixed sim budget. Both seats use the same
-// logic, so the recorded targets stay symmetric/unbiased. (Memory grows with
-// slots x sims x game length; tune via --slots.)
+// W CPU worker threads each own a DISJOINT block of slots and run all the search
+// (select_leaf / apply_eval / advance_root) for them — per-slot state stays
+// single-threaded. A single inference thread is the SOLE caller of nn.eval_*
+// (so the shared TorchScript module is touched by exactly one thread), batching
+// leaf requests across every worker's slots. A worker pumps each of its slots
+// until it needs an NN eval, enqueues the request, and parks that slot; when all
+// its slots are parked it sleeps until results arrive. The inference thread
+// flushes when the queue reaches batch_target OR every active slot is parked
+// (tail drain — avoids deadlock). The search DAG is GC'd on re-root (see
+// az_search), so memory stays bounded. Each slot keeps ONE persistent tree per
+// seat, re-rooted across turns.
+//
+// Determinism: each game's RNG and per-(game,seat) tree seeds derive only from
+// (seed, game_id), but content is NOT bitwise-reproducible across multi-slot
+// runs — batched NN inference is batch-composition-sensitive (different GEMM
+// kernels/accumulation order per batch size), and async scheduling varies the
+// composition, which can flip a tie-broken move. --slots 1 (always batch-of-1)
+// is fully reproducible. The variation is benign for data generation.
 // ---------------------------------------------------------------------------
 struct Slot {
   int game_id = -1;
   Game game;
+  std::mt19937 rng;                 // per-game RNG (reseeded at game start)
   std::unique_ptr<Search> tree[2];  // persistent per-seat search trees
   int mover = 0;
   int turn = 0;
@@ -247,121 +266,234 @@ struct Slot {
   std::size_t p_from = 0, o_from = 0;  // sample range start for this game
   bool active = false;
   bool searching = false;  // mid-search (true) vs needs a new decision setup
-  bool has_pending = false;
-  LeafRequest pending;
+  bool waiting = false;    // has an outstanding NN eval request
+  LeafRequest pending;     // the pumped leaf awaiting eval
+  bool pending_is_player = false;
+  std::atomic<bool> result_ready{false};  // inference -> worker handoff flag
+  PlayerEval peval;        // inference writes (player leaf)
+  OppEval oeval;           // inference writes (opp leaf)
+};
+
+// One queued leaf-eval request (features copied by value; the inference thread
+// never touches a slot's Search tree).
+struct EvalReq {
+  int slot;
+  bool is_player;
+  PlayerFeatures pf;
+  OppFeatures of;
 };
 
 static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
                                 int sims, float start_frac, unsigned seed,
                                 std::vector<PlayerSample> &ps,
                                 std::vector<OppSample> &os) {
-  std::mt19937 rng(seed);
+  const int hw = std::max(1, (int)std::thread::hardware_concurrency() - 1);
+  const int n_workers = std::max(1, std::min(hw, slots_n));
+  const int per = (slots_n + n_workers - 1) / n_workers;
+  const int batch_target = std::max(1, std::min(slots_n, 512));
+
+  std::vector<std::pair<int, int>> ranges;  // disjoint slot ranges per worker
+  for (int w = 0; w < n_workers; ++w) {
+    int b = w * per, e = std::min(slots_n, (w + 1) * per);
+    if (b < e) ranges.emplace_back(b, e);
+  }
+  const int n_threads = (int)ranges.size();
+
   std::vector<Slot> slots(slots_n);
-  int started = 0;
+  std::vector<std::vector<PlayerSample>> wps(n_threads);  // per-worker samples
+  std::vector<std::vector<OppSample>> wos(n_threads);
 
-  auto finalize_game = [&](Slot &s) {
-    if (s.game.is_over()) backfill_values(s.game.get_winner(), s.p_from, s.o_from, ps, os);
-    s.active = false;
-    s.searching = false;
-    s.tree[0].reset();
-    s.tree[1].reset();  // free both persistent trees at game end
-  };
+  std::mutex mtx;  // guards queue_; co-checked with active_slots / active_workers
+  std::condition_variable cv_infer;
+  std::deque<EvalReq> queue_;
+  std::atomic<int> active_slots{0};
+  std::atomic<int> active_workers{n_threads};
+  std::atomic<long> started{0};
 
-  // Set up the next decision in slot s; returns false if the game ended. Re-roots
-  // the mover's persistent tree onto the current state (creating it on the mover's
-  // first turn), reusing any subtree the mover explored on earlier turns.
-  auto setup_decision = [&](Slot &s) -> bool {
-    auto legal = advance_to_decision(s.game);
-    if (legal.empty()) return false;
-    s.mover = s.game.current_player();
-    SearchState st = mover_state(s.game, s.mover);
-    auto &tr = s.tree[s.mover];
-    if (!tr)
-      tr = std::make_unique<Search>(
-          st, SearchConfig{1.5f, sims,
-                           (unsigned)(seed ^ (0x9E3779B9u * (s.game_id * 2 + s.mover))),
-                           /*training=*/true});
-    else
-      tr->advance_root(st);
-    s.sims_done = 0;
-    s.searching = true;
-    return true;
-  };
+  std::mutex rmtx;  // worker wakeup
+  std::condition_variable rcv;
 
-  auto complete_decision = [&](Slot &s) {
-    Search &tr = *s.tree[s.mover];
-    tr.finalize();
-    auto visits = tr.root_visits();
-    int m = sample_from_visits(visits, rng);
-    record_decision(s.game, s.mover, m, visits, s.game_id, s.turn++, ps, os);
-    s.game.apply_move(m);  // trees persist; next setup_decision re-roots via the memo
-    s.searching = false;
-    if (s.game.is_over()) finalize_game(s);
-  };
+  auto worker_fn = [&](int wid, int rb, int re) {
+    std::vector<PlayerSample> &lps = wps[wid];
+    std::vector<OppSample> &los = wos[wid];
 
-  // Pump a slot's (mover's) search until it queues an NN eval or exhausts its
-  // budget. Returns true if an eval was queued.
-  auto pump = [&](Slot &s) -> bool {
-    Search &tr = *s.tree[s.mover];
-    while (s.sims_done < sims) {
-      LeafRequest req = tr.select_leaf();
-      if (!req.needs_eval) { ++s.sims_done; continue; }
-      s.pending = req;
-      s.has_pending = true;
+    auto start_game = [&](Slot &s) -> bool {
+      long gid = started.fetch_add(1, std::memory_order_relaxed);
+      if (gid >= total_games) return false;
+      s.game_id = (int)gid;
+      s.turn = 0;
+      s.rng.seed((unsigned)(seed ^ (0x9E3779B9u * (unsigned)(gid + 1))));
+      setup_game(s.game, s.rng, start_frac);
+      s.p_from = lps.size();
+      s.o_from = los.size();
+      s.active = true;
+      s.searching = false;
+      s.waiting = false;
+      active_slots.fetch_add(1, std::memory_order_relaxed);
       return true;
+    };
+
+    auto setup_decision = [&](Slot &s) -> bool {
+      auto legal = advance_to_decision(s.game);
+      if (legal.empty()) return false;
+      s.mover = s.game.current_player();
+      SearchState st = mover_state(s.game, s.mover);
+      auto &tr = s.tree[s.mover];
+      unsigned tseed =
+          (unsigned)(seed ^ (0x9E3779B9u * (unsigned)(s.game_id * 2 + s.mover)));
+      if (!tr)
+        tr = std::make_unique<Search>(st, SearchConfig{1.5f, sims, tseed, true});
+      else
+        tr->advance_root(st);
+      s.sims_done = 0;
+      s.searching = true;
+      return true;
+    };
+
+    auto complete_decision = [&](Slot &s) {
+      Search &tr = *s.tree[s.mover];
+      tr.finalize();
+      auto visits = tr.root_visits();
+      int m = sample_from_visits(visits, s.rng);
+      record_decision(s.game, s.mover, m, visits, s.game_id, s.turn++, lps, los);
+      s.game.apply_move(m);  // trees persist; next setup_decision re-roots
+      s.searching = false;
+    };
+
+    auto finalize_game = [&](Slot &s) {
+      if (s.game.is_over())
+        backfill_values(s.game.get_winner(), s.p_from, s.o_from, lps, los);
+      s.active = false;
+      s.searching = false;
+      s.tree[0].reset();
+      s.tree[1].reset();
+      { std::lock_guard<std::mutex> lk(mtx); active_slots.fetch_sub(1, std::memory_order_relaxed); }
+      cv_infer.notify_one();  // active_slots dropped -> may enable a tail drain
+    };
+
+    auto enqueue = [&](Slot &s, int slot_idx) {
+      {
+        std::lock_guard<std::mutex> lk(mtx);
+        EvalReq r;
+        r.slot = slot_idx;
+        r.is_player = s.pending.is_player;
+        if (r.is_player) r.pf = s.pending.pfeat; else r.of = s.pending.ofeat;
+        queue_.push_back(std::move(r));
+      }
+      cv_infer.notify_one();
+    };
+
+    // Advance one slot as far as it can go; returns true while it is still
+    // active (parked on an eval), false once its work is fully done.
+    auto advance = [&](Slot &s, int slot_idx) -> bool {
+      for (;;) {
+        if (!s.active) {
+          if (!start_game(s)) return false;  // no games left -> done
+          continue;
+        }
+        if (s.waiting) {
+          if (!s.result_ready.load(std::memory_order_acquire)) return true;
+          if (s.pending_is_player) s.tree[s.mover]->apply_eval(s.peval);
+          else                     s.tree[s.mover]->apply_eval(s.oeval);
+          s.result_ready.store(false, std::memory_order_relaxed);
+          s.waiting = false;
+          ++s.sims_done;
+          continue;
+        }
+        if (!s.searching) {
+          if (!setup_decision(s)) { finalize_game(s); continue; }
+        }
+        bool pushed = false;
+        while (s.sims_done < sims) {
+          LeafRequest req = s.tree[s.mover]->select_leaf();
+          if (!req.needs_eval) { ++s.sims_done; continue; }
+          s.pending = req;
+          s.pending_is_player = req.is_player;
+          s.waiting = true;
+          enqueue(s, slot_idx);
+          pushed = true;
+          break;
+        }
+        if (pushed) continue;  // now parked; next iteration returns true
+        complete_decision(s);
+        if (s.game.is_over()) finalize_game(s);
+        continue;
+      }
+    };
+
+    for (;;) {
+      bool any_waiting = false;
+      for (int i = rb; i < re; ++i)
+        if (advance(slots[i], i)) any_waiting = true;
+      if (!any_waiting) break;  // all of this worker's slots are done
+      std::unique_lock<std::mutex> lk(rmtx);
+      rcv.wait(lk, [&] {
+        for (int i = rb; i < re; ++i) {
+          Slot &s = slots[i];
+          if (s.waiting && s.result_ready.load(std::memory_order_acquire)) return true;
+        }
+        return false;
+      });
     }
-    return false;
+
+    { std::lock_guard<std::mutex> lk(mtx); active_workers.fetch_sub(1, std::memory_order_relaxed); }
+    cv_infer.notify_one();  // let the inference thread exit once all workers done
   };
 
-  std::vector<PlayerFeatures> pbatch;
-  std::vector<OppFeatures> obatch;
-  std::vector<Slot *> pwait, owait;
-
-  for (;;) {
-    pbatch.clear(); obatch.clear(); pwait.clear(); owait.clear();
-    bool any_active = false;
-
-    for (auto &s : slots) {
-      if (!s.active) {
-        if (started >= total_games) continue;
-        s.game_id = started++;
-        s.turn = 0;
-        s.p_from = ps.size();
-        s.o_from = os.size();
-        setup_game(s.game, rng, start_frac);
-        s.active = true;
-        s.searching = false;
+  auto infer_fn = [&]() {
+    std::vector<PlayerFeatures> pf; std::vector<int> pslot;
+    std::vector<OppFeatures> of; std::vector<int> oslot;
+    for (;;) {
+      {
+        std::unique_lock<std::mutex> lk(mtx);
+        cv_infer.wait(lk, [&] {
+          if (active_workers.load() == 0) return true;
+          if (queue_.empty()) return false;
+          return (int)queue_.size() >= batch_target ||
+                 (long)queue_.size() >= (long)active_slots.load();
+        });
+        if (queue_.empty()) {
+          if (active_workers.load() == 0) break;
+          continue;
+        }
+        for (auto &r : queue_) {
+          if (r.is_player) { pf.push_back(r.pf); pslot.push_back(r.slot); }
+          else { of.push_back(r.of); oslot.push_back(r.slot); }
+        }
+        queue_.clear();
       }
-      any_active = true;
-      if (!s.searching && !setup_decision(s)) { finalize_game(s); continue; }
-      if (pump(s)) {
-        if (s.pending.is_player) { pbatch.push_back(s.pending.pfeat); pwait.push_back(&s); }
-        else { obatch.push_back(s.pending.ofeat); owait.push_back(&s); }
-      } else {
-        complete_decision(s);
+      if (!pf.empty()) {
+        auto res = nn.eval_players(pf);
+        for (std::size_t i = 0; i < pslot.size(); ++i) {
+          Slot &s = slots[pslot[i]];
+          s.peval = res[i];
+          s.result_ready.store(true, std::memory_order_release);
+        }
       }
+      if (!of.empty()) {
+        auto res = nn.eval_opps(of);
+        for (std::size_t i = 0; i < oslot.size(); ++i) {
+          Slot &s = slots[oslot[i]];
+          s.oeval = res[i];
+          s.result_ready.store(true, std::memory_order_release);
+        }
+      }
+      pf.clear(); pslot.clear(); of.clear(); oslot.clear();
+      { std::lock_guard<std::mutex> lk(rmtx); }  // serialize with worker waits
+      rcv.notify_all();
     }
+  };
 
-    if (!pbatch.empty()) {
-      auto res = nn.eval_players(pbatch);
-      for (std::size_t i = 0; i < pwait.size(); ++i) {
-        Slot *s = pwait[i];
-        s->tree[s->mover]->apply_eval(res[i]);
-        ++s->sims_done;
-        s->has_pending = false;
-      }
-    }
-    if (!obatch.empty()) {
-      auto res = nn.eval_opps(obatch);
-      for (std::size_t i = 0; i < owait.size(); ++i) {
-        Slot *s = owait[i];
-        s->tree[s->mover]->apply_eval(res[i]);
-        ++s->sims_done;
-        s->has_pending = false;
-      }
-    }
+  std::thread infer(infer_fn);
+  std::vector<std::thread> workers;
+  for (int w = 0; w < n_threads; ++w)
+    workers.emplace_back(worker_fn, w, ranges[w].first, ranges[w].second);
+  for (auto &t : workers) t.join();
+  infer.join();
 
-    if (!any_active && started >= total_games) break;
+  for (int w = 0; w < n_threads; ++w) {
+    ps.insert(ps.end(), wps[w].begin(), wps[w].end());
+    os.insert(os.end(), wos[w].begin(), wos[w].end());
   }
 }
 
