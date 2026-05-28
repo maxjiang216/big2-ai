@@ -159,12 +159,14 @@ def train_opp(paths, out_path, cfg, device):
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
-        for opp, trick, osz, usz, value, mask, tgt in tl:
-            opp, trick = opp.to(device), trick.to(device)
+        for hand, opp, trick, osz, usz, value, mask, tgt in tl:
+            hand, opp, trick = hand.to(device), opp.to(device), trick.to(device)
             osz, usz, value = osz.to(device), usz.to(device), value.to(device)
             mask, tgt = mask.to(device), tgt.to(device)
 
-            v, logits = model(opp, trick, osz, usz)
+            move_value, logits = model(hand, opp, trick, osz, usz)
+            # Single-index value BCE: supervise only the played move's slot.
+            v = move_value.gather(1, tgt.unsqueeze(1)).squeeze(1)
             loss_v = F.binary_cross_entropy(v.clamp(eps, 1 - eps), value)
             logp = masked_log_softmax(logits, mask)
             loss_b = F.nll_loss(logp, tgt)
@@ -180,11 +182,12 @@ def train_opp(paths, out_path, cfg, device):
         vl_loss = vv = vb = 0.0
         n = 0
         with torch.no_grad():
-            for opp, trick, osz, usz, value, mask, tgt in vl:
-                opp, trick = opp.to(device), trick.to(device)
+            for hand, opp, trick, osz, usz, value, mask, tgt in vl:
+                hand, opp, trick = hand.to(device), opp.to(device), trick.to(device)
                 osz, usz, value = osz.to(device), usz.to(device), value.to(device)
                 mask, tgt = mask.to(device), tgt.to(device)
-                v, logits = model(opp, trick, osz, usz)
+                move_value, logits = model(hand, opp, trick, osz, usz)
+                v = move_value.gather(1, tgt.unsqueeze(1)).squeeze(1)
                 lv = F.binary_cross_entropy(v.clamp(eps, 1 - eps), value)
                 lb = F.nll_loss(masked_log_softmax(logits, mask), tgt)
                 bs = len(value)

@@ -58,7 +58,8 @@ struct Node;
 struct Edge {
   int move_id;
   float prior;
-  Node *child = nullptr;  // resolved lazily (transposition-aware)
+  Node *child = nullptr;   // resolved lazily (transposition-aware)
+  float move_value = 0.5f;  // opp-parent edges: NN per-move value q_a baseline
 };
 
 // Hierarchical selection grouping: edges sharing a trick type (full houses and
@@ -93,7 +94,8 @@ public:
   Search(const SearchState &root_state, const SearchConfig &cfg);
 
   LeafRequest select_leaf();
-  void apply_eval(float value, const float *logits);
+  void apply_eval(const PlayerEval &e);  // expands a player leaf + backs up
+  void apply_eval(const OppEval &e);     // expands an opp leaf + backs up
   void run(Evaluator &ev);
   void finalize();  // post-search forced-win extension (run() calls it)
 
@@ -115,9 +117,8 @@ public:
 private:
   Node *alloc_node(const SearchState &s);
   void finalize_terminal(Node *n);
-  void expand(Node *n, float value, const float *logits);
   void expand_player(Node *n, const float *logits);
-  void expand_opp(Node *n, const float *logits);
+  void expand_opp(Node *n, const float *move_value, const float *logits);
   void build_groups(Node *n);
   void apply_root_forced_win();
   Edge *select_edge(Node *n);

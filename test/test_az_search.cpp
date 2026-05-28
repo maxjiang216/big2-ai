@@ -129,7 +129,7 @@ struct StubEval : Evaluator {
   OppEval eval_opp(const OppFeatures &f) override {
     ++opp_calls;
     OppEval e;
-    e.value = ov(f);
+    e.move_value.fill(ov(f));  // per-move q_a; uniform here unless a test varies it
     e.logits.fill(0.0f);
     return e;
   }
@@ -205,11 +205,13 @@ void test_search_invariants_and_determinism() {
 
 void test_expectimax_backup() {
   // Player root backs up the MAX over expanded children; an opp child backs up
-  // the prior-weighted average over its expanded children.
+  // the unbiased CONTROL-VARIATE average: Sum_a prior(a)*(expanded? child.value
+  // : q_a), with NO renormalization by expanded mass.
   SearchState root{counts({{1, 1}, {2, 1}, {7, 1}}), 6, counts({{0, 1}}),
                    kSINGLE_START, kUs};
   StubEval ev;
-  // Give opp positions a distinctive value so weighted-avg is checkable.
+  // Opp per-move q distinct from the player leaf value (0.5) so the unbiased and
+  // (old) renormalized estimators differ while any child is still unexpanded.
   ev.ov = [](const OppFeatures &f) { return f.opp_size >= 6 ? 0.3f : 0.7f; };
   Search s(root, {1.5f, 500});
   s.run(ev);
@@ -232,13 +234,29 @@ void test_expectimax_backup() {
   assert(any);
   assert(std::abs(r->value - mx) < 1e-5);
 
-  // Opp node: value == prior-weighted avg over its expanded children.
+  // Opp node leaf value == prior-weighted mean of q_a (control-variate baseline).
+  // Opp node backed-up value == Sum prior*(expanded? child.value : q_a).
   if (opp_child) {
-    double wsum = 0, w = 0;
-    for (const auto &e : opp_child->edges)
-      if (e.child && e.child->expanded) { wsum += e.prior * e.child->value; w += e.prior; }
-    float expect = (w > 0) ? (float)(wsum / w) : opp_child->nn_value;
-    assert(std::abs(opp_child->value - expect) < 1e-5);
+    double leaf = 0.0, v = 0.0;
+    bool any_unexpanded = false;
+    double ren_wsum = 0.0, ren_w = 0.0;  // old renormalized-by-expanded estimator
+    for (const auto &e : opp_child->edges) {
+      leaf += (double)e.prior * (double)e.move_value;
+      const bool exp = e.child && e.child->expanded;
+      v += (double)e.prior * (double)(exp ? e.child->value : e.move_value);
+      if (!exp) any_unexpanded = true;
+      else { ren_wsum += e.prior * e.child->value; ren_w += e.prior; }
+    }
+    assert(std::abs(opp_child->nn_value - (float)leaf) < 1e-5);
+    assert(std::abs(opp_child->value - (float)v) < 1e-5);
+    // Bias-fix regression guard: while a child is unexpanded and its q differs
+    // from the expanded mean, the unbiased value must NOT equal the renormalized
+    // one (which is what the old, biased backup computed).
+    if (any_unexpanded && ren_w > 0) {
+      float renorm = (float)(ren_wsum / ren_w);
+      if (std::abs(renorm - 0.3f) > 1e-3)  // q here is 0.3; only meaningful if differs
+        assert(std::abs(opp_child->value - renorm) > 1e-6);
+    }
   }
 }
 
@@ -351,13 +369,15 @@ void test_caching_evaluator() {
   cache.eval_player(g);
   assert(cache.player_misses() == 2 && base.player_calls == 2);
 
-  // Opponent evals keyed on public-only input (no hand): two OppFeatures that
-  // differ only in fields the opp net never sees would collide — here we just
-  // confirm identical inputs hit.
-  OppFeatures o{counts({{2, 2}}), counts({{3, 1}}), 5, 4};
+  // Opponent evals are now keyed on the full input INCLUDING our hand (the opp
+  // net takes it). Identical inputs hit; inputs differing only in our hand miss.
+  OppFeatures o{counts({{0, 1}}), counts({{2, 2}}), counts({{3, 1}}), 5, 4};
   cache.eval_opp(o);
-  cache.eval_opp(o);
+  cache.eval_opp(o);  // identical -> hit
   assert(cache.opp_misses() == 1 && base.opp_calls == 1);
+  OppFeatures o2 = o; o2.hand = counts({{1, 1}});  // differs only in our hand -> miss
+  cache.eval_opp(o2);
+  assert(cache.opp_misses() == 2 && base.opp_calls == 2);
 }
 
 void test_play_mode_is_seed_independent() {

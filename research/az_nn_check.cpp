@@ -37,16 +37,19 @@ static std::vector<PlayerFeatures> player_positions() {
 
 static std::vector<OppFeatures> opp_positions() {
   return {
-      {{2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0},
-       {0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {{2, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1}, // observer's hand
+       {2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0}, // opp_max (thermo)
+       {0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, // trick (single 5)
        8,
        6},
-      {{4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-       {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+      {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, // empty hand
+       {4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+       {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, // lead
        3,
        0},
-      {{3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 0},
-       {0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0},
+      {{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}, // one of each
+       {3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 0},
+       {0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0}, // a pair of 10s
        11,
        13},
   };
@@ -78,9 +81,11 @@ int main(int argc, char **argv) {
   auto oe = nn.eval_opps(opp_positions());
   std::printf("OPP\n");
   for (size_t i = 0; i < oe.size(); ++i)
-    std::printf("  pos%zu value=%.6f logits[0..4]=%.6f %.6f %.6f %.6f %.6f argmax=%d\n",
-                i, oe[i].value, oe[i].logits[0], oe[i].logits[1], oe[i].logits[2],
-                oe[i].logits[3], oe[i].logits[4],
+    std::printf("  pos%zu move_value[0..4]=%.6f %.6f %.6f %.6f %.6f "
+                "logits[0..4]=%.6f %.6f %.6f %.6f %.6f argmax=%d\n",
+                i, oe[i].move_value[0], oe[i].move_value[1], oe[i].move_value[2],
+                oe[i].move_value[3], oe[i].move_value[4], oe[i].logits[0],
+                oe[i].logits[1], oe[i].logits[2], oe[i].logits[3], oe[i].logits[4],
                 argmax<AZ_OPP_HEAD_DIM>(oe[i].logits));
   return 0;
 }

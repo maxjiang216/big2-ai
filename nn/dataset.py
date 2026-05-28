@@ -481,7 +481,8 @@ class Big2AZPlayerDataset(Dataset):
 class Big2AZOppDataset(Dataset):
     """Opponent-net samples: value target + one-hot behavior (imitation) target.
 
-    Returns (opp, trick, opp_size, our_size, value, mask, target_idx).
+    The opp net now takes our exact hand too, so samples carry it (hand_* cols).
+    Returns (hand, opp, trick, opp_size, our_size, value, mask, target_idx).
     """
 
     def __init__(
@@ -501,6 +502,7 @@ class Big2AZOppDataset(Dataset):
             df = df.sample(frac=subsample_frac, random_state=seed)
         df = df.reset_index(drop=True)
 
+        self.hand_enc = torch.from_numpy(encode_exact_np(_counts(df, "hand")))
         self.opp_enc = torch.from_numpy(encode_upper_bound_np(_counts(df, "opp_max")))
         self.trick_enc = torch.from_numpy(encode_exact_np(_counts(df, "trick")))
         self.opp_size = torch.tensor(
@@ -526,6 +528,7 @@ class Big2AZOppDataset(Dataset):
         # The played move is always legal; guarantee it is unmasked.
         mask[self.target_idx[idx]] = True
         return (
+            self.hand_enc[idx],
             self.opp_enc[idx],
             self.trick_enc[idx],
             self.opp_size[idx],

@@ -107,7 +107,7 @@ struct PlayerSample {
 
 struct OppSample {
   int game_id, turn_idx;
-  std::array<int, 13> opp_max, trick;
+  std::array<int, 13> hand, opp_max, trick;  // hand = observer's exact hand
   int opp_size, our_size;
   std::vector<int> legal;
   int move_id;
@@ -172,6 +172,7 @@ static void record_decision(Game &game, int mover, int chosen_move,
 
   OppSample os;
   os.game_id = game_id; os.turn_idx = turn_idx;
+  os.hand = ohand;                               // observer's exact hand (NN input)
   os.opp_max = opp_max_counts(ohand, discard);  // observer's upper bound on the mover
   os.trick = trick_counts(last);
   os.opp_size = game.get_player_hand_size(mover);   // mover hand size
@@ -345,7 +346,7 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
       auto res = nn.eval_players(pbatch);
       for (std::size_t i = 0; i < pwait.size(); ++i) {
         Slot *s = pwait[i];
-        s->tree[s->mover]->apply_eval(res[i].value, res[i].logits.data());
+        s->tree[s->mover]->apply_eval(res[i]);
         ++s->sims_done;
         s->has_pending = false;
       }
@@ -354,7 +355,7 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
       auto res = nn.eval_opps(obatch);
       for (std::size_t i = 0; i < owait.size(); ++i) {
         Slot *s = owait[i];
-        s->tree[s->mover]->apply_eval(res[i].value, res[i].logits.data());
+        s->tree[s->mover]->apply_eval(res[i]);
         ++s->sims_done;
         s->has_pending = false;
       }
@@ -430,7 +431,7 @@ static void write_player_parquet(const std::string &path, const std::vector<Play
 static void write_opp_parquet(const std::string &path, const std::vector<OppSample> &v) {
   auto pool = arrow::default_memory_pool();
   arrow::Int32Builder game_id, turn_idx, opp_size, our_size, move_id;
-  arrow::Int32Builder opp_max[13], trick[13];
+  arrow::Int32Builder hand[13], opp_max[13], trick[13];
   arrow::FloatBuilder value;
   arrow::ListBuilder legal(pool, std::make_shared<arrow::Int32Builder>(pool));
   auto *legal_v = static_cast<arrow::Int32Builder *>(legal.value_builder());
@@ -439,7 +440,7 @@ static void write_opp_parquet(const std::string &path, const std::vector<OppSamp
     game_id.Append(s.game_id); turn_idx.Append(s.turn_idx);
     opp_size.Append(s.opp_size); our_size.Append(s.our_size);
     move_id.Append(s.move_id); value.Append(s.value);
-    for (int r = 0; r < 13; ++r) { opp_max[r].Append(s.opp_max[r]); trick[r].Append(s.trick[r]); }
+    for (int r = 0; r < 13; ++r) { hand[r].Append(s.hand[r]); opp_max[r].Append(s.opp_max[r]); trick[r].Append(s.trick[r]); }
     legal.Append(); legal_v->AppendValues(s.legal.data(), (int64_t)s.legal.size());
   }
 
@@ -450,6 +451,7 @@ static void write_opp_parquet(const std::string &path, const std::vector<OppSamp
   };
   push(arrow::field("game_id", arrow::int32()), finish_i32(game_id));
   push(arrow::field("turn_idx", arrow::int32()), finish_i32(turn_idx));
+  for (int r = 0; r < 13; ++r) push(arrow::field("hand_" + std::to_string(r), arrow::int32()), finish_i32(hand[r]));
   for (int r = 0; r < 13; ++r) push(arrow::field("opp_max_" + std::to_string(r), arrow::int32()), finish_i32(opp_max[r]));
   for (int r = 0; r < 13; ++r) push(arrow::field("trick_" + std::to_string(r), arrow::int32()), finish_i32(trick[r]));
   push(arrow::field("opp_size", arrow::int32()), finish_i32(opp_size));

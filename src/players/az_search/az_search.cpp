@@ -215,7 +215,7 @@ void Search::expand_player(Node *n, const float *logits) {
   build_groups(n);
 }
 
-void Search::expand_opp(Node *n, const float *logits) {
+void Search::expand_opp(Node *n, const float *move_value, const float *logits) {
   auto poss = compute_possible_moves(n->st.our_hand, n->st.discard, n->st.opp_size,
                                      Move(n->st.last_move), /*exclude_bombs=*/false);
   // Behavior priors over the plausible set (masked softmax via the opp head).
@@ -263,16 +263,17 @@ void Search::expand_opp(Node *n, const float *logits) {
     n->edges.push_back(Edge{rep, psum, nullptr});
   }
   build_groups(n);
-}
 
-void Search::expand(Node *n, float value, const float *logits) {
-  n->expanded = true;
-  n->nn_value = value;
-  n->value = value;
-  if (n->st.side == kUs)
-    expand_player(n, logits);
-  else
-    expand_opp(n, logits);
+  // Per-edge value baseline q_a from the opp net's per-move value head, and the
+  // node's leaf value as the prior-weighted mean Sum_a prior(a)*q_a (the
+  // control-variate baseline — matches the priors, which is what makes the
+  // partial-expansion backup unbiased). Priors already sum to 1 over edges.
+  double v = 0.0;
+  for (auto &e : n->edges) {
+    e.move_value = move_value[az_opp_head_index(e.move_id)];
+    v += (double)e.prior * (double)e.move_value;
+  }
+  n->nn_value = n->value = n->edges.empty() ? 0.5f : (float)v;
 }
 
 // Group key for hierarchical selection: trick type, with full houses / bombs
@@ -392,7 +393,7 @@ LeafRequest Search::select_leaf() {
         req.pfeat = {cur->st.our_hand, opp_max, trick, cur->st.opp_size, our_size};
       } else {
         req.is_player = false;
-        req.ofeat = {opp_max, trick, cur->st.opp_size, our_size};
+        req.ofeat = {cur->st.our_hand, opp_max, trick, cur->st.opp_size, our_size};
       }
       return req;
     }
@@ -411,10 +412,16 @@ void Search::recompute_value(Node *n) {
       if (e.child && e.child->expanded) { best = std::max(best, e.child->value); any = true; }
     n->value = any ? best : n->nn_value;
   } else {
-    double wsum = 0.0, w = 0.0;
+    // Opponent (chance) node — control-variate backup. NO renormalization: each
+    // unexpanded child keeps its NN per-move value q_a; expanded children use
+    // their searched value. Priors sum to 1, so this stays an unbiased estimate
+    // of Sum_a prior(a)*V_true(a) (renormalizing by expanded mass would bias it).
+    if (n->edges.empty()) { n->value = n->nn_value; return; }
+    double v = 0.0;
     for (const auto &e : n->edges)
-      if (e.child && e.child->expanded) { wsum += e.prior * e.child->value; w += e.prior; }
-    n->value = (w > 0.0) ? (float)(wsum / w) : n->nn_value;
+      v += (double)e.prior *
+           (double)((e.child && e.child->expanded) ? e.child->value : e.move_value);
+    n->value = (float)v;
   }
 }
 
@@ -423,8 +430,20 @@ void Search::backup() {
   for (int i = (int)path_.size() - 1; i >= 0; --i) recompute_value(path_[i]);
 }
 
-void Search::apply_eval(float value, const float *logits) {
-  expand(pending_, value, logits);
+void Search::apply_eval(const PlayerEval &e) {
+  Node *n = pending_;
+  n->expanded = true;
+  n->nn_value = e.value;
+  n->value = e.value;
+  expand_player(n, e.logits.data());  // may override (auto-win / tablebase fix)
+  backup();
+  pending_ = nullptr;
+}
+
+void Search::apply_eval(const OppEval &e) {
+  Node *n = pending_;
+  n->expanded = true;
+  expand_opp(n, e.move_value.data(), e.logits.data());  // derives nn_value/value
   backup();
   pending_ = nullptr;
 }
@@ -433,13 +452,10 @@ void Search::run(Evaluator &ev) {
   for (int s = 0; s < cfg_.sims; ++s) {
     LeafRequest req = select_leaf();
     if (!req.needs_eval) continue;
-    if (req.is_player) {
-      PlayerEval e = ev.eval_player(req.pfeat);
-      apply_eval(e.value, e.logits.data());
-    } else {
-      OppEval e = ev.eval_opp(req.ofeat);
-      apply_eval(e.value, e.logits.data());
-    }
+    if (req.is_player)
+      apply_eval(ev.eval_player(req.pfeat));
+    else
+      apply_eval(ev.eval_opp(req.ofeat));
   }
   finalize();
 }

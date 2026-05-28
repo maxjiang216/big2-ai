@@ -26,11 +26,14 @@ PLAYER = [
      [0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0], 11, 13),
 ]
 OPP = [
-    ([2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0],
+    ([2, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1],
+     [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0],
      [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 8, 6),
-    ([4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ([0] * 13,
+     [4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0],
      [0] * 13, 3, 0),
-    ([3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 0],
+    ([1] * 13,
+     [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 0],
      [0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0], 11, 13),
 ]
 
@@ -53,13 +56,16 @@ def main():
               + f" argmax={int(lg.argmax())}")
 
     print("OPP")
-    for i, (opp, trick, osz, usz) in enumerate(OPP):
+    for i, (hand, opp, trick, osz, usz) in enumerate(OPP):
+        h = torch.from_numpy(encode_exact_np(np.array([hand], np.int32)))
         o = torch.from_numpy(encode_upper_bound_np(np.array([opp], np.int32)))
         t = torch.from_numpy(encode_exact_np(np.array([trick], np.int32)))
         with torch.no_grad():
-            v, logits = onet(o, t, torch.tensor([osz / 16.0]), torch.tensor([usz / 16.0]))
-        lg = logits[0]
-        print(f"  pos{i} value={float(v[0]):.6f} logits[0..4]="
+            mv, logits = onet(h, o, t, torch.tensor([osz / 16.0]), torch.tensor([usz / 16.0]))
+        mvr, lg = mv[0], logits[0]
+        print(f"  pos{i} move_value[0..4]="
+              + " ".join(f"{float(mvr[j]):.6f}" for j in range(5))
+              + " logits[0..4]="
               + " ".join(f"{float(lg[j]):.6f}" for j in range(5))
               + f" argmax={int(lg.argmax())}")
 

@@ -2,11 +2,10 @@
 #define AZ_SEARCH_EVAL_CACHE_H
 
 // Out-of-tree NN-eval cache (lc0 NNCache idea): memoises evaluator outputs on
-// the actual NN *input* rather than the full game state. Because the opponent
-// net's input is public-only (and its max-cards-per-rank component is invariant
-// to which of our hidden cards we hypothetically play), opponent evals are
-// shared across every tree node that differs only in our hidden hand. Persists
-// across simulations and turns. Torch-free decorator around any Evaluator.
+// the actual NN *input* rather than the full game state. Both nets take our
+// exact hand as input (the opp net's per-move value head needs it), so both
+// keys hash the full input including the hand. Persists across simulations and
+// turns. Torch-free decorator around any Evaluator.
 
 #include "evaluator.h"
 
@@ -45,6 +44,7 @@ inline uint64_t player_input_key(const PlayerFeatures &f) {
 
 inline uint64_t opp_input_key(const OppFeatures &f) {
   uint64_t h = 1469598103934665603ull;
+  h = detail::fnv_counts(h, f.hand);
   h = detail::fnv_counts(h, f.opp_max);
   h = detail::fnv_counts(h, f.trick);
   h = detail::fnv_int(h, f.opp_size);

@@ -33,6 +33,7 @@ struct PlayerFeatures {
 };
 
 struct OppFeatures {
+  std::array<int, 13> hand;     // observer's (searcher's) exact hand counts
   std::array<int, 13> opp_max;  // mover upper-bound counts (thermo)
   std::array<int, 13> trick;    // current trick rank counts
   int opp_size;                 // mover (opponent) hand size
@@ -44,9 +45,13 @@ struct PlayerEval {
   std::array<float, AZ_PLAYER_HEAD_DIM> logits;
 };
 
+// Opponent net output. The opponent net now takes our exact hand too, so each
+// head slot carries a PER-MOVE value q_a = P(observer/searcher wins after the
+// opponent plays move a). The node's scalar value is not a head output — the
+// search derives it as Sum_a prior(a) * q_a (control-variate baseline).
 struct OppEval {
-  float value;  // P(observer / searcher wins), in [0,1]
-  std::array<float, AZ_OPP_HEAD_DIM> logits;
+  std::array<float, AZ_OPP_HEAD_DIM> move_value;  // per-slot q_a, each in [0,1]
+  std::array<float, AZ_OPP_HEAD_DIM> logits;      // behavior logits
 };
 
 // Upper bound on the opponent's per-rank holdings, given our hand and the

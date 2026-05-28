@@ -22,8 +22,9 @@ Net I/O
   Big2NetAZ.forward(hand, opp, trick, opp_size, our_size)
       -> value[B] (sigmoid, P(player-to-move wins)),
          policy_logits[B, PLAYER_HEAD_DIM]
-  Big2NetOpp.forward(opp, trick, opp_size, our_size)
-      -> value[B] (sigmoid, P(the non-mover / searching player wins)),
+  Big2NetOpp.forward(hand, opp, trick, opp_size, our_size)
+      -> move_value[B, OPP_HEAD_DIM] (sigmoid; per slot, P(searcher wins after
+         the opponent plays that move)),
          behavior_logits[B, OPP_HEAD_DIM]
 """
 
@@ -111,6 +112,26 @@ class PolicyHead(nn.Module):
         return self.fc2(x)  # raw logits
 
 
+class PerMoveValueHead(nn.Module):
+    """Per-slot value q_a in [0,1]: Linear -> SELU -> Linear -> Sigmoid.
+
+    One value per move slot — q_a = P(searcher wins after the opponent plays a).
+    The search reads the played/representative move's slot; the node's scalar
+    value is derived outside the net as Sum_a prior(a)*q_a.
+    """
+
+    def __init__(self, in_dim: int, out_dim: int, hidden: int = 256) -> None:
+        super().__init__()
+        self.fc1 = _init_selu(nn.Linear(in_dim, hidden))
+        self.fc2 = nn.Linear(hidden, out_dim)
+        nn.init.xavier_uniform_(self.fc2.weight)
+        nn.init.zeros_(self.fc2.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.selu(self.fc1(x))
+        return torch.sigmoid(self.fc2(x))
+
+
 # ---------------------------------------------------------------------------
 # Player net — position-conditioned dual head (true AlphaZero).
 # ---------------------------------------------------------------------------
@@ -184,34 +205,44 @@ class Big2NetAZ(nn.Module):
 
 
 class Big2NetOpp(nn.Module):
-    """Inputs opp max-cards (thermo), current trick (exact), and the two hand
-    sizes — NO exact hand. Outputs a value scalar and behavior logits."""
+    """Inputs our hand (exact), opp max-cards (thermo), current trick (exact),
+    and the two hand sizes — same inputs as the player net. Outputs a PER-MOVE
+    value q_a (one per opp head slot, P(searcher wins after that opp move)) and
+    behavior logits. Our hand is needed because the post-move value depends on
+    whether/how we can respond and what we do next; the behavior priors riding
+    along on it are a better posterior (deck correlation), not a bias."""
 
     def __init__(self) -> None:
         super().__init__()
         self.layer_a = _init_swish(nn.Linear(ENCODING_DIM, 64))
-        self.layer_b_opp = _init_swish(nn.Linear(64, 64))
+        self.layer_b_hands = _init_swish(nn.Linear(64, 64))
         self.layer_b_trick = _init_swish(nn.Linear(64, 32))
+        self.layer_c_player = _init_swish(nn.Linear(64, 128))
         self.layer_c_opp = _init_swish(nn.Linear(64, 96))
         self.size_embed = _init_swish(nn.Linear(2, 16))
 
-        # Junction: [opp96, trick32, size16] = 144 -> 256.
-        self.junction = _init_selu(nn.Linear(96 + 32 + 16, 256))
+        # Junction: [hand128, opp96, trick32, size16] = 272 -> 256 (== player net).
+        self.junction = _init_selu(nn.Linear(128 + 96 + 32 + 16, 256))
         self.junction_norm = nn.LayerNorm(256)
         self.trunk = nn.Sequential(ResBlock(256), ResBlock(256))
 
-        self.value_head = ValueHead(256)
+        self.value_head = PerMoveValueHead(256, OPP_HEAD_DIM)
         self.behavior_head = PolicyHead(256, OPP_HEAD_DIM)
 
     def forward(
         self,
+        hand: torch.Tensor,  # [B, 48] exact (our hand)
         opp: torch.Tensor,  # [B, 48] thermo
         trick: torch.Tensor,  # [B, 48] exact
         opp_size: torch.Tensor,  # [B] float (normalised /16)
         our_size: torch.Tensor,  # [B] float (normalised /16)
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        h = F.mish(self.layer_a(hand))
+        h = F.mish(self.layer_b_hands(h))
+        h = F.mish(self.layer_c_player(h))  # [B, 128]
+
         o = F.mish(self.layer_a(opp))
-        o = F.mish(self.layer_b_opp(o))
+        o = F.mish(self.layer_b_hands(o))
         o = F.mish(self.layer_c_opp(o))  # [B, 96]
 
         t = F.mish(self.layer_a(trick))
@@ -219,17 +250,17 @@ class Big2NetOpp(nn.Module):
 
         s = F.mish(self.size_embed(torch.stack([opp_size, our_size], dim=-1)))  # [B,16]
 
-        x = torch.cat([o, t, s], dim=-1)  # [B, 144]
+        x = torch.cat([h, o, t, s], dim=-1)  # [B, 272]
         x = self.junction_norm(F.selu(self.junction(x)))
         x = self.trunk(x)
 
-        value = self.value_head(x)
+        move_value = self.value_head(x)  # [B, OPP_HEAD_DIM] in [0,1]
         behavior_logits = self.behavior_head(x)
-        return value, behavior_logits
+        return move_value, behavior_logits
 
     def embedding_param_ids(self) -> set:
         ids = set()
-        for layer in (self.layer_a, self.layer_b_opp, self.layer_b_trick):
+        for layer in (self.layer_a, self.layer_b_hands, self.layer_b_trick):
             for p in layer.parameters():
                 ids.add(id(p))
         return ids
