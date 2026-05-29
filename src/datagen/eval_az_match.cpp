@@ -93,6 +93,8 @@ int main(int argc, char **argv) {
   const double classic_param = std::atof(arg(argc, argv, "--classic-param", "0"));
   const int deals = std::atoi(arg(argc, argv, "--deals", "200"));
   const int sims = std::atoi(arg(argc, argv, "--sims", "100"));
+  // B's az search budget (cross-play of different-sims models); defaults to A's.
+  const int sims_b = std::atoi(arg(argc, argv, "--sims-b", std::to_string(sims).c_str()));
   const int slots_n = std::atoi(arg(argc, argv, "--slots", "512"));
   const unsigned base_seed = (unsigned)std::strtoul(arg(argc, argv, "--seed", "42"), nullptr, 10);
   std::string device_str = arg(argc, argv, "--device", "cuda");
@@ -193,6 +195,7 @@ int main(int argc, char **argv) {
         continue;
       }
       // az decision at `mover`
+      const int seat_sims = (mover == s.seat_a) ? sims : sims_b;
       if (!s.searching) {
         SearchState st = mover_state(s.game, mover);
         // Match the play path's root-skip: definitive (hand-emptying / opp-1
@@ -204,13 +207,13 @@ int main(int argc, char **argv) {
         }
         unsigned tseed = base_seed ^ (0x9E3779B9u * (unsigned)(s.gidx * 2 + mover));
         if (!s.tree[mover])
-          s.tree[mover] = std::make_unique<Search>(st, SearchConfig{1.5f, sims, tseed, false});
+          s.tree[mover] = std::make_unique<Search>(st, SearchConfig{1.5f, seat_sims, tseed, false});
         else
           s.tree[mover]->advance_root(st);
         s.mover = mover; s.sims_done = 0; s.searching = true;
       }
       bool pushed = false;
-      while (s.sims_done < sims) {
+      while (s.sims_done < seat_sims) {
         LeafRequest req = s.tree[mover]->select_leaf();
         if (!req.needs_eval) { ++s.sims_done; continue; }
         s.pending = req; s.pending_seat = mover; s.pending_is_player = req.is_player;
