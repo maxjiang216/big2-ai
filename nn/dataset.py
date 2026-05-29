@@ -568,6 +568,83 @@ def collate_az_opp(batch):
     return hand, opp, trick, osz, usz, value, mask, target
 
 
+# ---------------------------------------------------------------------------
+# GPU-resident loader: hold the whole (concatenated) dataset on the GPU once and
+# gather + densify mask/policy on-device per batch — no host collate, no per-batch
+# H2D copy, no DataLoader. For this tiny net that flips training from host-
+# pipeline-bound (~9-43% GPU util) to compute-bound. Yields the SAME 8-tuple as
+# the collate fns, already on `device`, so the train loop is unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _parts(ds):
+    from torch.utils.data import ConcatDataset
+    return list(ds.datasets) if isinstance(ds, ConcatDataset) else [ds]
+
+
+def _cat_ragged(parts, flat_attr, off_attr):
+    """Concatenate ragged (flat, offsets[n_i+1]) across parts into one (flat, off)."""
+    lens = torch.cat([getattr(p, off_attr)[1:] - getattr(p, off_attr)[:-1] for p in parts])
+    off = torch.cat([torch.zeros(1, dtype=torch.long), torch.cumsum(lens, 0)])
+    return torch.cat([getattr(p, flat_attr) for p in parts]), off
+
+
+class GpuLoader:
+    """DataLoader-like iterator over GPU-resident tensors."""
+
+    def __init__(self, ds, head, batch, device, shuffle):
+        parts = _parts(ds)
+        cat = lambda a: torch.cat([getattr(p, a) for p in parts]).to(device)
+        self.hand, self.opp, self.trick = cat("hand"), cat("opp"), cat("trick")
+        self.osz, self.usz, self.value = cat("opp_size"), cat("our_size"), cat("value")
+        lf, lo = _cat_ragged(parts, "legal_flat", "legal_off")
+        self.legal_flat, self.legal_off = lf.to(device), lo.to(device)
+        self.head, self.is_player = head, (head == NUM_MOVES)
+        if self.is_player:
+            vf, vo = _cat_ragged(parts, "vmoves_flat", "vmoves_off")
+            self.vmoves_flat, self.vmoves_off = vf.to(device), vo.to(device)
+            cf, _ = _cat_ragged(parts, "vcounts_flat", "vmoves_off")
+            self.vcounts_flat = cf.to(device)
+        else:
+            self.target = torch.cat([p.target for p in parts]).to(device)
+        self.N, self.B, self.device, self.shuffle = self.value.numel(), batch, device, shuffle
+
+    def __len__(self):
+        return (self.N + self.B - 1) // self.B
+
+    def _gather(self, flat, off, idx):
+        """Vectorised ragged gather: returns (row_ids[total], values[total]) for the
+        selected rows `idx` of a (flat, off) ragged array — all on-device."""
+        lengths = off[idx + 1] - off[idx]
+        b = idx.numel()
+        rows = torch.repeat_interleave(torch.arange(b, device=self.device), lengths)
+        out_off = torch.cat([torch.zeros(1, dtype=torch.long, device=self.device),
+                             torch.cumsum(lengths, 0)])
+        within = torch.arange(rows.numel(), device=self.device) - out_off[rows]
+        return rows, flat[off[idx][rows] + within]
+
+    def __iter__(self):
+        order = (torch.randperm(self.N, device=self.device) if self.shuffle
+                 else torch.arange(self.N, device=self.device))
+        for s in range(0, self.N, self.B):
+            idx = order[s:s + self.B]
+            b = idx.numel()
+            mask = torch.zeros(b, self.head, dtype=torch.bool, device=self.device)
+            rows, vals = self._gather(self.legal_flat, self.legal_off, idx)
+            mask[rows, vals] = True
+            if self.is_player:
+                tgt = torch.zeros(b, self.head, dtype=torch.float32, device=self.device)
+                prows, pmoves = self._gather(self.vmoves_flat, self.vmoves_off, idx)
+                _, pcounts = self._gather(self.vcounts_flat, self.vmoves_off, idx)
+                tgt.index_put_((prows, pmoves), pcounts.float(), accumulate=True)
+                tgt /= tgt.sum(1, keepdim=True).clamp_min(1.0)
+            else:
+                tgt = self.target[idx]
+                mask[torch.arange(b, device=self.device), tgt] = True
+            yield (self.hand[idx], self.opp[idx], self.trick[idx],
+                   self.osz[idx], self.usz[idx], self.value[idx], mask, tgt)
+
+
 def make_az_split(
     parquet_paths: "str | list[str]",
     kind: str,

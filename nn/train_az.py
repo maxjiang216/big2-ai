@@ -29,8 +29,12 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from nn.dataset import collate_az_opp, collate_az_player, make_az_split
-from nn.model_az import Big2NetAZ, Big2NetOpp, load_compose_matrix
+from nn.dataset import GpuLoader, collate_az_opp, collate_az_player, make_az_split
+from nn.model_az import NUM_MOVES, OPP_HEAD_DIM, Big2NetAZ, Big2NetOpp, load_compose_matrix
+
+
+def _use_gpu_resident(cfg, device) -> bool:
+    return cfg.gpu_resident == "on" or (cfg.gpu_resident == "auto" and device.type == "cuda")
 
 NEG = -1e30  # stand-in for -inf in masked logits (rows always have >=1 legal)
 
@@ -104,7 +108,11 @@ def _save_scripted(model, out_path, device):
 def train_player(paths, out_path, cfg, device):
     train_ds, val_ds = make_az_split(paths, "player", cfg.val_frac, cfg.seed, cfg.mix_decay)
     print(f"[player] train={len(train_ds):,}  val={len(val_ds):,}")
-    tl, vl = _loaders(train_ds, val_ds, cfg.batch, cfg.workers, collate_az_player)
+    if _use_gpu_resident(cfg, device):
+        tl = GpuLoader(train_ds, NUM_MOVES, cfg.batch, device, shuffle=True)
+        vl = GpuLoader(val_ds, NUM_MOVES, cfg.batch * 2, device, shuffle=False)
+    else:
+        tl, vl = _loaders(train_ds, val_ds, cfg.batch, cfg.workers, collate_az_player)
 
     model = Big2NetAZ().to(device)
     # Fixed composition matrix C[NUM_MOVES, PLAYER_HEAD_DIM]: composed per-move
@@ -178,7 +186,11 @@ def train_player(paths, out_path, cfg, device):
 def train_opp(paths, out_path, cfg, device):
     train_ds, val_ds = make_az_split(paths, "opp", cfg.val_frac, cfg.seed, cfg.mix_decay)
     print(f"[opp] train={len(train_ds):,}  val={len(val_ds):,}")
-    tl, vl = _loaders(train_ds, val_ds, cfg.batch, cfg.workers, collate_az_opp)
+    if _use_gpu_resident(cfg, device):
+        tl = GpuLoader(train_ds, OPP_HEAD_DIM, cfg.batch, device, shuffle=True)
+        vl = GpuLoader(val_ds, OPP_HEAD_DIM, cfg.batch * 2, device, shuffle=False)
+    else:
+        tl, vl = _loaders(train_ds, val_ds, cfg.batch, cfg.workers, collate_az_opp)
 
     model = Big2NetOpp().to(device)
     opt = _make_optim(model, cfg.lr, cfg.weight_decay)
@@ -274,6 +286,10 @@ def main() -> None:
     p.add_argument("--weight-decay", type=float, default=1e-5)
     p.add_argument("--grad-clip", type=float, default=0.5)
     p.add_argument("--workers", type=int, default=8)
+    p.add_argument("--gpu-resident", choices=["auto", "on", "off"], default="auto",
+                   help="auto/on: hold the dataset on-GPU and densify per-batch on "
+                        "device (no DataLoader/collate/H2D) — compute-bound for this "
+                        "tiny net. off: the CPU DataLoader path.")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="auto")
     p.add_argument("--skip-player", action="store_true")
