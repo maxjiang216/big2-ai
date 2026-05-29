@@ -28,8 +28,10 @@
 // (az_player_genN.parquet, az_opp_genN.parquet).
 
 #include "az_search/az_search.h"
+#include "az_search/considered_moves.h"
 #include "az_search/features.h"
 #include "az_search/nn_eval.h"
+#include "nn_encode.h"  // encode_exact / encode_thermo (same as inference -> no drift)
 
 #include "game.h"
 #include "game_record.h"
@@ -632,23 +634,36 @@ static void write_table(const std::string &path,
   parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), out, 1 << 20, pb.build());
 }
 
+// Pre-encoded NN input (matches the net forward order hand|opp|trick and the
+// inference-side nn_eval encode, so train/infer features are identical):
+//   encode_exact(hand 48) | encode_thermo(opp_max 48) | encode_exact(trick 48).
+static void encode_input(const PlayerSample &s, float *e) {
+  encode_exact(s.hand, e); encode_thermo(s.opp_max, e + 48); encode_exact(s.trick, e + 96);
+}
+static void encode_input(const OppSample &s, float *e) {
+  encode_exact(s.hand, e); encode_thermo(s.opp_max, e + 48); encode_exact(s.trick, e + 96);
+}
+
 static void write_player_parquet(const std::string &path, const std::vector<PlayerSample> &v) {
   auto pool = arrow::default_memory_pool();
   arrow::Int32Builder game_id, turn_idx, opp_size, our_size;
-  arrow::Int32Builder hand[13], opp_max[13], trick[13];
   arrow::FloatBuilder value;
-  arrow::ListBuilder legal(pool, std::make_shared<arrow::Int32Builder>(pool));
+  arrow::ListBuilder enc(pool, std::make_shared<arrow::FloatBuilder>(pool));
+  arrow::ListBuilder legal(pool, std::make_shared<arrow::Int32Builder>(pool));  // concrete ids
   arrow::ListBuilder vmoves(pool, std::make_shared<arrow::Int32Builder>(pool));
   arrow::ListBuilder vcounts(pool, std::make_shared<arrow::Int32Builder>(pool));
+  auto *enc_v = static_cast<arrow::FloatBuilder *>(enc.value_builder());
   auto *legal_v = static_cast<arrow::Int32Builder *>(legal.value_builder());
   auto *vmoves_v = static_cast<arrow::Int32Builder *>(vmoves.value_builder());
   auto *vcounts_v = static_cast<arrow::Int32Builder *>(vcounts.value_builder());
 
+  std::array<float, 144> e{};
   for (const auto &s : v) {
     game_id.Append(s.game_id); turn_idx.Append(s.turn_idx);
     opp_size.Append(s.opp_size); our_size.Append(s.our_size);
     value.Append(s.value);
-    for (int r = 0; r < 13; ++r) { hand[r].Append(s.hand[r]); opp_max[r].Append(s.opp_max[r]); trick[r].Append(s.trick[r]); }
+    encode_input(s, e.data());
+    enc.Append(); enc_v->AppendValues(e.data(), 144);
     legal.Append(); legal_v->AppendValues(s.legal.data(), (int64_t)s.legal.size());
     vmoves.Append(); vmoves_v->AppendValues(s.visit_moves.data(), (int64_t)s.visit_moves.size());
     vcounts.Append(); vcounts_v->AppendValues(s.visit_counts.data(), (int64_t)s.visit_counts.size());
@@ -661,15 +676,13 @@ static void write_player_parquet(const std::string &path, const std::vector<Play
   };
   push(arrow::field("game_id", arrow::int32()), finish_i32(game_id));
   push(arrow::field("turn_idx", arrow::int32()), finish_i32(turn_idx));
-  for (int r = 0; r < 13; ++r) push(arrow::field("hand_" + std::to_string(r), arrow::int32()), finish_i32(hand[r]));
-  for (int r = 0; r < 13; ++r) push(arrow::field("opp_max_" + std::to_string(r), arrow::int32()), finish_i32(opp_max[r]));
-  for (int r = 0; r < 13; ++r) push(arrow::field("trick_" + std::to_string(r), arrow::int32()), finish_i32(trick[r]));
   push(arrow::field("opp_size", arrow::int32()), finish_i32(opp_size));
   push(arrow::field("our_size", arrow::int32()), finish_i32(our_size));
   push(arrow::field("value", arrow::float32()), finish_f32(value));
-  std::shared_ptr<arrow::Array> la, vma, vca;
-  legal.Finish(&la); vmoves.Finish(&vma); vcounts.Finish(&vca);
-  push(arrow::field("legal_moves", arrow::list(arrow::int32())), la);
+  std::shared_ptr<arrow::Array> ea, la, vma, vca;
+  enc.Finish(&ea); legal.Finish(&la); vmoves.Finish(&vma); vcounts.Finish(&vca);
+  push(arrow::field("enc", arrow::list(arrow::float32())), ea);          // 144 floats
+  push(arrow::field("legal", arrow::list(arrow::int32())), la);          // concrete move ids
   push(arrow::field("visit_moves", arrow::list(arrow::int32())), vma);
   push(arrow::field("visit_counts", arrow::list(arrow::int32())), vca);
   write_table(path, std::move(f), std::move(a));
@@ -677,18 +690,24 @@ static void write_player_parquet(const std::string &path, const std::vector<Play
 
 static void write_opp_parquet(const std::string &path, const std::vector<OppSample> &v) {
   auto pool = arrow::default_memory_pool();
-  arrow::Int32Builder game_id, turn_idx, opp_size, our_size, move_id;
-  arrow::Int32Builder hand[13], opp_max[13], trick[13];
+  arrow::Int32Builder game_id, turn_idx, opp_size, our_size, target_idx;
   arrow::FloatBuilder value;
-  arrow::ListBuilder legal(pool, std::make_shared<arrow::Int32Builder>(pool));
+  arrow::ListBuilder enc(pool, std::make_shared<arrow::FloatBuilder>(pool));
+  arrow::ListBuilder legal(pool, std::make_shared<arrow::Int32Builder>(pool));  // head slots
+  auto *enc_v = static_cast<arrow::FloatBuilder *>(enc.value_builder());
   auto *legal_v = static_cast<arrow::Int32Builder *>(legal.value_builder());
 
+  std::array<float, 144> e{};
+  std::vector<int> hidx;
   for (const auto &s : v) {
     game_id.Append(s.game_id); turn_idx.Append(s.turn_idx);
     opp_size.Append(s.opp_size); our_size.Append(s.our_size);
-    move_id.Append(s.move_id); value.Append(s.value);
-    for (int r = 0; r < 13; ++r) { hand[r].Append(s.hand[r]); opp_max[r].Append(s.opp_max[r]); trick[r].Append(s.trick[r]); }
-    legal.Append(); legal_v->AppendValues(s.legal.data(), (int64_t)s.legal.size());
+    target_idx.Append(az_opp_head_index(s.move_id));  // head-slot target (no Python map)
+    value.Append(s.value);
+    encode_input(s, e.data());
+    enc.Append(); enc_v->AppendValues(e.data(), 144);
+    hidx.clear(); for (int m : s.legal) hidx.push_back(az_opp_head_index(m));  // map once in C++
+    legal.Append(); legal_v->AppendValues(hidx.data(), (int64_t)hidx.size());
   }
 
   std::vector<std::shared_ptr<arrow::Field>> f;
@@ -698,16 +717,14 @@ static void write_opp_parquet(const std::string &path, const std::vector<OppSamp
   };
   push(arrow::field("game_id", arrow::int32()), finish_i32(game_id));
   push(arrow::field("turn_idx", arrow::int32()), finish_i32(turn_idx));
-  for (int r = 0; r < 13; ++r) push(arrow::field("hand_" + std::to_string(r), arrow::int32()), finish_i32(hand[r]));
-  for (int r = 0; r < 13; ++r) push(arrow::field("opp_max_" + std::to_string(r), arrow::int32()), finish_i32(opp_max[r]));
-  for (int r = 0; r < 13; ++r) push(arrow::field("trick_" + std::to_string(r), arrow::int32()), finish_i32(trick[r]));
   push(arrow::field("opp_size", arrow::int32()), finish_i32(opp_size));
   push(arrow::field("our_size", arrow::int32()), finish_i32(our_size));
   push(arrow::field("value", arrow::float32()), finish_f32(value));
-  std::shared_ptr<arrow::Array> la;
-  legal.Finish(&la);
-  push(arrow::field("legal_moves", arrow::list(arrow::int32())), la);
-  push(arrow::field("move_id", arrow::int32()), finish_i32(move_id));
+  std::shared_ptr<arrow::Array> ea, la;
+  enc.Finish(&ea); legal.Finish(&la);
+  push(arrow::field("enc", arrow::list(arrow::float32())), ea);     // 144 floats
+  push(arrow::field("legal", arrow::list(arrow::int32())), la);     // opp head-slot indices
+  push(arrow::field("target_idx", arrow::int32()), finish_i32(target_idx));
   write_table(path, std::move(f), std::move(a));
 }
 

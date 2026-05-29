@@ -22,6 +22,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import torch
 from torch.utils.data import Dataset
 
@@ -409,134 +410,162 @@ def _as_int_list(v) -> np.ndarray:
     return np.asarray(v, dtype=np.int64)
 
 
-class Big2AZPlayerDataset(Dataset):
+# ---------------------------------------------------------------------------
+# AZ datasets read the C++-pre-encoded schema (no Python encoding/masking):
+#   enc          list<float32>(144)  = encode_exact(hand)|encode_thermo(opp)|exact(trick)
+#   legal        list<int32>         = legal slots (player: concrete ids; opp: head idx)
+#   visit_moves/visit_counts (player) | target_idx (opp)
+#   opp_size, our_size, value, game_id, turn_idx
+# Everything is loaded ONCE into tensors (enc dense; legal/visit kept sparse as
+# flat+offsets); the legal MASK and visit POLICY are densified per-BATCH in the
+# collate fns below (vectorised), so there is zero per-item Python and the dense
+# [B, HEAD] tensors never grow to [N, HEAD] (RAM-safe under mix-decay).
+# ---------------------------------------------------------------------------
+
+
+def _ragged(col) -> tuple[torch.Tensor, torch.Tensor]:
+    """A pyarrow list column -> (flat values LongTensor, offsets LongTensor[N+1])."""
+    off = torch.from_numpy(col.offsets.to_numpy().astype(np.int64))
+    flat = torch.from_numpy(col.values.to_numpy().astype(np.int64))
+    return flat, off
+
+
+def _row_keep_mask(n: int, val_game_ids, train, subsample_frac, seed, gid):
+    sel = np.ones(n, dtype=bool)
+    if val_game_ids is not None:
+        inval = np.isin(gid, np.asarray(list(val_game_ids), dtype=gid.dtype))
+        sel = ~inval if train else inval
+    if subsample_frac < 1.0:
+        sel &= np.random.default_rng(seed).random(n) < subsample_frac
+    return sel
+
+
+def _subselect_ragged(flat: np.ndarray, off: np.ndarray, keep: np.ndarray):
+    """Subselect rows `keep` (bool[n]) of a ragged (flat, off[n+1]) — vectorised."""
+    lengths = off[1:] - off[:-1]
+    row_of_pos = np.repeat(np.arange(len(lengths)), lengths)
+    flat_kept = flat[keep[row_of_pos]]
+    new_off = np.concatenate([[0], np.cumsum(lengths[keep])]).astype(np.int64)
+    return flat_kept.astype(np.int64), new_off
+
+
+class _AZDataset(Dataset):
+    """Shared loader for both AZ heads. Holds enc split into hand/opp/trick, the
+    scalars, and the sparse `legal` (flat+offsets). __getitem__ returns the row's
+    slices; the collate densifies the mask (+ policy) for the batch."""
+
+    def __init__(self, parquet_path, val_game_ids, train, subsample_frac, seed):
+        t = pq.read_table(parquet_path).combine_chunks()
+        gid = t.column("game_id").chunk(0).to_numpy()
+        n = len(gid)
+        keep = _row_keep_mask(n, val_game_ids, train, subsample_frac, seed, gid)
+
+        enc = t.column("enc").chunk(0).values.to_numpy().reshape(n, 144)[keep]
+        enc = torch.from_numpy(np.ascontiguousarray(enc))
+        self.hand = enc[:, :48].contiguous()
+        self.opp = enc[:, 48:96].contiguous()
+        self.trick = enc[:, 96:144].contiguous()
+        self.opp_size = torch.from_numpy(t.column("opp_size").chunk(0).to_numpy().astype(np.float32)[keep] / 16.0)
+        self.our_size = torch.from_numpy(t.column("our_size").chunk(0).to_numpy().astype(np.float32)[keep] / 16.0)
+        self.value = torch.from_numpy(t.column("value").chunk(0).to_numpy().astype(np.float32)[keep])
+
+        lflat, loff = _ragged(t.column("legal").chunk(0))
+        lflat, loff = _subselect_ragged(lflat.numpy(), loff.numpy(), keep)
+        self.legal_flat = torch.from_numpy(lflat)
+        self.legal_off = torch.from_numpy(loff)
+        self._t = t
+        self._keep = keep
+        self.n = int(keep.sum())
+
+    def __len__(self) -> int:
+        return self.n
+
+    def _legal(self, idx: int) -> torch.Tensor:
+        return self.legal_flat[self.legal_off[idx]:self.legal_off[idx + 1]]
+
+
+class Big2AZPlayerDataset(_AZDataset):
     """Player-net samples: value target + MCTS visit-distribution policy target.
-
-    Policy targets live in the CONCRETE engine move-id space (NUM_MOVES). The
-    factored player head emits PLAYER_HEAD_DIM shared component logits; the loss
-    composes them to per-move logits via the composition matrix C (head @ C.T),
-    masks the exact legal concrete-move set, and cross-entropies against the
-    visit distribution. So this dataset does NO collapse — it just densifies the
-    legal mask and visit distribution onto the 468-wide move space.
-    Returns (hand, opp, trick, opp_size, our_size, value, mask, policy).
+    Policy targets live in the concrete engine move-id space (NUM_MOVES); the
+    factored head composes per-move logits via C (head @ C.T) and masks the legal
+    concrete set. Returns per-row slices; collate_az_player densifies mask+policy.
     """
 
-    def __init__(
-        self,
-        parquet_path: str,
-        val_game_ids: Optional[set] = None,
-        train: bool = True,
-        subsample_frac: float = 1.0,
-        seed: int = 0,
-    ) -> None:
-        df = pd.read_parquet(parquet_path)
-        if val_game_ids is not None:
-            df = df[~df["game_id"].isin(val_game_ids)] if train else df[
-                df["game_id"].isin(val_game_ids)
-            ]
-        if subsample_frac < 1.0:
-            df = df.sample(frac=subsample_frac, random_state=seed)
-        df = df.reset_index(drop=True)
-
-        self.hand_enc = torch.from_numpy(encode_exact_np(_counts(df, "hand")))
-        self.opp_enc = torch.from_numpy(encode_upper_bound_np(_counts(df, "opp_max")))
-        self.trick_enc = torch.from_numpy(encode_exact_np(_counts(df, "trick")))
-        self.opp_size = torch.tensor(
-            df["opp_size"].to_numpy(np.float32) / 16.0, dtype=torch.float32
-        )
-        self.our_size = torch.tensor(
-            df["our_size"].to_numpy(np.float32) / 16.0, dtype=torch.float32
-        )
-        self.value = torch.tensor(df["value"].to_numpy(np.float32), dtype=torch.float32)
-        self.legal = [_as_int_list(v) for v in df["legal_moves"].to_list()]
-        self.vmoves = [_as_int_list(v) for v in df["visit_moves"].to_list()]
-        self.vcounts = [_as_int_list(v) for v in df["visit_counts"].to_list()]
-
-    def __len__(self) -> int:
-        return len(self.value)
+    def __init__(self, parquet_path, val_game_ids=None, train=True,
+                 subsample_frac=1.0, seed=0):
+        super().__init__(parquet_path, val_game_ids, train, subsample_frac, seed)
+        # visit_counts shares visit_moves' offsets; subselect both with those offsets.
+        vm_off = self._t.column("visit_moves").chunk(0).offsets.to_numpy().astype(np.int64)
+        vm_flat = self._t.column("visit_moves").chunk(0).values.to_numpy().astype(np.int64)
+        vc_flat = self._t.column("visit_counts").chunk(0).values.to_numpy().astype(np.int64)
+        vm_kept, voff = _subselect_ragged(vm_flat, vm_off, self._keep)
+        vc_kept, _ = _subselect_ragged(vc_flat, vm_off, self._keep)
+        self.vmoves_flat = torch.from_numpy(vm_kept)
+        self.vmoves_off = torch.from_numpy(voff)
+        self.vcounts_flat = torch.from_numpy(vc_kept)
+        del self._t, self._keep
 
     def __getitem__(self, idx: int):
-        # Exact legal concrete-move mask + visit distribution over NUM_MOVES.
-        mask = torch.zeros(NUM_MOVES, dtype=torch.bool)
-        for m in self.legal[idx]:
-            mask[int(m)] = True
-        policy = torch.zeros(NUM_MOVES, dtype=torch.float32)
-        for m, c in zip(self.vmoves[idx], self.vcounts[idx]):
-            policy[int(m)] += float(c)
-        total = policy.sum()
-        if total > 0:
-            policy /= total
-        return (
-            self.hand_enc[idx],
-            self.opp_enc[idx],
-            self.trick_enc[idx],
-            self.opp_size[idx],
-            self.our_size[idx],
-            self.value[idx],
-            mask,
-            policy,
-        )
+        vm = self.vmoves_flat[self.vmoves_off[idx]:self.vmoves_off[idx + 1]]
+        vc = self.vcounts_flat[self.vmoves_off[idx]:self.vmoves_off[idx + 1]]
+        return (self.hand[idx], self.opp[idx], self.trick[idx],
+                self.opp_size[idx], self.our_size[idx], self.value[idx],
+                self._legal(idx), vm, vc)
 
 
-class Big2AZOppDataset(Dataset):
+class Big2AZOppDataset(_AZDataset):
     """Opponent-net samples: value target + one-hot behavior (imitation) target.
-
-    The opp net now takes our exact hand too, so samples carry it (hand_* cols).
-    Returns (hand, opp, trick, opp_size, our_size, value, mask, target_idx).
+    `legal` and `target_idx` are already in opp-head-slot space (mapped in C++).
+    Returns per-row slices; collate_az_opp densifies the mask.
     """
 
-    def __init__(
-        self,
-        parquet_path: str,
-        val_game_ids: Optional[set] = None,
-        train: bool = True,
-        subsample_frac: float = 1.0,
-        seed: int = 0,
-    ) -> None:
-        df = pd.read_parquet(parquet_path)
-        if val_game_ids is not None:
-            df = df[~df["game_id"].isin(val_game_ids)] if train else df[
-                df["game_id"].isin(val_game_ids)
-            ]
-        if subsample_frac < 1.0:
-            df = df.sample(frac=subsample_frac, random_state=seed)
-        df = df.reset_index(drop=True)
-
-        self.hand_enc = torch.from_numpy(encode_exact_np(_counts(df, "hand")))
-        self.opp_enc = torch.from_numpy(encode_upper_bound_np(_counts(df, "opp_max")))
-        self.trick_enc = torch.from_numpy(encode_exact_np(_counts(df, "trick")))
-        self.opp_size = torch.tensor(
-            df["opp_size"].to_numpy(np.float32) / 16.0, dtype=torch.float32
+    def __init__(self, parquet_path, val_game_ids=None, train=True,
+                 subsample_frac=1.0, seed=0):
+        super().__init__(parquet_path, val_game_ids, train, subsample_frac, seed)
+        self.target = torch.from_numpy(
+            self._t.column("target_idx").chunk(0).to_numpy().astype(np.int64)[self._keep]
         )
-        self.our_size = torch.tensor(
-            df["our_size"].to_numpy(np.float32) / 16.0, dtype=torch.float32
-        )
-        self.value = torch.tensor(df["value"].to_numpy(np.float32), dtype=torch.float32)
-        self.legal = [_as_int_list(v) for v in df["legal_moves"].to_list()]
-        self.target_idx = torch.tensor(
-            [az_opp_head_index(int(m)) for m in df["move_id"].to_numpy(np.int64)],
-            dtype=torch.long,
-        )
-
-    def __len__(self) -> int:
-        return len(self.value)
+        del self._t, self._keep
 
     def __getitem__(self, idx: int):
-        mask = torch.zeros(OPP_HEAD_DIM, dtype=torch.bool)
-        for m in self.legal[idx]:
-            mask[az_opp_head_index(int(m))] = True
-        # The played move is always legal; guarantee it is unmasked.
-        mask[self.target_idx[idx]] = True
-        return (
-            self.hand_enc[idx],
-            self.opp_enc[idx],
-            self.trick_enc[idx],
-            self.opp_size[idx],
-            self.our_size[idx],
-            self.value[idx],
-            mask,
-            self.target_idx[idx],
-        )
+        return (self.hand[idx], self.opp[idx], self.trick[idx],
+                self.opp_size[idx], self.our_size[idx], self.value[idx],
+                self._legal(idx), self.target[idx])
+
+
+def _stack6(batch):
+    """Stack the six shared leading fields (hand,opp,trick,osz,usz,value)."""
+    return (torch.stack([b[0] for b in batch]), torch.stack([b[1] for b in batch]),
+            torch.stack([b[2] for b in batch]), torch.stack([b[3] for b in batch]),
+            torch.stack([b[4] for b in batch]), torch.stack([b[5] for b in batch]))
+
+
+def collate_az_player(batch):
+    hand, opp, trick, osz, usz, value = _stack6(batch)
+    B = len(batch)
+    legals = [b[6] for b in batch]
+    rows = torch.repeat_interleave(torch.arange(B), torch.tensor([t.numel() for t in legals]))
+    mask = torch.zeros(B, NUM_MOVES, dtype=torch.bool)
+    mask[rows, torch.cat(legals)] = True
+    vmoves = [b[7] for b in batch]
+    vrows = torch.repeat_interleave(torch.arange(B), torch.tensor([t.numel() for t in vmoves]))
+    policy = torch.zeros(B, NUM_MOVES, dtype=torch.float32)
+    policy.index_put_((vrows, torch.cat(vmoves)),
+                      torch.cat([b[8] for b in batch]).float(), accumulate=True)
+    policy /= policy.sum(1, keepdim=True).clamp_min(1.0)  # empty (value-only) rows -> 0
+    return hand, opp, trick, osz, usz, value, mask, policy
+
+
+def collate_az_opp(batch):
+    hand, opp, trick, osz, usz, value = _stack6(batch)
+    B = len(batch)
+    legals = [b[6] for b in batch]
+    rows = torch.repeat_interleave(torch.arange(B), torch.tensor([t.numel() for t in legals]))
+    mask = torch.zeros(B, OPP_HEAD_DIM, dtype=torch.bool)
+    mask[rows, torch.cat(legals)] = True
+    target = torch.stack([b[7] for b in batch])
+    mask[torch.arange(B), target] = True  # played move always unmasked
+    return hand, opp, trick, osz, usz, value, mask, target
 
 
 def make_az_split(
