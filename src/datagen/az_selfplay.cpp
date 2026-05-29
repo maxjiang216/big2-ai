@@ -470,9 +470,17 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
     auto complete_decision = [&](Slot &s) {
       Search &tr = *s.tree[s.mover];
       tr.finalize();
+      // The policy target / sampling distribution is the MCTS visit counts, but
+      // when those are degenerate (<2 visited moves — notably sims=1, where the
+      // lone eval only expands the root and no child is visited) fall back to the
+      // net's root PRIOR. Without this the move sampled is always kPASS and the
+      // policy target is empty -> the player net collapses.
       auto visits = tr.root_visits();
-      int m = sample_from_visits(visits, s.rng);
-      record_decision(s.game, s.mover, m, visits, s.game_id, s.turn++, lps, los);
+      std::vector<std::pair<int, long>> prior;
+      const std::vector<std::pair<int, long>> *dist = &visits;
+      if (visits.size() < 2) { prior = tr.root_prior(); dist = &prior; }
+      int m = sample_from_visits(*dist, s.rng);
+      record_decision(s.game, s.mover, m, *dist, s.game_id, s.turn++, lps, los);
       s.game.apply_move(m);  // trees persist; next setup_decision re-roots
       s.searching = false;
     };

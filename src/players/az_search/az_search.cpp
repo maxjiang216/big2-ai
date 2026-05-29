@@ -680,4 +680,24 @@ std::vector<std::pair<int, long>> Search::root_visits() const {
   return out;
 }
 
+std::vector<std::pair<int, long>> Search::root_prior() const {
+  std::vector<std::pair<int, long>> out;
+  if (root_->forced_win_move != -1) {
+    out.emplace_back(root_->forced_win_move, 1);
+    return out;
+  }
+  constexpr long kScale = 100000;  // pseudo-counts; collate renormalizes by sum
+  for (const auto &e : root_->edges) {
+    const long c = std::lround((double)e.prior * kScale);
+    if (c > 0) out.emplace_back(e.move_id, c);
+  }
+  if (out.empty() && !root_->edges.empty()) {  // all priors rounded to 0 -> argmax
+    const Edge *best = &root_->edges.front();
+    for (const auto &e : root_->edges)
+      if (e.prior > best->prior) best = &e;
+    out.emplace_back(best->move_id, 1);
+  }
+  return out;
+}
+
 }  // namespace az_search

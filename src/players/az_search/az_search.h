@@ -117,6 +117,11 @@ public:
   int best_move() const;                                 // max-visit (or forced win)
   float root_value() const { return root_->value; }
   std::vector<std::pair<int, long>> root_visits() const; // (move_id, visits)
+  // Root policy PRIOR as pseudo-counts (move_id, scaled prior). Used by self-play
+  // as the policy target / move-sampling distribution when the visit distribution
+  // is degenerate (e.g. sims=1, where the single eval only expands the root and no
+  // child is visited). Returns the forced-win one-hot when one exists.
+  std::vector<std::pair<int, long>> root_prior() const;
   bool root_terminal() const { return root_->terminal; }
 
   // Introspection (tests).

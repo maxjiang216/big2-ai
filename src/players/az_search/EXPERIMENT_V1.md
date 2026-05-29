@@ -35,7 +35,38 @@ baseline — low signal).
   nvrtc load; not covered by rpath) or they abort with a kernel-source dump. The
   driver script exports it; direct launches must too.
 
-## BLOCKER: the first real generation is broken
+## RESOLVED: the gen1 collapse was a sims=1 self-play degeneracy
+
+**Root cause.** `select_leaf()`'s first call expands the *root* itself and that eval
+counts against the sim budget, so at `--sims 1` the single eval is spent on the root
+and **no child is ever visited**. Two downstream failures followed:
+1. `root_visits()` (edges with `child->N > 0`) returned **empty** for ~74% of
+   decisions (the 26% non-empty were roots pre-expanded by subtree reuse → 1 visit).
+   The empty rows densified to an all-zero policy target → contributed **zero** policy
+   gradient, so the player head trained only on a biased one-hot 26% subset and lost
+   gen0's calibrated prior. Low train CE (0.0816) was an illusion: 74% of rows had a
+   trivially-zero target.
+2. `sample_from_visits` returns **kPASS** when the visit list is empty → at sims=1 the
+   self-play mover *passed on every non-forced decision*, so the games (and thus the
+   value targets) were garbage too. Confirmed in data: opp behavior CE was an
+   artificially low 0.8354 because the opponent almost always passed.
+
+**Fix (option A).** Added `Search::root_prior()` (root edge priors as pseudo-counts,
+forced-win one-hot when present). In `az_selfplay` `complete_decision`, when
+`root_visits()` has <2 moves, fall back to the prior for **both** the sampled move and
+the recorded policy target. At sims=1 this is self-distillation: the policy stays at
+gen0 level (frozen, no collapse), games are real, and the value head grounds on real
+outcomes. sims=10/100 keep real visit distributions.
+
+**Verified** (corrected gen1, 50k games, sims=1, plateau-trained): visit_moves per-row
+mean length 0.26 → **8.41** (3.2% empty = the legit forced/value-only positions); opp
+pass-frac of plays ≈ 6.9%; player policy CE 0.0816 → **0.9384**, opp behavior CE
+0.8354 → **2.4021** (both now genuine distribution CEs). Eval @sims=1: **gen1 vs
+greedy 0.192 → 0.634** (≈ gen0's 0.682); **gen1 vs gen0 0.200 → 0.477** (≈ tie, as
+option A predicts). Changes: `src/players/az_search/az_search.{h,cpp}` (`root_prior`),
+`src/datagen/az_selfplay.cpp` (degenerate-visits fallback).
+
+## (historical) BLOCKER: the first real generation is broken
 
 With the experiment launched, **gen1 of the sims=1 run** (trained from scratch on
 1.16M gen0-self-play samples via GPU-resident plateau; train completed in 128s,
