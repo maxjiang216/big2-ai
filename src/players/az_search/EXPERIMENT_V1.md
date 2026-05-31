@@ -1,6 +1,60 @@
-# az_search self-play limit test (v1) — infrastructure, calibration, and the gen1 blocker
+# az_search self-play limit test (v1) — infrastructure, calibration, and results
 
-Status: **infrastructure built + calibrated; first real generation came out broken; experiment halted pending a fix.**
+Status: **COMPLETE. gen1 blocker fixed; experiment ran. Verdict: self-play does NOT
+improve this architecture past the teacher-bootstrapped gen0 at any search budget
+(sims 1/10/100). The only lever that moves strength is search depth at PLAY time.**
+
+## RESULTS (2026-05-31)
+
+Ran the 3-arm limit test from the shared gen0. Completed clean: **sims=1 — 10/10
+gens, sims=10 — 10/10 gens, sims=100 — 6/10 gens** (gen 7 self-play wedged when the
+laptop was suspended — see "Self-play hang" below; cross-play never ran). That is more
+than enough to settle the question.
+
+**Zero promotions in any arm, ever.** Every generation tied gen0 (vs-champion win rate
+≈ 0.47–0.48, Wilson lower bound never cleared 0.5), and every panel metric is flat
+across all 10 (resp. 6) generations — no upward trajectory anywhere. Representative
+end-of-run numbers (win rate, eval at each arm's own sims, 1000 deals):
+
+| vs | sims=1 | sims=10 | sims=100 |
+|---|---|---|---|
+| random | 0.898 | 0.910 | 0.93 |
+| greedy | 0.633 | ~0.648 | ~0.685 |
+| pimc(20) | 0.522 | ~0.546 | ~0.603 |
+| typed_search | 0.420 | ~0.448 | ~0.466 |
+| champion (= gen0) | 0.476 | ~0.472 | ~0.476 |
+
+**Two conclusions:**
+1. **Self-play value-grounding is inert for this method.** Across generations the net
+   does not climb and never beats gen0 — at sims=1 by construction (policy self-
+   distills, the option-A fix keeps it frozen), but *also* at sims=10 and sims=100
+   where real MCTS visit distributions are available. The architecture has plateaued
+   at teacher-bootstrap quality; more self-play generations don't help.
+2. **Search depth at play/eval time is the only thing that helps.** Holding the net
+   fixed, raising eval sims 1→100 buys ≈ **+5pp vs greedy** (0.633→0.685) and ≈ **+8pp
+   vs pimc** (0.522→0.603). This is a larger search payoff than the ~+2pp measured
+   earlier in the session (a better-calibrated net makes search worth more), but it is
+   a *play-time* lever, not a training-loop lever.
+
+This is the firm negative result the experiment was designed to find: it points to
+the deferred **search-v2 GRU redesign** (better nets, history-conditioned opponent
+model) as the path forward, not more self-play on the current nets.
+
+### Self-play hang
+
+sims=100 gen 7 self-play wedged: it logged **26009s** (vs ~210s for gens 1–6), GPU
+idle at ~6%, no forward progress, until killed. **Most likely cause: the laptop was
+suspended / a shutdown was attempted mid-run, freezing the CUDA context** (the process
+never recovered on resume). SIGTERM let it flush its parquet (so gen7 *data* exists but
+is from the wedged run — excluded from the numbers above; the gen7 `.pt` is a
+half-trained orphan, ignore it). gens 1–6 at sims=100 plus the full 10+10 gens of the
+sims=1/10 arms all ran fine, so there is **no evidence of an intrinsic pipeline
+deadlock** — treat this as a suspend/resume casualty. (If a future unattended long run
+hangs again *without* a suspend event, revisit the async CPU/GPU pipeline, Commit C.)
+
+---
+
+## (historical) infrastructure, calibration, and the gen1 blocker
 
 ## Goal
 
