@@ -44,8 +44,8 @@ from nn.model import ENCODING_DIM, ResBlock, _init_selu, _init_swish
 #   TS5 ids         : [TS5_BEGIN, DS8_BEGIN)   (7 ids -> 1 slot, both heads)
 #   DS8 ids         : [DS8_BEGIN, LEGAL_MOVES) (5 ids -> dropped/1 slot)
 # ---------------------------------------------------------------------------
-TS5_BEGIN = 456   # kTRIPLESTRAIGHT5_START
-DS8_BEGIN = 463   # kDOUBLESTRAIGHT8_START
+TS5_BEGIN = 456  # kTRIPLESTRAIGHT5_START
+DS8_BEGIN = 463  # kDOUBLESTRAIGHT8_START
 LEGAL_MOVES = 468
 NUM_MOVES = LEGAL_MOVES  # concrete engine move-id space (player policy targets)
 
@@ -58,7 +58,7 @@ OPP_DS8_SLOT = TS5_BEGIN + 1
 # applied via the composition matrix C (load_compose_matrix). Opponent head is
 # flat: one logit per move id with the TS5/DS8 long-combination collapses.
 PLAYER_HEAD_DIM = 138
-OPP_HEAD_DIM = TS5_BEGIN + 2     # 458
+OPP_HEAD_DIM = TS5_BEGIN + 2  # 458
 
 
 def az_opp_head_index(move_id: int) -> int:

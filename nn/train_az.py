@@ -30,11 +30,20 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from nn.dataset import GpuLoader, collate_az_opp, collate_az_player, make_az_split
-from nn.model_az import NUM_MOVES, OPP_HEAD_DIM, Big2NetAZ, Big2NetOpp, load_compose_matrix
+from nn.model_az import (
+    NUM_MOVES,
+    OPP_HEAD_DIM,
+    Big2NetAZ,
+    Big2NetOpp,
+    load_compose_matrix,
+)
 
 
 def _use_gpu_resident(cfg, device) -> bool:
-    return cfg.gpu_resident == "on" or (cfg.gpu_resident == "auto" and device.type == "cuda")
+    return cfg.gpu_resident == "on" or (
+        cfg.gpu_resident == "auto" and device.type == "cuda"
+    )
+
 
 NEG = -1e30  # stand-in for -inf in masked logits (rows always have >=1 legal)
 
@@ -46,18 +55,27 @@ def masked_log_softmax(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor
 def _make_optim(model, lr, weight_decay):
     emb_ids = model.embedding_param_ids()
     groups = [
-        {"params": [p for p in model.parameters() if id(p) not in emb_ids],
-         "weight_decay": weight_decay},
-        {"params": [p for p in model.parameters() if id(p) in emb_ids],
-         "weight_decay": 0.0},
+        {
+            "params": [p for p in model.parameters() if id(p) not in emb_ids],
+            "weight_decay": weight_decay,
+        },
+        {
+            "params": [p for p in model.parameters() if id(p) in emb_ids],
+            "weight_decay": 0.0,
+        },
     ]
     return torch.optim.AdamW(groups, lr=lr)
 
 
 def _scheduler(optimizer, lr, total_steps, warmup, final_div):
     return torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=lr, total_steps=total_steps, pct_start=warmup,
-        anneal_strategy="cos", div_factor=10.0, final_div_factor=final_div,
+        optimizer,
+        max_lr=lr,
+        total_steps=total_steps,
+        pct_start=warmup,
+        anneal_strategy="cos",
+        div_factor=10.0,
+        final_div_factor=final_div,
     )
 
 
@@ -67,10 +85,16 @@ def _make_sched(optimizer, cfg, total_steps):
     (ReduceLROnPlateau) — i.e. 'train to the val plateau, drop LR, continue'."""
     if cfg.sched == "plateau":
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=cfg.plateau_factor,
-            patience=cfg.plateau_patience, threshold=1e-3)
+            optimizer,
+            mode="min",
+            factor=cfg.plateau_factor,
+            patience=cfg.plateau_patience,
+            threshold=1e-3,
+        )
         return sched, False
-    sched = _scheduler(optimizer, cfg.lr, total_steps, cfg.lr_warmup, cfg.final_div_factor)
+    sched = _scheduler(
+        optimizer, cfg.lr, total_steps, cfg.lr_warmup, cfg.final_div_factor
+    )
     return sched, True
 
 
@@ -79,10 +103,24 @@ def _cur_lr(optimizer):
 
 
 def _loaders(train_ds, val_ds, batch, workers, collate):
-    tl = DataLoader(train_ds, batch_size=batch, shuffle=True, num_workers=workers,
-                    pin_memory=True, persistent_workers=(workers > 0), collate_fn=collate)
-    vl = DataLoader(val_ds, batch_size=batch * 2, shuffle=False, num_workers=workers,
-                    pin_memory=True, persistent_workers=(workers > 0), collate_fn=collate)
+    tl = DataLoader(
+        train_ds,
+        batch_size=batch,
+        shuffle=True,
+        num_workers=workers,
+        pin_memory=True,
+        persistent_workers=(workers > 0),
+        collate_fn=collate,
+    )
+    vl = DataLoader(
+        val_ds,
+        batch_size=batch * 2,
+        shuffle=False,
+        num_workers=workers,
+        pin_memory=True,
+        persistent_workers=(workers > 0),
+        collate_fn=collate,
+    )
     return tl, vl
 
 
@@ -106,7 +144,9 @@ def _save_scripted(model, out_path, device):
 
 
 def train_player(paths, out_path, cfg, device):
-    train_ds, val_ds = make_az_split(paths, "player", cfg.val_frac, cfg.seed, cfg.mix_decay)
+    train_ds, val_ds = make_az_split(
+        paths, "player", cfg.val_frac, cfg.seed, cfg.mix_decay
+    )
     print(f"[player] train={len(train_ds):,}  val={len(val_ds):,}")
     if _use_gpu_resident(cfg, device):
         tl = GpuLoader(train_ds, NUM_MOVES, cfg.batch, device, shuffle=True)
@@ -166,8 +206,10 @@ def train_player(paths, out_path, cfg, device):
         mon = vp if cfg.ckpt_metric == "head" else vl_loss
         if not per_batch:
             sched.step(mon)
-        print(f"[player] epoch {epoch}/{cfg.epochs}  val={vl_loss:.4f} "
-              f"[v={vv:.3f} p={vp:.3f}]  lr={_cur_lr(opt):.2e}")
+        print(
+            f"[player] epoch {epoch}/{cfg.epochs}  val={vl_loss:.4f} "
+            f"[v={vv:.3f} p={vp:.3f}]  lr={_cur_lr(opt):.2e}"
+        )
         if mon < best:
             best = mon
             _save_scripted(model, out_path, device)
@@ -184,7 +226,9 @@ def train_player(paths, out_path, cfg, device):
 
 
 def train_opp(paths, out_path, cfg, device):
-    train_ds, val_ds = make_az_split(paths, "opp", cfg.val_frac, cfg.seed, cfg.mix_decay)
+    train_ds, val_ds = make_az_split(
+        paths, "opp", cfg.val_frac, cfg.seed, cfg.mix_decay
+    )
     print(f"[opp] train={len(train_ds):,}  val={len(val_ds):,}")
     if _use_gpu_resident(cfg, device):
         tl = GpuLoader(train_ds, OPP_HEAD_DIM, cfg.batch, device, shuffle=True)
@@ -243,8 +287,10 @@ def train_opp(paths, out_path, cfg, device):
         mon = vb if cfg.ckpt_metric == "head" else vl_loss
         if not per_batch:
             sched.step(mon)
-        print(f"[opp] epoch {epoch}/{cfg.epochs}  val={vl_loss:.4f} "
-              f"[v={vv:.3f} b={vb:.3f}]  lr={_cur_lr(opt):.2e}")
+        print(
+            f"[opp] epoch {epoch}/{cfg.epochs}  val={vl_loss:.4f} "
+            f"[v={vv:.3f} b={vb:.3f}]  lr={_cur_lr(opt):.2e}"
+        )
         if mon < best:
             best = mon
             _save_scripted(model, out_path, device)
@@ -272,13 +318,21 @@ def main() -> None:
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--lr-warmup", type=float, default=0.05)
     p.add_argument("--final-div-factor", type=float, default=100.0)
-    p.add_argument("--sched", choices=["onecycle", "plateau"], default="onecycle",
-                   help="onecycle: fixed cosine over total steps. plateau: constant "
-                        "lr + ReduceLROnPlateau on the monitored metric (train to "
-                        "plateau, drop lr, continue), early-stop at --lr-floor.")
-    p.add_argument("--ckpt-metric", choices=["blended", "head"], default="blended",
-                   help="head: monitor/checkpoint on the policy (player) or behavior "
-                        "(opp) head CE alone, ignoring the value head.")
+    p.add_argument(
+        "--sched",
+        choices=["onecycle", "plateau"],
+        default="onecycle",
+        help="onecycle: fixed cosine over total steps. plateau: constant "
+        "lr + ReduceLROnPlateau on the monitored metric (train to "
+        "plateau, drop lr, continue), early-stop at --lr-floor.",
+    )
+    p.add_argument(
+        "--ckpt-metric",
+        choices=["blended", "head"],
+        default="blended",
+        help="head: monitor/checkpoint on the policy (player) or behavior "
+        "(opp) head CE alone, ignoring the value head.",
+    )
     p.add_argument("--plateau-factor", type=float, default=0.3)
     p.add_argument("--plateau-patience", type=int, default=2)
     p.add_argument("--lr-floor", type=float, default=1e-6)
@@ -286,10 +340,14 @@ def main() -> None:
     p.add_argument("--weight-decay", type=float, default=1e-5)
     p.add_argument("--grad-clip", type=float, default=0.5)
     p.add_argument("--workers", type=int, default=8)
-    p.add_argument("--gpu-resident", choices=["auto", "on", "off"], default="auto",
-                   help="auto/on: hold the dataset on-GPU and densify per-batch on "
-                        "device (no DataLoader/collate/H2D) — compute-bound for this "
-                        "tiny net. off: the CPU DataLoader path.")
+    p.add_argument(
+        "--gpu-resident",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="auto/on: hold the dataset on-GPU and densify per-batch on "
+        "device (no DataLoader/collate/H2D) — compute-bound for this "
+        "tiny net. off: the CPU DataLoader path.",
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="auto")
     p.add_argument("--skip-player", action="store_true")

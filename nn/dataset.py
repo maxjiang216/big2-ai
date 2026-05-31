@@ -465,9 +465,15 @@ class _AZDataset(Dataset):
         self.hand = enc[:, :48].contiguous()
         self.opp = enc[:, 48:96].contiguous()
         self.trick = enc[:, 96:144].contiguous()
-        self.opp_size = torch.from_numpy(t.column("opp_size").chunk(0).to_numpy().astype(np.float32)[keep] / 16.0)
-        self.our_size = torch.from_numpy(t.column("our_size").chunk(0).to_numpy().astype(np.float32)[keep] / 16.0)
-        self.value = torch.from_numpy(t.column("value").chunk(0).to_numpy().astype(np.float32)[keep])
+        self.opp_size = torch.from_numpy(
+            t.column("opp_size").chunk(0).to_numpy().astype(np.float32)[keep] / 16.0
+        )
+        self.our_size = torch.from_numpy(
+            t.column("our_size").chunk(0).to_numpy().astype(np.float32)[keep] / 16.0
+        )
+        self.value = torch.from_numpy(
+            t.column("value").chunk(0).to_numpy().astype(np.float32)[keep]
+        )
 
         lflat, loff = _ragged(t.column("legal").chunk(0))
         lflat, loff = _subselect_ragged(lflat.numpy(), loff.numpy(), keep)
@@ -481,7 +487,7 @@ class _AZDataset(Dataset):
         return self.n
 
     def _legal(self, idx: int) -> torch.Tensor:
-        return self.legal_flat[self.legal_off[idx]:self.legal_off[idx + 1]]
+        return self.legal_flat[self.legal_off[idx] : self.legal_off[idx + 1]]
 
 
 class Big2AZPlayerDataset(_AZDataset):
@@ -491,13 +497,20 @@ class Big2AZPlayerDataset(_AZDataset):
     concrete set. Returns per-row slices; collate_az_player densifies mask+policy.
     """
 
-    def __init__(self, parquet_path, val_game_ids=None, train=True,
-                 subsample_frac=1.0, seed=0):
+    def __init__(
+        self, parquet_path, val_game_ids=None, train=True, subsample_frac=1.0, seed=0
+    ):
         super().__init__(parquet_path, val_game_ids, train, subsample_frac, seed)
         # visit_counts shares visit_moves' offsets; subselect both with those offsets.
-        vm_off = self._t.column("visit_moves").chunk(0).offsets.to_numpy().astype(np.int64)
-        vm_flat = self._t.column("visit_moves").chunk(0).values.to_numpy().astype(np.int64)
-        vc_flat = self._t.column("visit_counts").chunk(0).values.to_numpy().astype(np.int64)
+        vm_off = (
+            self._t.column("visit_moves").chunk(0).offsets.to_numpy().astype(np.int64)
+        )
+        vm_flat = (
+            self._t.column("visit_moves").chunk(0).values.to_numpy().astype(np.int64)
+        )
+        vc_flat = (
+            self._t.column("visit_counts").chunk(0).values.to_numpy().astype(np.int64)
+        )
         vm_kept, voff = _subselect_ragged(vm_flat, vm_off, self._keep)
         vc_kept, _ = _subselect_ragged(vc_flat, vm_off, self._keep)
         self.vmoves_flat = torch.from_numpy(vm_kept)
@@ -506,11 +519,19 @@ class Big2AZPlayerDataset(_AZDataset):
         del self._t, self._keep
 
     def __getitem__(self, idx: int):
-        vm = self.vmoves_flat[self.vmoves_off[idx]:self.vmoves_off[idx + 1]]
-        vc = self.vcounts_flat[self.vmoves_off[idx]:self.vmoves_off[idx + 1]]
-        return (self.hand[idx], self.opp[idx], self.trick[idx],
-                self.opp_size[idx], self.our_size[idx], self.value[idx],
-                self._legal(idx), vm, vc)
+        vm = self.vmoves_flat[self.vmoves_off[idx] : self.vmoves_off[idx + 1]]
+        vc = self.vcounts_flat[self.vmoves_off[idx] : self.vmoves_off[idx + 1]]
+        return (
+            self.hand[idx],
+            self.opp[idx],
+            self.trick[idx],
+            self.opp_size[idx],
+            self.our_size[idx],
+            self.value[idx],
+            self._legal(idx),
+            vm,
+            vc,
+        )
 
 
 class Big2AZOppDataset(_AZDataset):
@@ -519,39 +540,62 @@ class Big2AZOppDataset(_AZDataset):
     Returns per-row slices; collate_az_opp densifies the mask.
     """
 
-    def __init__(self, parquet_path, val_game_ids=None, train=True,
-                 subsample_frac=1.0, seed=0):
+    def __init__(
+        self, parquet_path, val_game_ids=None, train=True, subsample_frac=1.0, seed=0
+    ):
         super().__init__(parquet_path, val_game_ids, train, subsample_frac, seed)
         self.target = torch.from_numpy(
-            self._t.column("target_idx").chunk(0).to_numpy().astype(np.int64)[self._keep]
+            self._t.column("target_idx")
+            .chunk(0)
+            .to_numpy()
+            .astype(np.int64)[self._keep]
         )
         del self._t, self._keep
 
     def __getitem__(self, idx: int):
-        return (self.hand[idx], self.opp[idx], self.trick[idx],
-                self.opp_size[idx], self.our_size[idx], self.value[idx],
-                self._legal(idx), self.target[idx])
+        return (
+            self.hand[idx],
+            self.opp[idx],
+            self.trick[idx],
+            self.opp_size[idx],
+            self.our_size[idx],
+            self.value[idx],
+            self._legal(idx),
+            self.target[idx],
+        )
 
 
 def _stack6(batch):
     """Stack the six shared leading fields (hand,opp,trick,osz,usz,value)."""
-    return (torch.stack([b[0] for b in batch]), torch.stack([b[1] for b in batch]),
-            torch.stack([b[2] for b in batch]), torch.stack([b[3] for b in batch]),
-            torch.stack([b[4] for b in batch]), torch.stack([b[5] for b in batch]))
+    return (
+        torch.stack([b[0] for b in batch]),
+        torch.stack([b[1] for b in batch]),
+        torch.stack([b[2] for b in batch]),
+        torch.stack([b[3] for b in batch]),
+        torch.stack([b[4] for b in batch]),
+        torch.stack([b[5] for b in batch]),
+    )
 
 
 def collate_az_player(batch):
     hand, opp, trick, osz, usz, value = _stack6(batch)
     B = len(batch)
     legals = [b[6] for b in batch]
-    rows = torch.repeat_interleave(torch.arange(B), torch.tensor([t.numel() for t in legals]))
+    rows = torch.repeat_interleave(
+        torch.arange(B), torch.tensor([t.numel() for t in legals])
+    )
     mask = torch.zeros(B, NUM_MOVES, dtype=torch.bool)
     mask[rows, torch.cat(legals)] = True
     vmoves = [b[7] for b in batch]
-    vrows = torch.repeat_interleave(torch.arange(B), torch.tensor([t.numel() for t in vmoves]))
+    vrows = torch.repeat_interleave(
+        torch.arange(B), torch.tensor([t.numel() for t in vmoves])
+    )
     policy = torch.zeros(B, NUM_MOVES, dtype=torch.float32)
-    policy.index_put_((vrows, torch.cat(vmoves)),
-                      torch.cat([b[8] for b in batch]).float(), accumulate=True)
+    policy.index_put_(
+        (vrows, torch.cat(vmoves)),
+        torch.cat([b[8] for b in batch]).float(),
+        accumulate=True,
+    )
     policy /= policy.sum(1, keepdim=True).clamp_min(1.0)  # empty (value-only) rows -> 0
     return hand, opp, trick, osz, usz, value, mask, policy
 
@@ -560,7 +604,9 @@ def collate_az_opp(batch):
     hand, opp, trick, osz, usz, value = _stack6(batch)
     B = len(batch)
     legals = [b[6] for b in batch]
-    rows = torch.repeat_interleave(torch.arange(B), torch.tensor([t.numel() for t in legals]))
+    rows = torch.repeat_interleave(
+        torch.arange(B), torch.tensor([t.numel() for t in legals])
+    )
     mask = torch.zeros(B, OPP_HEAD_DIM, dtype=torch.bool)
     mask[rows, torch.cat(legals)] = True
     target = torch.stack([b[7] for b in batch])
@@ -579,12 +625,15 @@ def collate_az_opp(batch):
 
 def _parts(ds):
     from torch.utils.data import ConcatDataset
+
     return list(ds.datasets) if isinstance(ds, ConcatDataset) else [ds]
 
 
 def _cat_ragged(parts, flat_attr, off_attr):
     """Concatenate ragged (flat, offsets[n_i+1]) across parts into one (flat, off)."""
-    lens = torch.cat([getattr(p, off_attr)[1:] - getattr(p, off_attr)[:-1] for p in parts])
+    lens = torch.cat(
+        [getattr(p, off_attr)[1:] - getattr(p, off_attr)[:-1] for p in parts]
+    )
     off = torch.cat([torch.zeros(1, dtype=torch.long), torch.cumsum(lens, 0)])
     return torch.cat([getattr(p, flat_attr) for p in parts]), off
 
@@ -607,7 +656,12 @@ class GpuLoader:
             self.vcounts_flat = cf.to(device)
         else:
             self.target = torch.cat([p.target for p in parts]).to(device)
-        self.N, self.B, self.device, self.shuffle = self.value.numel(), batch, device, shuffle
+        self.N, self.B, self.device, self.shuffle = (
+            self.value.numel(),
+            batch,
+            device,
+            shuffle,
+        )
 
     def __len__(self):
         return (self.N + self.B - 1) // self.B
@@ -618,16 +672,23 @@ class GpuLoader:
         lengths = off[idx + 1] - off[idx]
         b = idx.numel()
         rows = torch.repeat_interleave(torch.arange(b, device=self.device), lengths)
-        out_off = torch.cat([torch.zeros(1, dtype=torch.long, device=self.device),
-                             torch.cumsum(lengths, 0)])
+        out_off = torch.cat(
+            [
+                torch.zeros(1, dtype=torch.long, device=self.device),
+                torch.cumsum(lengths, 0),
+            ]
+        )
         within = torch.arange(rows.numel(), device=self.device) - out_off[rows]
         return rows, flat[off[idx][rows] + within]
 
     def __iter__(self):
-        order = (torch.randperm(self.N, device=self.device) if self.shuffle
-                 else torch.arange(self.N, device=self.device))
+        order = (
+            torch.randperm(self.N, device=self.device)
+            if self.shuffle
+            else torch.arange(self.N, device=self.device)
+        )
         for s in range(0, self.N, self.B):
-            idx = order[s:s + self.B]
+            idx = order[s : s + self.B]
             b = idx.numel()
             mask = torch.zeros(b, self.head, dtype=torch.bool, device=self.device)
             rows, vals = self._gather(self.legal_flat, self.legal_off, idx)
@@ -641,8 +702,16 @@ class GpuLoader:
             else:
                 tgt = self.target[idx]
                 mask[torch.arange(b, device=self.device), tgt] = True
-            yield (self.hand[idx], self.opp[idx], self.trick[idx],
-                   self.osz[idx], self.usz[idx], self.value[idx], mask, tgt)
+            yield (
+                self.hand[idx],
+                self.opp[idx],
+                self.trick[idx],
+                self.osz[idx],
+                self.usz[idx],
+                self.value[idx],
+                mask,
+                tgt,
+            )
 
 
 def make_az_split(
