@@ -21,6 +21,13 @@
 #include "random/random_player_factory.h"
 #include "typed_search/typed_search_player_factory.h"
 
+// az_search pulls in LibTorch; only available in torch-enabled builds so that
+// non-torch binaries (test_core, eval_match, ...) that include this header stay
+// torch-free.
+#ifdef BIG2_WITH_TORCH
+#include "az_search/az_search_player_factory.h"
+#endif
+
 #include <cmath>
 #include <iostream>
 #include <memory>
@@ -105,6 +112,14 @@ inline std::shared_ptr<PlayerFactory> make_player_factory(const std::string &nam
                                      std::to_string(v);
     return std::make_shared<typed_search::TypedSearchPlayerFactory>(seed, dir);
   }
+#ifdef BIG2_WITH_TORCH
+  if (name == "az_search") {
+    // param = simulations per turn (default 200). Loads models/az_player.pt and
+    // models/az_opp.pt; play mode (deterministic opponent representative).
+    int sims = (param <= 0.0) ? 200 : static_cast<int>(std::round(param));
+    return std::make_shared<az_search::AzSearchPlayerFactory>(sims, seed);
+  }
+#endif
 
   std::cerr << "Error: unknown player '" << name << "'\n"
             << "Available: random, greedy, greedy_random, greedy_random_pass, "
