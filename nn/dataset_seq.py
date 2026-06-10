@@ -61,6 +61,7 @@ def encode_exact_t(counts: torch.Tensor) -> torch.Tensor:
     out[rows, pos[nz]] = 1.0
     return out
 
+
 def encode_thermo_t(counts: torch.Tensor) -> torch.Tensor:
     """[N, 13] int counts -> [N, 48] thermometer (>=k), on counts.device."""
     N = counts.shape[0]
@@ -69,9 +70,7 @@ def encode_thermo_t(counts: torch.Tensor) -> torch.Tensor:
     c = torch.minimum(counts.long(), rmax.unsqueeze(0))  # [N, 13]
     # bit (r, k) set iff c[r] >= k+1; build per-rank ramps once.
     ramp = torch.cat([torch.arange(int(m), device=dev) for m in _RANK_MAX])  # [48]
-    rank_of_bit = torch.repeat_interleave(
-        torch.arange(13, device=dev), rmax
-    )  # [48]
+    rank_of_bit = torch.repeat_interleave(torch.arange(13, device=dev), rmax)  # [48]
     return (c[:, rank_of_bit] > ramp.unsqueeze(0)).float()
 
 
@@ -127,9 +126,7 @@ class SeqData:
 
         self.tokens = torch.from_numpy(np.concatenate(g_tok))  # [G, 64] int16
         self.glen = torch.from_numpy(np.concatenate(g_len).astype(np.int64))
-        self.first_player = torch.from_numpy(
-            np.concatenate(g_first).astype(np.int64)
-        )
+        self.first_player = torch.from_numpy(np.concatenate(g_first).astype(np.int64))
         self.winner = torch.from_numpy(np.concatenate(g_win).astype(np.int64))
         self.G = self.tokens.shape[0]
         self.p = self._merge(p_parts, player=True)
@@ -243,9 +240,9 @@ class SeqData:
                 for fk in fks:
                     d[fk] = d[fk][idx]
                 d[ok] = np.concatenate([[0], np.cumsum(lens[order])]).astype(np.int64)
-            d["csr"] = np.searchsorted(
-                d["grow"], np.arange(self.G + 1)
-            ).astype(np.int64)
+            d["csr"] = np.searchsorted(d["grow"], np.arange(self.G + 1)).astype(
+                np.int64
+            )
 
 
 def _within(lens: np.ndarray) -> np.ndarray:
@@ -259,9 +256,9 @@ def _within(lens: np.ndarray) -> np.ndarray:
 def _sub_ragged(flat: np.ndarray, off: np.ndarray, keep: np.ndarray):
     lens = off[1:] - off[:-1]
     row_of_pos = np.repeat(np.arange(len(lens)), lens)
-    return flat[keep[row_of_pos]], np.concatenate(
-        [[0], np.cumsum(lens[keep])]
-    ).astype(np.int64)
+    return flat[keep[row_of_pos]], np.concatenate([[0], np.cumsum(lens[keep])]).astype(
+        np.int64
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -308,9 +305,7 @@ class SeqLoader:
 
     def _gather_ragged(self, flat, off, idx):
         lens = off[idx + 1] - off[idx]
-        rows = torch.repeat_interleave(
-            torch.arange(idx.numel(), device=self.dev), lens
-        )
+        rows = torch.repeat_interleave(torch.arange(idx.numel(), device=self.dev), lens)
         out_off = torch.cat(
             [torch.zeros(1, dtype=torch.long, device=self.dev), torch.cumsum(lens, 0)]
         )
@@ -368,9 +363,15 @@ class SeqLoader:
             policy /= policy.sum(1, keepdim=True).clamp_min(1.0)  # value-only -> 0
             h48, o48, osz, usz = self._side_inputs(self.p, sidx)
             batch.update(
-                p_local=local, p_hist=self.p["hist"][sidx], p_hand=h48, p_opp=o48,
-                p_osz=osz, p_usz=usz, p_value=self.p["value"][sidx],
-                p_mask=mask, p_policy=policy,
+                p_local=local,
+                p_hist=self.p["hist"][sidx],
+                p_hand=h48,
+                p_opp=o48,
+                p_osz=osz,
+                p_usz=usz,
+                p_value=self.p["value"][sidx],
+                p_mask=mask,
+                p_policy=policy,
             )
             # opp rows
             sidx, local = self._sample_rows(self.o, grows)
@@ -382,9 +383,15 @@ class SeqLoader:
             mask[torch.arange(no, device=self.dev), target] = True
             h48, o48, osz, usz = self._side_inputs(self.o, sidx)
             batch.update(
-                o_local=local, o_hist=self.o["hist"][sidx], o_hand=h48, o_opp=o48,
-                o_osz=osz, o_usz=usz, o_value=self.o["value"][sidx],
-                o_mask=mask, o_target=target,
+                o_local=local,
+                o_hist=self.o["hist"][sidx],
+                o_hand=h48,
+                o_opp=o48,
+                o_osz=osz,
+                o_usz=usz,
+                o_value=self.o["value"][sidx],
+                o_mask=mask,
+                o_target=target,
             )
             yield batch
 

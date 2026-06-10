@@ -75,9 +75,7 @@ def _step(model, C, batch):
     value, policy, behavior, qa = model.readout(h, hand, oppm, osz, usz, otm)
 
     # player rows: value BCE + composed-policy CE
-    loss_v = F.binary_cross_entropy(
-        value[:n_p].clamp(EPS, 1 - EPS), batch["p_value"]
-    )
+    loss_v = F.binary_cross_entropy(value[:n_p].clamp(EPS, 1 - EPS), batch["p_value"])
     logp = masked_log_softmax(policy[:n_p] @ C.t(), batch["p_mask"])
     loss_p = -(batch["p_policy"] * logp).sum(-1).mean()
     # opp rows: behavior NLL + q_a BCE at the played slot

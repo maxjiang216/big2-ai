@@ -31,6 +31,7 @@ def _rand_inputs(B: int):
     otm = (torch.rand(B) < 0.5).float()
     return hand, oppmax, osz, usz, otm
 
+
 def _rand_tokens(B: int, T: int) -> torch.Tensor:
     return torch.from_numpy(RNG.integers(0, NUM_MOVES, size=(B, T))).long()
 
@@ -60,7 +61,7 @@ def test_causal(net):
     toks2[:, 20:] = _rand_tokens(B, T - 20)  # perturb the future
     H2 = net.forward_full(toks2)
     # hidden at sequence index <= 20 (BOS + moves 0..19) must be unchanged
-    assert torch.allclose(H1[:, : 21], H2[:, : 21], atol=1e-6), "causality broken"
+    assert torch.allclose(H1[:, :21], H2[:, :21], atol=1e-6), "causality broken"
     assert not torch.allclose(H1[:, 21:], H2[:, 21:], atol=1e-4), "future inert?!"
     print("ok test_causal")
 
@@ -68,8 +69,8 @@ def test_causal(net):
 def test_kv_equivalence(net, fp16_pool: bool = False):
     """Mixed prefix lengths (incl. 0) and path lengths (incl. 0) in ONE batch."""
     B = 6
-    plens = [0, 0, 3, 17, 40, 61]   # true history move counts
-    tlens = [0, 5, 1, 0, 12, 3]     # in-tree path lengths
+    plens = [0, 0, 3, 17, 40, 61]  # true history move counts
+    tlens = [0, 5, 1, 0, 12, 3]  # in-tree path lengths
     P = max(plens)
     T = max(max(tlens), 1)
     tokens = _rand_tokens(B, P)
@@ -81,9 +82,7 @@ def test_kv_equivalence(net, fp16_pool: bool = False):
     kv, h_last = net.encode_prefix(tokens, lens)
     if fp16_pool:
         kv = kv.half()
-    out_leaf = net.forward_leaf(
-        kv, lens + 1, h_last, path, path_len, *sides
-    )
+    out_leaf = net.forward_leaf(kv, lens + 1, h_last, path, path_len, *sides)
 
     # Reference: per-row full recompute over concat(prefix, path).
     refs = []
@@ -92,9 +91,7 @@ def test_kv_equivalence(net, fp16_pool: bool = False):
         if seq.shape[1] == 0:
             seq = torch.zeros(1, 1, dtype=torch.long)  # dummy; read BOS at idx 0
         idx = torch.tensor([plens[b] + tlens[b]])
-        refs.append(
-            _full_readout(net, seq, idx, tuple(s[b : b + 1] for s in sides))
-        )
+        refs.append(_full_readout(net, seq, idx, tuple(s[b : b + 1] for s in sides)))
     atol = 1e-2 if fp16_pool else 1e-4
     for j, name in enumerate(["value", "policy", "behavior", "qa"]):
         ref = torch.cat([r[j] for r in refs], dim=0)
@@ -124,8 +121,13 @@ def test_bos_alignment(net):
 
 def test_scripted_roundtrip(net):
     s = torch.jit.script(net)
-    assert s.config() == [net.n_layers, net.n_heads, net.head_dim, net.d_model,
-                          net.seq_cap]
+    assert s.config() == [
+        net.n_layers,
+        net.n_heads,
+        net.head_dim,
+        net.d_model,
+        net.seq_cap,
+    ]
     B = 3
     toks = _rand_tokens(B, 10)
     lens = torch.tensor([10, 4, 0], dtype=torch.long)
