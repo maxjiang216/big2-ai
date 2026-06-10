@@ -1,11 +1,11 @@
 #ifndef AZ_SEARCH_AZ_SEARCH_PLAYER_FACTORY_H
 #define AZ_SEARCH_AZ_SEARCH_PLAYER_FACTORY_H
 
-// Factory for AzSearchPlayer. Loads both TorchScript nets once and shares the
-// evaluator across all players it creates (shared_ptr<NNEvaluator>); each player
-// gets a distinct search seed. Defaults to play/eval mode (deterministic max
-// opponent representative) — self-play data generation flips `training` on.
-// Torch-dependent (-DBIG2_WITH_TORCH).
+// Factory for AzSearchPlayer. Loads the unified seq TorchScript net once and
+// shares the evaluator across all players it creates (shared_ptr<NNEvaluator>);
+// each player gets a distinct search seed. Defaults to play/eval mode
+// (deterministic max opponent representative) — self-play data generation
+// flips `training` on. Torch-dependent (-DBIG2_WITH_TORCH).
 
 #include "player_factory.h"
 
@@ -23,12 +23,13 @@ namespace az_search {
 class AzSearchPlayerFactory : public ::PlayerFactory {
 public:
   AzSearchPlayerFactory(int sims, std::uint64_t base_seed,
-                        const std::string &player_path = "models/az_player.pt",
-                        const std::string &opp_path = "models/az_opp.pt",
+                        const std::string &model_path = "models/az_seq.pt",
                         bool training = false,
-                        torch::Device device = torch::Device(torch::kCPU))
+                        torch::Device device = torch::Device(torch::kCPU),
+                        bool use_kv_cache = true)
       : base_seed_(base_seed),
-        nn_(std::make_shared<NNEvaluator>(player_path, opp_path, device)) {
+        nn_(std::make_shared<NNEvaluator>(model_path, device, /*max_slots=*/1,
+                                          use_kv_cache)) {
     cfg_.sims = sims;
     cfg_.training = training;
   }

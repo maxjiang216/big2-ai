@@ -114,8 +114,8 @@ inline std::shared_ptr<PlayerFactory> make_player_factory(const std::string &nam
   }
 #ifdef BIG2_WITH_TORCH
   if (name == "az_search") {
-    // param = simulations per turn (default 200). Loads models/az_player.pt and
-    // models/az_opp.pt; play mode (deterministic opponent representative).
+    // param = simulations per turn (default 200). Loads models/az_seq.pt;
+    // play mode (deterministic opponent representative).
     int sims = (param <= 0.0) ? 200 : static_cast<int>(std::round(param));
     return std::make_shared<az_search::AzSearchPlayerFactory>(sims, seed);
   }

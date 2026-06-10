@@ -101,7 +101,7 @@ $(BUILD_DIR)/src/players/typed_search/%.o: src/players/typed_search/%.cpp | dirs
 # here (before TEST_OBJS) because TEST_OBJS expands AZ_SEARCH_CORE_OBJS immediately.
 # Torch-dependent az_search sources (LibTorch / NN). Everything else under
 # az_search/ is the torch-free core that links into test_core.
-AZ_SEARCH_NN_CPP    := src/players/az_search/nn_eval.cpp src/players/az_search/az_search_player.cpp
+AZ_SEARCH_NN_CPP    := src/players/az_search/nn_eval.cpp src/players/az_search/legacy_nn_eval.cpp src/players/az_search/az_search_player.cpp
 AZ_SEARCH_CORE_CPP  := $(filter-out $(AZ_SEARCH_NN_CPP),$(wildcard src/players/az_search/*.cpp))
 AZ_SEARCH_CORE_OBJS := $(patsubst src/players/az_search/%.cpp,$(BUILD_DIR)/src/players/az_search/%.o,$(AZ_SEARCH_CORE_CPP))
 AZ_SEARCH_NN_OBJS   := $(patsubst src/players/az_search/%.cpp,$(BUILD_DIR)/src/players/az_search/%.o,$(AZ_SEARCH_NN_CPP))

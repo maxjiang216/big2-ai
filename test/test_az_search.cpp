@@ -5,7 +5,6 @@
 
 #include "az_search/az_search.h"
 #include "az_search/considered_moves.h"
-#include "az_search/eval_cache.h"
 #include "az_search/evaluator.h"
 #include "move.h"
 #include "util.h"
@@ -154,29 +153,32 @@ void test_collapsed_groups_structural() {
 using namespace az_search;
 
 // Stub evaluator: value from caller-supplied lambdas, uniform (zero) logits by
-// default. Counts calls so tests can confirm the NN is/ isn't queried.
+// default. Counts calls so tests can confirm the NN is/ isn't queried, and can
+// capture every EvalFeatures (incl. path tokens) for token-stream assertions.
 struct StubEval : Evaluator {
-  std::function<float(const PlayerFeatures &)> pv = [](const PlayerFeatures &) {
+  std::function<float(const EvalFeatures &)> pv = [](const EvalFeatures &) {
     return 0.5f;
   };
-  std::function<float(const OppFeatures &)> ov = [](const OppFeatures &) {
+  std::function<float(const EvalFeatures &)> ov = [](const EvalFeatures &) {
     return 0.5f;
   };
   int player_calls = 0, opp_calls = 0;
   std::array<float, AZ_PLAYER_HEAD_DIM> plogits{};  // factored player head logits
+  bool capture = false;
+  std::vector<EvalFeatures> captured;
 
-  PlayerEval eval_player(const PlayerFeatures &f) override {
-    ++player_calls;
-    PlayerEval e;
-    e.value = pv(f);
-    e.logits = plogits;
-    return e;
-  }
-  OppEval eval_opp(const OppFeatures &f) override {
-    ++opp_calls;
-    OppEval e;
-    e.move_value.fill(ov(f));  // per-move q_a; uniform here unless a test varies it
-    e.logits.fill(0.0f);
+  NetEval eval(const EvalFeatures &f) override {
+    if (capture) captured.push_back(f);
+    NetEval e;
+    if (f.owner_to_move) {
+      ++player_calls;
+      e.value = pv(f);
+      e.policy = plogits;
+    } else {
+      ++opp_calls;
+      e.qa.fill(ov(f));  // per-move q_a; uniform here unless a test varies it
+      e.behavior.fill(0.0f);
+    }
     return e;
   }
 };
@@ -187,7 +189,7 @@ static std::array<int, 13> counts(std::initializer_list<std::pair<int, int>> kv)
   return a;
 }
 
-void test_transition_and_key() {
+void test_transition() {
   // Our move removes our cards, adds to discard, flips side.
   SearchState s{counts({{0, 1}, {1, 1}}), 5, {}, kPASS, kUs};
   SearchState ns = az_transition(s, kSINGLE_START);  // play single '3' (rank idx 0)
@@ -204,21 +206,12 @@ void test_transition_and_key() {
   // Pass flips side and clears the trick.
   SearchState p = az_transition(so, kPASS);
   assert(p.side == kUs && p.last_move == kPASS && p.opp_size == 4);
-
-  // Key excludes discard but distinguishes hand / opp_size / trick / side.
-  SearchState a{counts({{0, 1}}), 5, {}, kPASS, kUs};
-  SearchState b = a; b.discard = counts({{2, 2}});  // different discard only
-  assert(state_key(a) == state_key(b));
-  SearchState c = a; c.side = kOpp;
-  assert(state_key(a) != state_key(c));
-  SearchState d = a; d.opp_size = 6;
-  assert(state_key(a) != state_key(d));
 }
 
 void test_forced_win() {
   // Lead position, our hand is a single card -> playing it empties our hand.
   SearchState root{counts({{12, 1}}), 8, {}, kPASS, kUs};  // single '2'
-  Search search(root, {1.5f, 64});
+  Search search(root, {}, {1.5f, 64});
   StubEval ev;  // value 0.5 — but a forced win should override to 1.0
   search.run(ev);
   assert(search.best_move() == kSINGLE_START + 12);  // the single '2'
@@ -229,7 +222,7 @@ void test_search_invariants_and_determinism() {
   // Response position: opp led a single '3'; we hold 4 and 5 (both beat it).
   SearchState root{counts({{1, 1}, {2, 1}}), 6, counts({{0, 1}}), kSINGLE_START, kUs};
   StubEval ev;
-  Search s1(root, {1.5f, 300});
+  Search s1(root, {}, {1.5f, 300});
   s1.run(ev);
   int bm = s1.best_move();
 
@@ -243,7 +236,7 @@ void test_search_invariants_and_determinism() {
 
   // Determinism: identical config + stub -> identical outcome.
   StubEval ev2;
-  Search s2(root, {1.5f, 300});
+  Search s2(root, {}, {1.5f, 300});
   s2.run(ev2);
   assert(s2.best_move() == bm);
   assert(std::abs(s2.root_value() - s1.root_value()) < 1e-6);
@@ -258,8 +251,8 @@ void test_expectimax_backup() {
   StubEval ev;
   // Opp per-move q distinct from the player leaf value (0.5) so the unbiased and
   // (old) renormalized estimators differ while any child is still unexpanded.
-  ev.ov = [](const OppFeatures &f) { return f.opp_size >= 6 ? 0.3f : 0.7f; };
-  Search s(root, {1.5f, 500});
+  ev.ov = [](const EvalFeatures &f) { return f.opp_size >= 6 ? 0.3f : 0.7f; };
+  Search s(root, {}, {1.5f, 500});
   s.run(ev);
 
   const Node *r = s.root_node();
@@ -306,16 +299,13 @@ void test_expectimax_backup() {
   }
 }
 
-void test_transposition_merge() {
-  // Two different discards reaching the same (hand,opp_size,trick,side) share a
-  // node: searching from such a position must not double-count. Here we just
-  // assert the memo stays a DAG — node count <= a loose tree bound — and that a
-  // crafted equal-key pair collapses (covered in test_transition_and_key).
+void test_tree_node_bound() {
+  // Plain tree (no transpositions): each simulation resolves at most one new
+  // node, so the live node count stays <= sims + 1.
   SearchState root{counts({{0, 1}, {1, 1}, {2, 1}}), 4, {}, kPASS, kUs};
   StubEval ev;
-  Search s(root, {1.5f, 200});
+  Search s(root, {}, {1.5f, 200});
   s.run(ev);
-  // Each simulation creates at most one new node, so memo size <= sims + 1.
   assert((long)s.num_nodes() <= 201);
 }
 
@@ -341,7 +331,7 @@ void test_forced_win_extension() {
   assert(az_is_forced_win(root, fm));
 
   StubEval ev;  // value 0.5 — the forced extension must override to 1.0
-  Search s(root, {1.5f, 64});
+  Search s(root, {}, {1.5f, 64});
   s.run(ev);
   assert(std::abs(s.root_value() - 1.0f) < 1e-6);
   assert(s.best_move() == kSINGLE_START + 12);  // play the 2 first
@@ -357,8 +347,8 @@ void test_forced_move_expansion() {
   // commit the single '2'.
   SearchState root{counts({{0, 1}, {1, 1}, {12, 1}}), 2, {}, kPASS, kUs};
   StubEval ev;
-  ev.pv = [](const PlayerFeatures &f) { return f.our_size == 2 ? 0.9f : 0.3f; };
-  Search s(root, {1.5f, /*sims=*/0});
+  ev.pv = [](const EvalFeatures &f) { return f.our_size == 2 ? 0.9f : 0.3f; };
+  Search s(root, {}, {1.5f, /*sims=*/0});
   s.run(ev);
   assert(std::abs(s.root_value() - 0.9f) < 1e-4);
   assert(s.best_move() == kSINGLE_START + 12);  // play the unbeatable single '2'
@@ -368,8 +358,8 @@ void test_forced_move_expansion() {
   SearchState resp{counts({{0, 1}, {1, 1}, {12, 1}}), 2, counts({{2, 1}}),
                    kSINGLE_START, kUs};
   StubEval ev2;
-  ev2.pv = [](const PlayerFeatures &) { return 0.9f; };
-  Search s2(resp, {1.5f, /*sims=*/0});
+  ev2.pv = [](const EvalFeatures &) { return 0.9f; };
+  Search s2(resp, {}, {1.5f, /*sims=*/0});
   s2.run(ev2);
   assert(s2.root_value() < 0.9f);  // unchanged from the unexpanded default
 }
@@ -380,7 +370,7 @@ void test_player_composed_prior() {
   SearchState root{counts({{0, 1}, {1, 1}, {2, 2}}), 6, {}, kPASS, kUs};
   StubEval ev;
   for (int i = 0; i < AZ_PLAYER_HEAD_DIM; ++i) ev.plogits[i] = 0.013f * i - 0.5f;
-  Search s(root, {1.5f, 1});  // one sim expands the root
+  Search s(root, {}, {1.5f, 1});  // one sim expands the root
   s.run(ev);
   const Node *r = s.root_node();
   assert(r->expanded && !r->edges.empty() && r->forced_win_move == -1);
@@ -405,7 +395,7 @@ void test_hierarchical_groups_partition() {
   // Rich lead hand: singles, a pair, a triple -> several trick types -> groups.
   SearchState root{counts({{0, 1}, {1, 1}, {2, 2}, {5, 3}}), 7, {}, kPASS, kUs};
   StubEval ev;
-  Search s(root, {1.5f, 400});
+  Search s(root, {}, {1.5f, 400});
   s.run(ev);
   const Node *r = s.root_node();
   assert(!r->terminal && r->expanded);
@@ -439,7 +429,7 @@ void test_opp_node_grouping_wellformed() {
   // valid (collapsed) behavior distribution summing to ~1.
   SearchState root{counts({{0, 1}, {1, 1}, {2, 1}, {7, 1}}), 6, {}, kPASS, kUs};
   StubEval ev;
-  Search s(root, {1.5f, 500});
+  Search s(root, {}, {1.5f, 500});
   s.run(ev);
   const Node *opp = nullptr;
   for (const auto &e : s.root_node()->edges)
@@ -463,30 +453,53 @@ void test_opp_node_grouping_wellformed() {
   }
 }
 
-void test_caching_evaluator() {
-  StubEval base;
-  base.pv = [](const PlayerFeatures &f) { return f.opp_size / 16.0f; };
-  CachingEvaluator cache(base);
+void test_leaf_path_tokens() {
+  // Every captured leaf's path tokens, replayed from the root state through
+  // az_transition, must land exactly on the leaf's feature state — the token
+  // stream IS the move stream (forced fused passes appear explicitly).
+  SearchState root{counts({{0, 1}, {1, 1}, {2, 2}, {5, 3}}), 7, {}, kPASS, kUs};
+  StubEval ev;
+  ev.capture = true;
+  Search s(root, {}, {1.5f, 300});
+  s.run(ev);
+  assert(!ev.captured.empty());
+  assert(ev.captured.front().path_tokens.empty());  // first eval is the root
+  bool saw_player = false, saw_opp = false;
+  for (const auto &f : ev.captured) {
+    SearchState st = root;
+    for (int tok : f.path_tokens) st = az_transition(st, tok);
+    assert(st.our_hand == f.hand);
+    assert(st.opp_size == f.opp_size);
+    assert(hand_size(st.our_hand) == f.our_size);
+    assert((st.side == kUs) == f.owner_to_move);
+    assert(trick_counts(st.last_move) == f.trick);
+    (f.owner_to_move ? saw_player : saw_opp) = true;
+  }
+  assert(saw_player && saw_opp);  // owner_to_move flips along real descents
+}
 
-  PlayerFeatures f{counts({{0, 1}}), counts({{1, 2}}), {}, 8, 1};
-  PlayerEval a = cache.eval_player(f);
-  PlayerEval b = cache.eval_player(f);  // identical input -> cache hit
-  assert(cache.player_misses() == 1 && base.player_calls == 1);
-  assert(a.value == b.value);
-
-  PlayerFeatures g = f; g.opp_size = 7;  // different input -> miss
-  cache.eval_player(g);
-  assert(cache.player_misses() == 2 && base.player_calls == 2);
-
-  // Opponent evals are now keyed on the full input INCLUDING our hand (the opp
-  // net takes it). Identical inputs hit; inputs differing only in our hand miss.
-  OppFeatures o{counts({{0, 1}}), counts({{2, 2}}), counts({{3, 1}}), 5, 4};
-  cache.eval_opp(o);
-  cache.eval_opp(o);  // identical -> hit
-  assert(cache.opp_misses() == 1 && base.opp_calls == 1);
-  OppFeatures o2 = o; o2.hand = counts({{1, 1}});  // differs only in our hand -> miss
-  cache.eval_opp(o2);
-  assert(cache.opp_misses() == 2 && base.opp_calls == 2);
+void test_fused_pass_tokens() {
+  // Lead with {3, 2}, opp holds 2 cards, all three aces discarded: after our
+  // single '2' the opponent provably cannot respond (no higher single, no bomb
+  // possible) -> the transition fuses the forced pass. The edge must be marked
+  // fused and any deeper leaf's token stream must contain {single2, kPASS}.
+  SearchState root{counts({{0, 1}, {12, 1}}), 2, counts({{11, 3}}), kPASS, kUs};
+  StubEval ev;
+  ev.capture = true;
+  Search s(root, {}, {1.5f, 64});
+  s.run(ev);
+  const Node *r = s.root_node();
+  const Edge *two = nullptr;
+  for (const auto &e : r->edges)
+    if (e.move_id == kSINGLE_START + 12 && e.child) two = &e;
+  assert(two && two->fused_pass);
+  bool saw_fused_seq = false;
+  for (const auto &f : ev.captured) {
+    const auto &t = f.path_tokens;
+    for (std::size_t i = 0; i + 1 < t.size(); ++i)
+      if (t[i] == kSINGLE_START + 12 && t[i + 1] == kPASS) saw_fused_seq = true;
+  }
+  assert(saw_fused_seq);
 }
 
 void test_play_mode_is_seed_independent() {
@@ -495,39 +508,51 @@ void test_play_mode_is_seed_independent() {
   // seed. (Training mode draws weighted-random and may differ across seeds.)
   SearchState root{counts({{0, 1}, {1, 1}, {2, 1}, {7, 1}}), 6, {}, kPASS, kUs};
   StubEval ev1, ev2;
-  Search a(root, {1.5f, 400, /*seed=*/1u, /*training=*/false});
-  Search b(root, {1.5f, 400, /*seed=*/9999u, /*training=*/false});
+  Search a(root, {}, {1.5f, 400, /*seed=*/1u, /*training=*/false});
+  Search b(root, {}, {1.5f, 400, /*seed=*/9999u, /*training=*/false});
   a.run(ev1);
   b.run(ev2);
   assert(a.best_move() == b.best_move());
   assert(std::abs(a.root_value() - b.root_value()) < 1e-6);
 }
 
+// Build the real-history suffix for following `e` from the root: the move plus
+// the fused forced pass when the transition fused one.
+static std::vector<int> edge_suffix(const Edge &e) {
+  std::vector<int> h{e.move_id};
+  if (e.fused_pass) h.push_back(kPASS);
+  return h;
+}
+
 void test_advance_root_reuse() {
   SearchState root{counts({{0, 1}, {1, 1}, {2, 1}}), 4, {}, kPASS, kUs};
   StubEval ev;
-  Search s(root, {1.5f, 300});
+  Search s(root, {}, {1.5f, 300});
   s.run(ev);
 
-  // Grab a genuinely-visited child state and re-root onto it: its visit count
-  // and the node count must carry over (subtree reuse, no new node).
+  // Follow a genuinely-visited edge via its move suffix: the child's visit
+  // count must carry over (subtree reuse) and the siblings must be freed.
   const Node *r = s.root_node();
-  SearchState visited{};
-  long visited_n = -1;
+  const Edge *kept = nullptr;
   for (const auto &e : r->edges)
-    if (e.child && e.child->N > 0) { visited = e.child->st; visited_n = e.child->N; break; }
-  assert(visited_n > 0);
+    if (e.child && e.child->N > 0) { kept = &e; break; }
+  assert(kept);
+  const SearchState visited = kept->child->st;
+  const long visited_n = kept->child->N;
 
   const std::size_t before = s.num_nodes();
-  s.advance_root(visited);
-  assert(s.num_nodes() <= before);            // kept subtree reused; rest GC'd
+  s.advance_root(visited, edge_suffix(*kept));
+  assert(s.num_nodes() <= before);            // kept subtree reused; rest freed
   assert(s.root_n() == visited_n);            // prior visits preserved
+  assert(s.history() == edge_suffix(*kept));
 
-  // Re-rooting onto an unseen state allocates a fresh (unvisited) root; the old
-  // subtree, now fully unreachable, is reclaimed (only the fresh root remains).
+  // A history that diverges from every resolved edge discards the whole tree:
+  // only a fresh, unvisited root remains.
   SearchState fresh = visited;
-  fresh.opp_size = 1;  // a key not in the memo
-  s.advance_root(fresh);
+  fresh.opp_size = 1;
+  std::vector<int> bogus = s.history();
+  bogus.push_back(kSINGLE_START + 9);  // a move no tree edge matches
+  s.advance_root(fresh, bogus);
   assert(s.root_n() == 0);
   assert(s.num_nodes() == 1);
 }
@@ -541,18 +566,18 @@ void test_advance_root_gc() {
 
   auto run_and_advance = [&](unsigned seed) {
     StubEval ev;
-    Search s(root, {1.5f, 300, seed, /*training=*/true});
+    Search s(root, {}, {1.5f, 300, seed, /*training=*/true});
     s.run(ev);
     const std::size_t before = s.num_nodes();
     const Node *r = s.root_node();
-    SearchState target{};
-    long target_n = -1;
-    const Node *keep = nullptr;
+    const Edge *kept = nullptr;
     for (const auto &e : r->edges)
-      if (e.child && e.child->N > 0) { target = e.child->st; target_n = e.child->N; keep = e.child; break; }
-    assert(target_n > 0);
+      if (e.child && e.child->N > 0) { kept = &e; break; }
+    assert(kept);
+    const Node *keep = kept->child;
+    const long target_n = keep->N;
 
-    s.advance_root(target);
+    s.advance_root(keep->st, edge_suffix(*kept));
     assert(s.root_node() == keep);             // re-rooted onto the existing node
     assert(s.root_n() == target_n);            // kept subtree's visits preserved
     assert(s.num_nodes() < before);            // sibling subtree freed
@@ -573,18 +598,19 @@ void run_az_search_tests() {
   test_opp_index_mapping();
   test_player_factored_head();
   test_collapsed_groups_structural();
-  test_transition_and_key();
+  test_transition();
   test_forced_win();
   test_search_invariants_and_determinism();
   test_expectimax_backup();
-  test_transposition_merge();
+  test_tree_node_bound();
   test_tablebase_oracle();
   test_forced_win_extension();
   test_forced_move_expansion();
   test_player_composed_prior();
   test_hierarchical_groups_partition();
   test_opp_node_grouping_wellformed();
-  test_caching_evaluator();
+  test_leaf_path_tokens();
+  test_fused_pass_tokens();
   test_play_mode_is_seed_independent();
   test_advance_root_reuse();
   test_advance_root_gc();

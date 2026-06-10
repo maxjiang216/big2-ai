@@ -1,11 +1,11 @@
 // az_selfplay: self-play data generation for the az_search nets.
 //
 // Modes:
-//   * gen0 bootstrap (no --player-model): self-play with policy/behavior targets
+//   * gen0 bootstrap (no --model): self-play with policy/behavior targets
 //     = the one-hot played move. Either uniform-random (default) or, with
 //     --teacher NAME (e.g. typed_search, the strongest non-az player), driven by
 //     a registry policy so the NN imitates a strong teacher from the start.
-//   * gen N>=1 (--player-model / --opp-model): NN-guided MCTS self-play. NN leaf
+//   * gen N>=1 (--model): NN-guided MCTS self-play. NN leaf
 //     evaluations are BATCHED ACROSS MANY CONCURRENT GAMES (the throughput win):
 //     every game advances its current search by simulations, leaf requests are
 //     pooled into player-net / opp-net batches, flushed, and distributed back.
@@ -420,20 +420,21 @@ struct Slot {
   bool active = false;
   bool searching = false;  // mid-search (true) vs needs a new decision setup
   bool waiting = false;    // has an outstanding NN eval request
+  bool prefix_dirty = true;  // history changed since the last KV-prefix encode
   LeafRequest pending;     // the pumped leaf awaiting eval
-  bool pending_is_player = false;
   std::atomic<bool> result_ready{false};  // inference -> worker handoff flag
-  PlayerEval peval;        // inference writes (player leaf)
-  OppEval oeval;           // inference writes (opp leaf)
+  NetEval neval;           // inference writes the unified eval here
 };
 
 // One queued leaf-eval request (features copied by value; the inference thread
-// never touches a slot's Search tree).
+// never touches a slot's Search tree). The FIRST request of a decision carries
+// a snapshot of the slot's game history so the inference thread can refresh
+// that slot's KV prefix before evaluating (no cross-thread history reads).
 struct EvalReq {
   int slot;
-  bool is_player;
-  PlayerFeatures pf;
-  OppFeatures of;
+  EvalFeatures feat;
+  bool refresh_prefix = false;
+  std::vector<int> prefix_snapshot;
 };
 
 static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
@@ -482,6 +483,7 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
       s.game.shuffle_deal(s.rng);
       s.history.clear();
       s.first_player = s.game.current_player();
+      s.prefix_dirty = true;
       s.p_from = lps.size();
       s.o_from = los.size();
       s.active = true;
@@ -500,11 +502,13 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
       unsigned tseed =
           (unsigned)(seed ^ (0x9E3779B9u * (unsigned)(s.game_id * 2 + s.mover)));
       if (!tr)
-        tr = std::make_unique<Search>(st, SearchConfig{1.5f, sims, tseed, true});
+        tr = std::make_unique<Search>(st, s.history,
+                                      SearchConfig{1.5f, sims, tseed, true});
       else
-        tr->advance_root(st);
+        tr->advance_root(st, s.history);
       s.sims_done = 0;
       s.searching = true;
+      s.prefix_dirty = true;  // history grew since the last decision
       return true;
     };
 
@@ -546,8 +550,12 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
         std::lock_guard<std::mutex> lk(mtx);
         EvalReq r;
         r.slot = slot_idx;
-        r.is_player = s.pending.is_player;
-        if (r.is_player) r.pf = s.pending.pfeat; else r.of = s.pending.ofeat;
+        r.feat = std::move(s.pending.feat);
+        if (s.prefix_dirty) {
+          r.refresh_prefix = true;
+          r.prefix_snapshot = s.history;
+          s.prefix_dirty = false;
+        }
         queue_.push_back(std::move(r));
       }
       cv_infer.notify_one();
@@ -563,8 +571,7 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
         }
         if (s.waiting) {
           if (!s.result_ready.load(std::memory_order_acquire)) return true;
-          if (s.pending_is_player) s.tree[s.mover]->apply_eval(s.peval);
-          else                     s.tree[s.mover]->apply_eval(s.oeval);
+          s.tree[s.mover]->apply_eval(s.neval);
           s.result_ready.store(false, std::memory_order_relaxed);
           s.waiting = false;
           ++s.sims_done;
@@ -577,8 +584,7 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
         while (s.sims_done < sims) {
           LeafRequest req = s.tree[s.mover]->select_leaf();
           if (!req.needs_eval) { ++s.sims_done; continue; }
-          s.pending = req;
-          s.pending_is_player = req.is_player;
+          s.pending = std::move(req);
           s.waiting = true;
           enqueue(s, slot_idx);
           pushed = true;
@@ -611,8 +617,8 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
   };
 
   auto infer_fn = [&]() {
-    std::vector<PlayerFeatures> pf; std::vector<int> pslot;
-    std::vector<OppFeatures> of; std::vector<int> oslot;
+    std::vector<EvalFeatures> feats; std::vector<int> fslot;
+    std::vector<int> rslot; std::vector<std::vector<int>> rhist;
     for (;;) {
       {
         std::unique_lock<std::mutex> lk(mtx);
@@ -627,28 +633,31 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
           continue;
         }
         for (auto &r : queue_) {
-          if (r.is_player) { pf.push_back(r.pf); pslot.push_back(r.slot); }
-          else { of.push_back(r.of); oslot.push_back(r.slot); }
+          if (r.refresh_prefix) {
+            rslot.push_back(r.slot);
+            rhist.push_back(std::move(r.prefix_snapshot));
+          }
+          feats.push_back(std::move(r.feat));
+          fslot.push_back(r.slot);
         }
         queue_.clear();
       }
-      if (!pf.empty()) {
-        auto res = nn.eval_players(pf);
-        for (std::size_t i = 0; i < pslot.size(); ++i) {
-          Slot &s = slots[pslot[i]];
-          s.peval = res[i];
+      // KV prefixes FIRST (one padded batch), then all leaf evals against them.
+      if (!rslot.empty()) {
+        std::vector<const std::vector<int> *> hp;
+        hp.reserve(rhist.size());
+        for (auto &h : rhist) hp.push_back(&h);
+        nn.set_prefixes(rslot, hp);
+      }
+      if (!feats.empty()) {
+        auto res = nn.eval_batch(fslot, feats);
+        for (std::size_t i = 0; i < fslot.size(); ++i) {
+          Slot &s = slots[fslot[i]];
+          s.neval = res[i];
           s.result_ready.store(true, std::memory_order_release);
         }
       }
-      if (!of.empty()) {
-        auto res = nn.eval_opps(of);
-        for (std::size_t i = 0; i < oslot.size(); ++i) {
-          Slot &s = slots[oslot[i]];
-          s.oeval = res[i];
-          s.result_ready.store(true, std::memory_order_release);
-        }
-      }
-      pf.clear(); pslot.clear(); of.clear(); oslot.clear();
+      feats.clear(); fslot.clear(); rslot.clear(); rhist.clear();
       { std::lock_guard<std::mutex> lk(rmtx); }  // serialize with worker waits
       rcv.notify_all();
     }
@@ -817,14 +826,16 @@ int main(int argc, char **argv) {
   const std::string player_out = arg(argc, argv, "--player-out", "data/az_player.parquet");
   const std::string opp_out = arg(argc, argv, "--opp-out", "data/az_opp.parquet");
   const std::string games_out = arg(argc, argv, "--games-out", "data/az_games.parquet");
-  const std::string player_model = arg(argc, argv, "--player-model", "");
-  const std::string opp_model = arg(argc, argv, "--opp-model", "");
+  const std::string model = arg(argc, argv, "--model", "");
+  bool use_kv_cache = true;  // --no-kv-cache: full-recompute debug/correctness mode
+  for (int i = 1; i < argc; ++i)
+    if (std::strcmp(argv[i], "--no-kv-cache") == 0) use_kv_cache = false;
   const int games = std::atoi(arg(argc, argv, "--games", "1000"));
   const int sims = std::atoi(arg(argc, argv, "--sims", "100"));
   const int slots = std::atoi(arg(argc, argv, "--slots", "256"));
   // gen0 bootstrap teacher: a registry policy (e.g. typed_search) plays self-play
   // and the NN imitates it. Empty -> uniform-random gen0 (only relevant when no
-  // --player-model/--opp-model is given).
+  // --model is given).
   const std::string teacher = arg(argc, argv, "--teacher", "");
   const double teacher_param = std::atof(arg(argc, argv, "--teacher-param", "0"));
   const unsigned seed = (unsigned)std::strtoul(arg(argc, argv, "--seed", "0"), nullptr, 10);
@@ -841,7 +852,7 @@ int main(int argc, char **argv) {
   std::vector<OppSample> os;
   std::vector<GameRow> gs;
 
-  const bool gen0 = player_model.empty() || opp_model.empty();
+  const bool gen0 = model.empty();
   if (gen0 && !teacher.empty()) {
     std::printf("[az_selfplay] gen0 teacher self-play (%s, param=%.3g): %d games\n",
                 teacher.c_str(), teacher_param, games);
@@ -850,9 +861,9 @@ int main(int argc, char **argv) {
     std::printf("[az_selfplay] gen0 random self-play: %d games\n", games);
     run_random_selfplay(games, seed, ps, os, gs);
   } else {
-    std::printf("[az_selfplay] NN self-play: %d games, sims=%d, slots=%d, device=%s\n",
-                games, sims, slots, device_str.c_str());
-    NNEvaluator nn(player_model, opp_model, device);
+    std::printf("[az_selfplay] NN self-play: %d games, sims=%d, slots=%d, device=%s, kv=%s\n",
+                games, sims, slots, device_str.c_str(), use_kv_cache ? "on" : "off");
+    NNEvaluator nn(model, device, /*max_slots=*/slots, use_kv_cache);
     run_search_selfplay(nn, games, slots, sims, seed, ps, os, gs);
   }
 

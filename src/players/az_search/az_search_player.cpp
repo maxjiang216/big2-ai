@@ -8,9 +8,16 @@ AzSearchPlayer::AzSearchPlayer(std::shared_ptr<NNEvaluator> nn, SearchConfig cfg
     : nn_(std::move(nn)), cfg_(cfg) {}
 
 void AzSearchPlayer::on_deal(const std::array<int, 13> & /*hand*/, int /*turn*/) {
-  // New game: drop the persistent tree and the per-game NN-eval cache.
-  search_.reset();
-  cache_ = std::make_unique<CachingEvaluator>(*nn_);
+  search_.reset();  // new game: drop the persistent tree + history
+  history_.clear();
+}
+
+void AzSearchPlayer::on_opponent_move(const Move &move) {
+  history_.push_back(encodeMove(move));
+}
+
+void AzSearchPlayer::on_self_move(const Move &move) {
+  history_.push_back(encodeMove(move));
 }
 
 SearchState AzSearchPlayer::current_state() const {
@@ -24,13 +31,17 @@ SearchState AzSearchPlayer::current_state() const {
 }
 
 Move AzSearchPlayer::select_move_impl() {
-  if (!cache_) cache_ = std::make_unique<CachingEvaluator>(*nn_);
   const SearchState cur = current_state();
+  // Refresh the evaluator's prefix (one encode per real turn; all of this
+  // turn's leaf evals attend to the cached KV). The shared evaluator's slot 0
+  // is safe across the two seats of a single-threaded game: each rewrites the
+  // prefix at the start of its own turn.
+  nn_->set_prefix(history_);
   if (!search_)
-    search_ = std::make_unique<Search>(cur, cfg_);
+    search_ = std::make_unique<Search>(cur, history_, cfg_);
   else
-    search_->advance_root(cur);  // reuse prior search via the persisted memo
-  search_->run(*cache_);
+    search_->advance_root(cur, history_);  // suffix-walk subtree reuse
+  search_->run(*nn_);
   return Move(search_->best_move());
 }
 
