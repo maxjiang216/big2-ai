@@ -24,8 +24,12 @@
 // Both value targets are backfilled from the game winner. At real decisions the
 // move played is sampled proportional to the root visit counts (exploration).
 //
-// Output: two Parquet files matching the nn/dataset.py schemas
-// (az_player_genN.parquet, az_opp_genN.parquet).
+// Output: three Parquet files matching the nn/dataset_seq.py schemas
+// (az_player_genN.parquet, az_opp_genN.parquet, az_games_genN.parquet). The
+// games file holds each game's full move-id sequence (the transformer tokens);
+// sample rows carry (game_id, hist_idx) so training slices the prefix. The
+// hist_idx convention (see nn/model_az_seq.py) counts ALL applied moves
+// including forced passes / insta-wins — it is NOT the sample turn_idx.
 
 #include "az_search/az_search.h"
 #include "az_search/considered_moves.h"
@@ -149,6 +153,7 @@ static PosType classify_position(const Game &game, const std::vector<int> &legal
 // ---------------------------------------------------------------------------
 struct PlayerSample {
   int game_id, turn_idx;
+  int hist_idx;  // moves applied before this decision (sequence readout index)
   std::array<int, 13> hand, opp_max, trick;
   int opp_size, our_size;
   std::vector<int> legal;
@@ -159,12 +164,22 @@ struct PlayerSample {
 
 struct OppSample {
   int game_id, turn_idx;
+  int hist_idx;  // moves applied before this decision (sequence readout index)
   std::array<int, 13> hand, opp_max, trick;  // hand = observer's exact hand
   int opp_size, our_size;
   std::vector<int> legal;
   int move_id;
   int observer;
   float value = 0.0f;
+};
+
+// One row per finished game: the full applied-move sequence (transformer
+// tokens) plus winner / first player for Python-side validation.
+struct GameRow {
+  int game_id;
+  int first_player;
+  int winner;
+  std::vector<int> moves;
 };
 
 static SearchState mover_state(const Game &game, int mover) {
@@ -183,14 +198,14 @@ static SearchState mover_state(const Game &game, int mover) {
 // value head trains while the policy head is untouched.
 static void record_player_sample(const Game &game, int mover,
                                  const std::vector<std::pair<int, long>> &visits,
-                                 int game_id, int turn_idx,
+                                 int game_id, int turn_idx, int hist_idx,
                                  std::vector<PlayerSample> &psamples) {
   const int obs = 1 - mover;
   auto hand = game.player_hand(mover);
   auto discard = game.discard_pile();
   const int last = encodeMove(game.last_move());
   PlayerSample ps;
-  ps.game_id = game_id; ps.turn_idx = turn_idx;
+  ps.game_id = game_id; ps.turn_idx = turn_idx; ps.hist_idx = hist_idx;
   ps.hand = hand;
   ps.opp_max = opp_max_counts(hand, discard);
   ps.trick = trick_counts(last);
@@ -204,14 +219,14 @@ static void record_player_sample(const Game &game, int mover,
 
 // Opponent-net sample (the observer's public view of the mover's actual move).
 static void record_opp_sample(const Game &game, int mover, int chosen_move,
-                              int game_id, int turn_idx,
+                              int game_id, int turn_idx, int hist_idx,
                               std::vector<OppSample> &osamples) {
   const int obs = 1 - mover;
   auto ohand = game.player_hand(obs);
   auto discard = game.discard_pile();
   const int last = encodeMove(game.last_move());
   OppSample os;
-  os.game_id = game_id; os.turn_idx = turn_idx;
+  os.game_id = game_id; os.turn_idx = turn_idx; os.hist_idx = hist_idx;
   os.hand = ohand;                               // observer's exact hand (NN input)
   os.opp_max = opp_max_counts(ohand, discard);  // observer's upper bound on the mover
   os.trick = trick_counts(last);
@@ -227,11 +242,11 @@ static void record_opp_sample(const Game &game, int mover, int chosen_move,
 // Real-decision recording: player policy+value sample (with visits) + opp sample.
 static void record_decision(Game &game, int mover, int chosen_move,
                             const std::vector<std::pair<int, long>> &visits,
-                            int game_id, int turn_idx,
+                            int game_id, int turn_idx, int hist_idx,
                             std::vector<PlayerSample> &psamples,
                             std::vector<OppSample> &osamples) {
-  record_player_sample(game, mover, visits, game_id, turn_idx, psamples);
-  record_opp_sample(game, mover, chosen_move, game_id, turn_idx, osamples);
+  record_player_sample(game, mover, visits, game_id, turn_idx, hist_idx, psamples);
+  record_opp_sample(game, mover, chosen_move, game_id, turn_idx, hist_idx, osamples);
 }
 
 static int sample_from_visits(const std::vector<std::pair<int, long>> &visits,
@@ -259,6 +274,7 @@ static void backfill_values(int winner, std::size_t p_from, std::size_t o_from,
 // insta-win / forced-pass. Returns the legal moves at the real
 // decision, or {} if the game ended first.
 static std::vector<int> advance_to_decision(Game &game, int game_id, int &turn,
+                                            std::vector<int> &history,
                                             std::vector<PlayerSample> &ps,
                                             std::vector<OppSample> &os) {
   while (!game.is_over()) {
@@ -267,16 +283,18 @@ static std::vector<int> advance_to_decision(Game &game, int game_id, int &turn,
     const PosType t = classify_position(game, legal, fm);
     if (t == POS_REAL) return legal;
     const int mover = game.current_player();
+    const int hidx = (int)history.size();
     if (t == POS_TABLEBASE) {
-      record_player_sample(game, mover, {}, game_id, turn, ps);  // value-only
-      record_opp_sample(game, mover, fm, game_id, turn, os);
+      record_player_sample(game, mover, {}, game_id, turn, hidx, ps);  // value-only
+      record_opp_sample(game, mover, fm, game_id, turn, hidx, os);
       ++turn;
     } else if (t == POS_FORCED_WIN) {
-      record_opp_sample(game, mover, fm, game_id, turn, os);  // observer learns the loss
+      record_opp_sample(game, mover, fm, game_id, turn, hidx, os);  // observer learns the loss
       ++turn;
     }
     // POS_INSTA_WIN / POS_FORCED_PASS: the search never queries an NN head here.
     game.apply_move(fm);
+    history.push_back(fm);
   }
   return {};
 }
@@ -286,22 +304,29 @@ static std::vector<int> advance_to_decision(Game &game, int game_id, int &turn,
 // ---------------------------------------------------------------------------
 static void run_random_selfplay(int total_games, unsigned seed,
                                 std::vector<PlayerSample> &ps,
-                                std::vector<OppSample> &os) {
+                                std::vector<OppSample> &os,
+                                std::vector<GameRow> &gs) {
   std::mt19937 rng(seed);
   for (int g = 0; g < total_games; ++g) {
     Game game;
     game.shuffle_deal(rng);
     const std::size_t pf = ps.size(), of = os.size();
     int turn = 0;
+    std::vector<int> history;
+    const int first_player = game.current_player();
     while (true) {
-      auto legal = advance_to_decision(game, g, turn, ps, os);
+      auto legal = advance_to_decision(game, g, turn, history, ps, os);
       if (legal.empty()) break;  // game ended
       const int mover = game.current_player();
       const int m = legal[std::uniform_int_distribution<int>(0, (int)legal.size() - 1)(rng)];
-      record_decision(game, mover, m, {{m, 1}}, g, turn++, ps, os);
+      record_decision(game, mover, m, {{m, 1}}, g, turn++, (int)history.size(), ps, os);
       game.apply_move(m);
+      history.push_back(m);
     }
-    if (game.is_over()) backfill_values(game.get_winner(), pf, of, ps, os);
+    if (game.is_over()) {
+      backfill_values(game.get_winner(), pf, of, ps, os);
+      gs.push_back({g, first_player, game.get_winner(), std::move(history)});
+    }
   }
 }
 
@@ -317,7 +342,8 @@ static void run_random_selfplay(int total_games, unsigned seed,
 static void run_classic_selfplay(const std::string &policy, double param,
                                  int total_games, unsigned seed,
                                  std::vector<PlayerSample> &ps,
-                                 std::vector<OppSample> &os) {
+                                 std::vector<OppSample> &os,
+                                 std::vector<GameRow> &gs) {
   auto factory = make_player_factory(policy, param, seed);
   std::mt19937 rng(seed);
   for (int g = 0; g < total_games; ++g) {
@@ -325,6 +351,10 @@ static void run_classic_selfplay(const std::string &policy, double param,
     GameRecord rec = sim.run();
     const std::size_t pf = ps.size(), of = os.size();
     int turn = 0;
+    // rec.turns() records EVERY applied move (forced ones included), so the
+    // turn list index IS hist_idx and its move stream IS the token sequence.
+    std::vector<int> history;
+    history.reserve(rec.turns().size());
     for (const TurnRecord &tr : rec.turns()) {
       const Game &game = tr.game;        // full pre-move state at this turn
       const int mover = tr.current_player;
@@ -332,21 +362,25 @@ static void run_classic_selfplay(const std::string &policy, double param,
       int fm = -1;
       const PosType t = classify_position(game, legal, fm);
       const int played = encodeMove(tr.move);  // what the teacher actually played
+      const int hidx = (int)history.size();
       if (t == POS_REAL) {
-        record_player_sample(game, mover, {{played, 1}}, g, turn, ps);  // one-hot
-        record_opp_sample(game, mover, played, g, turn, os);
+        record_player_sample(game, mover, {{played, 1}}, g, turn, hidx, ps);  // one-hot
+        record_opp_sample(game, mover, played, g, turn, hidx, os);
         ++turn;
       } else if (t == POS_TABLEBASE) {
-        record_player_sample(game, mover, {}, g, turn, ps);  // value-only
-        record_opp_sample(game, mover, played, g, turn, os);
+        record_player_sample(game, mover, {}, g, turn, hidx, ps);  // value-only
+        record_opp_sample(game, mover, played, g, turn, hidx, os);
         ++turn;
       } else if (t == POS_FORCED_WIN) {
-        record_opp_sample(game, mover, played, g, turn, os);
+        record_opp_sample(game, mover, played, g, turn, hidx, os);
         ++turn;
       }
       // POS_INSTA_WIN / POS_FORCED_PASS: no NN head queried -> no sample.
+      history.push_back(played);
     }
     backfill_values(rec.game().get_winner(), pf, of, ps, os);
+    const int first_player = rec.turns().empty() ? 0 : rec.turns().front().current_player;
+    gs.push_back({g, first_player, rec.game().get_winner(), std::move(history)});
   }
 }
 
@@ -377,6 +411,8 @@ struct Slot {
   Game game;
   std::mt19937 rng;                 // per-game RNG (reseeded at game start)
   std::unique_ptr<Search> tree[2];  // persistent per-seat search trees
+  std::vector<int> history;         // every applied move (token sequence)
+  int first_player = 0;
   int mover = 0;
   int turn = 0;
   int sims_done = 0;
@@ -403,7 +439,8 @@ struct EvalReq {
 static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
                                 int sims, unsigned seed,
                                 std::vector<PlayerSample> &ps,
-                                std::vector<OppSample> &os) {
+                                std::vector<OppSample> &os,
+                                std::vector<GameRow> &gs) {
   const int hw = std::max(1, (int)std::thread::hardware_concurrency() - 1);
   const int n_workers = std::max(1, std::min(hw, slots_n));
   const int per = (slots_n + n_workers - 1) / n_workers;
@@ -419,6 +456,7 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
   std::vector<Slot> slots(slots_n);
   std::vector<std::vector<PlayerSample>> wps(n_threads);  // per-worker samples
   std::vector<std::vector<OppSample>> wos(n_threads);
+  std::vector<std::vector<GameRow>> wgs(n_threads);  // per-worker game rows
 
   std::mutex mtx;  // guards queue_; co-checked with active_slots / active_workers
   std::condition_variable cv_infer;
@@ -433,6 +471,7 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
   auto worker_fn = [&](int wid, int rb, int re) {
     std::vector<PlayerSample> &lps = wps[wid];
     std::vector<OppSample> &los = wos[wid];
+    std::vector<GameRow> &lgs = wgs[wid];
 
     auto start_game = [&](Slot &s) -> bool {
       long gid = started.fetch_add(1, std::memory_order_relaxed);
@@ -441,6 +480,8 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
       s.turn = 0;
       s.rng.seed((unsigned)(seed ^ (0x9E3779B9u * (unsigned)(gid + 1))));
       s.game.shuffle_deal(s.rng);
+      s.history.clear();
+      s.first_player = s.game.current_player();
       s.p_from = lps.size();
       s.o_from = los.size();
       s.active = true;
@@ -451,7 +492,7 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
     };
 
     auto setup_decision = [&](Slot &s) -> bool {
-      auto legal = advance_to_decision(s.game, s.game_id, s.turn, lps, los);
+      auto legal = advance_to_decision(s.game, s.game_id, s.turn, s.history, lps, los);
       if (legal.empty()) return false;
       s.mover = s.game.current_player();
       SearchState st = mover_state(s.game, s.mover);
@@ -480,14 +521,18 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
       const std::vector<std::pair<int, long>> *dist = &visits;
       if (visits.size() < 2) { prior = tr.root_prior(); dist = &prior; }
       int m = sample_from_visits(*dist, s.rng);
-      record_decision(s.game, s.mover, m, *dist, s.game_id, s.turn++, lps, los);
+      record_decision(s.game, s.mover, m, *dist, s.game_id, s.turn++,
+                      (int)s.history.size(), lps, los);
       s.game.apply_move(m);  // trees persist; next setup_decision re-roots
+      s.history.push_back(m);
       s.searching = false;
     };
 
     auto finalize_game = [&](Slot &s) {
-      if (s.game.is_over())
+      if (s.game.is_over()) {
         backfill_values(s.game.get_winner(), s.p_from, s.o_from, lps, los);
+        lgs.push_back({s.game_id, s.first_player, s.game.get_winner(), s.history});
+      }
       s.active = false;
       s.searching = false;
       s.tree[0].reset();
@@ -619,6 +664,7 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
   for (int w = 0; w < n_threads; ++w) {
     ps.insert(ps.end(), wps[w].begin(), wps[w].end());
     os.insert(os.end(), wos[w].begin(), wos[w].end());
+    gs.insert(gs.end(), wgs[w].begin(), wgs[w].end());
   }
 }
 
@@ -642,36 +688,32 @@ static void write_table(const std::string &path,
   parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), out, 1 << 20, pb.build());
 }
 
-// Pre-encoded NN input (matches the net forward order hand|opp|trick and the
-// inference-side nn_eval encode, so train/infer features are identical):
-//   encode_exact(hand 48) | encode_thermo(opp_max 48) | encode_exact(trick 48).
-static void encode_input(const PlayerSample &s, float *e) {
-  encode_exact(s.hand, e); encode_thermo(s.opp_max, e + 48); encode_exact(s.trick, e + 96);
-}
-static void encode_input(const OppSample &s, float *e) {
-  encode_exact(s.hand, e); encode_thermo(s.opp_max, e + 48); encode_exact(s.trick, e + 96);
+// Raw 13-int rank-count columns (hand_0..hand_12); the 48-dim encodings are
+// built in Python (training) / nn_eval (inference) from these + the history.
+static void append_hand(std::vector<std::unique_ptr<arrow::Int32Builder>> &b,
+                        const std::array<int, 13> &hand) {
+  for (int r = 0; r < 13; ++r) b[r]->Append(hand[r]);
 }
 
 static void write_player_parquet(const std::string &path, const std::vector<PlayerSample> &v) {
   auto pool = arrow::default_memory_pool();
-  arrow::Int32Builder game_id, turn_idx, opp_size, our_size;
+  arrow::Int32Builder game_id, turn_idx, hist_idx, owner_seat, opp_size, our_size;
   arrow::FloatBuilder value;
-  arrow::ListBuilder enc(pool, std::make_shared<arrow::FloatBuilder>(pool));
+  std::vector<std::unique_ptr<arrow::Int32Builder>> hand;
+  for (int r = 0; r < 13; ++r) hand.push_back(std::make_unique<arrow::Int32Builder>());
   arrow::ListBuilder legal(pool, std::make_shared<arrow::Int32Builder>(pool));  // concrete ids
   arrow::ListBuilder vmoves(pool, std::make_shared<arrow::Int32Builder>(pool));
   arrow::ListBuilder vcounts(pool, std::make_shared<arrow::Int32Builder>(pool));
-  auto *enc_v = static_cast<arrow::FloatBuilder *>(enc.value_builder());
   auto *legal_v = static_cast<arrow::Int32Builder *>(legal.value_builder());
   auto *vmoves_v = static_cast<arrow::Int32Builder *>(vmoves.value_builder());
   auto *vcounts_v = static_cast<arrow::Int32Builder *>(vcounts.value_builder());
 
-  std::array<float, 144> e{};
   for (const auto &s : v) {
     game_id.Append(s.game_id); turn_idx.Append(s.turn_idx);
+    hist_idx.Append(s.hist_idx); owner_seat.Append(s.mover);
     opp_size.Append(s.opp_size); our_size.Append(s.our_size);
     value.Append(s.value);
-    encode_input(s, e.data());
-    enc.Append(); enc_v->AppendValues(e.data(), 144);
+    append_hand(hand, s.hand);
     legal.Append(); legal_v->AppendValues(s.legal.data(), (int64_t)s.legal.size());
     vmoves.Append(); vmoves_v->AppendValues(s.visit_moves.data(), (int64_t)s.visit_moves.size());
     vcounts.Append(); vcounts_v->AppendValues(s.visit_counts.data(), (int64_t)s.visit_counts.size());
@@ -684,12 +726,15 @@ static void write_player_parquet(const std::string &path, const std::vector<Play
   };
   push(arrow::field("game_id", arrow::int32()), finish_i32(game_id));
   push(arrow::field("turn_idx", arrow::int32()), finish_i32(turn_idx));
+  push(arrow::field("hist_idx", arrow::int32()), finish_i32(hist_idx));
+  push(arrow::field("owner_seat", arrow::int32()), finish_i32(owner_seat));
   push(arrow::field("opp_size", arrow::int32()), finish_i32(opp_size));
   push(arrow::field("our_size", arrow::int32()), finish_i32(our_size));
   push(arrow::field("value", arrow::float32()), finish_f32(value));
-  std::shared_ptr<arrow::Array> ea, la, vma, vca;
-  enc.Finish(&ea); legal.Finish(&la); vmoves.Finish(&vma); vcounts.Finish(&vca);
-  push(arrow::field("enc", arrow::list(arrow::float32())), ea);          // 144 floats
+  for (int r = 0; r < 13; ++r)
+    push(arrow::field("hand_" + std::to_string(r), arrow::int32()), finish_i32(*hand[r]));
+  std::shared_ptr<arrow::Array> la, vma, vca;
+  legal.Finish(&la); vmoves.Finish(&vma); vcounts.Finish(&vca);
   push(arrow::field("legal", arrow::list(arrow::int32())), la);          // concrete move ids
   push(arrow::field("visit_moves", arrow::list(arrow::int32())), vma);
   push(arrow::field("visit_counts", arrow::list(arrow::int32())), vca);
@@ -698,22 +743,21 @@ static void write_player_parquet(const std::string &path, const std::vector<Play
 
 static void write_opp_parquet(const std::string &path, const std::vector<OppSample> &v) {
   auto pool = arrow::default_memory_pool();
-  arrow::Int32Builder game_id, turn_idx, opp_size, our_size, target_idx;
+  arrow::Int32Builder game_id, turn_idx, hist_idx, owner_seat, opp_size, our_size, target_idx;
   arrow::FloatBuilder value;
-  arrow::ListBuilder enc(pool, std::make_shared<arrow::FloatBuilder>(pool));
+  std::vector<std::unique_ptr<arrow::Int32Builder>> hand;
+  for (int r = 0; r < 13; ++r) hand.push_back(std::make_unique<arrow::Int32Builder>());
   arrow::ListBuilder legal(pool, std::make_shared<arrow::Int32Builder>(pool));  // head slots
-  auto *enc_v = static_cast<arrow::FloatBuilder *>(enc.value_builder());
   auto *legal_v = static_cast<arrow::Int32Builder *>(legal.value_builder());
 
-  std::array<float, 144> e{};
   std::vector<int> hidx;
   for (const auto &s : v) {
     game_id.Append(s.game_id); turn_idx.Append(s.turn_idx);
+    hist_idx.Append(s.hist_idx); owner_seat.Append(s.observer);
     opp_size.Append(s.opp_size); our_size.Append(s.our_size);
     target_idx.Append(az_opp_head_index(s.move_id));  // head-slot target (no Python map)
     value.Append(s.value);
-    encode_input(s, e.data());
-    enc.Append(); enc_v->AppendValues(e.data(), 144);
+    append_hand(hand, s.hand);
     hidx.clear(); for (int m : s.legal) hidx.push_back(az_opp_head_index(m));  // map once in C++
     legal.Append(); legal_v->AppendValues(hidx.data(), (int64_t)hidx.size());
   }
@@ -725,14 +769,38 @@ static void write_opp_parquet(const std::string &path, const std::vector<OppSamp
   };
   push(arrow::field("game_id", arrow::int32()), finish_i32(game_id));
   push(arrow::field("turn_idx", arrow::int32()), finish_i32(turn_idx));
+  push(arrow::field("hist_idx", arrow::int32()), finish_i32(hist_idx));
+  push(arrow::field("owner_seat", arrow::int32()), finish_i32(owner_seat));
   push(arrow::field("opp_size", arrow::int32()), finish_i32(opp_size));
   push(arrow::field("our_size", arrow::int32()), finish_i32(our_size));
   push(arrow::field("value", arrow::float32()), finish_f32(value));
-  std::shared_ptr<arrow::Array> ea, la;
-  enc.Finish(&ea); legal.Finish(&la);
-  push(arrow::field("enc", arrow::list(arrow::float32())), ea);     // 144 floats
+  for (int r = 0; r < 13; ++r)
+    push(arrow::field("hand_" + std::to_string(r), arrow::int32()), finish_i32(*hand[r]));
+  std::shared_ptr<arrow::Array> la;
+  legal.Finish(&la);
   push(arrow::field("legal", arrow::list(arrow::int32())), la);     // opp head-slot indices
   push(arrow::field("target_idx", arrow::int32()), finish_i32(target_idx));
+  write_table(path, std::move(f), std::move(a));
+}
+
+static void write_games_parquet(const std::string &path, const std::vector<GameRow> &v) {
+  auto pool = arrow::default_memory_pool();
+  arrow::Int32Builder game_id, first_player, winner;
+  arrow::ListBuilder moves(pool, std::make_shared<arrow::Int32Builder>(pool));
+  auto *moves_v = static_cast<arrow::Int32Builder *>(moves.value_builder());
+  for (const auto &g : v) {
+    game_id.Append(g.game_id); first_player.Append(g.first_player);
+    winner.Append(g.winner);
+    moves.Append(); moves_v->AppendValues(g.moves.data(), (int64_t)g.moves.size());
+  }
+  std::vector<std::shared_ptr<arrow::Field>> f;
+  std::vector<std::shared_ptr<arrow::Array>> a;
+  f.push_back(arrow::field("game_id", arrow::int32())); a.push_back(finish_i32(game_id));
+  f.push_back(arrow::field("first_player", arrow::int32())); a.push_back(finish_i32(first_player));
+  f.push_back(arrow::field("winner", arrow::int32())); a.push_back(finish_i32(winner));
+  std::shared_ptr<arrow::Array> ma;
+  moves.Finish(&ma);
+  f.push_back(arrow::field("moves", arrow::list(arrow::int32()))); a.push_back(ma);
   write_table(path, std::move(f), std::move(a));
 }
 
@@ -748,6 +816,7 @@ static const char *arg(int argc, char **argv, const char *key, const char *def) 
 int main(int argc, char **argv) {
   const std::string player_out = arg(argc, argv, "--player-out", "data/az_player.parquet");
   const std::string opp_out = arg(argc, argv, "--opp-out", "data/az_opp.parquet");
+  const std::string games_out = arg(argc, argv, "--games-out", "data/az_games.parquet");
   const std::string player_model = arg(argc, argv, "--player-model", "");
   const std::string opp_model = arg(argc, argv, "--opp-model", "");
   const int games = std::atoi(arg(argc, argv, "--games", "1000"));
@@ -770,25 +839,28 @@ int main(int argc, char **argv) {
 
   std::vector<PlayerSample> ps;
   std::vector<OppSample> os;
+  std::vector<GameRow> gs;
 
   const bool gen0 = player_model.empty() || opp_model.empty();
   if (gen0 && !teacher.empty()) {
     std::printf("[az_selfplay] gen0 teacher self-play (%s, param=%.3g): %d games\n",
                 teacher.c_str(), teacher_param, games);
-    run_classic_selfplay(teacher, teacher_param, games, seed, ps, os);
+    run_classic_selfplay(teacher, teacher_param, games, seed, ps, os, gs);
   } else if (gen0) {
     std::printf("[az_selfplay] gen0 random self-play: %d games\n", games);
-    run_random_selfplay(games, seed, ps, os);
+    run_random_selfplay(games, seed, ps, os, gs);
   } else {
     std::printf("[az_selfplay] NN self-play: %d games, sims=%d, slots=%d, device=%s\n",
                 games, sims, slots, device_str.c_str());
     NNEvaluator nn(player_model, opp_model, device);
-    run_search_selfplay(nn, games, slots, sims, seed, ps, os);
+    run_search_selfplay(nn, games, slots, sims, seed, ps, os, gs);
   }
 
-  std::printf("[az_selfplay] samples: player=%zu opp=%zu -> %s, %s\n",
-              ps.size(), os.size(), player_out.c_str(), opp_out.c_str());
+  std::printf("[az_selfplay] samples: player=%zu opp=%zu games=%zu -> %s, %s, %s\n",
+              ps.size(), os.size(), gs.size(), player_out.c_str(), opp_out.c_str(),
+              games_out.c_str());
   write_player_parquet(player_out, ps);
   write_opp_parquet(opp_out, os);
+  write_games_parquet(games_out, gs);
   return 0;
 }

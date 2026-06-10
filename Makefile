@@ -521,6 +521,22 @@ $(BIN_DIR)/az_compose_gen: $(AZ_COMPOSE_GEN_OBJS)
 az_compose_gen: dirs $(BIN_DIR)/az_compose_gen
 
 # ============================================================================
+# bin/az_tokens_gen — dump per-move card counts (nn/az_token_cards.json)
+# ============================================================================
+
+$(BUILD_DIR)/research/az_tokens_gen.o: research/az_tokens_gen.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+AZ_TOKENS_GEN_OBJS := $(CORE_OBJS) \
+                      $(BUILD_DIR)/research/az_tokens_gen.o
+
+$(BIN_DIR)/az_tokens_gen: $(AZ_TOKENS_GEN_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ $(BIN_DIR)/az_tokens_gen"
+
+az_tokens_gen: dirs $(BIN_DIR)/az_tokens_gen
+
+# ============================================================================
 # bin/az_vs_teacher_agree — az(net+search) vs typed_search move-disagreement dump
 # ============================================================================
 
