@@ -236,6 +236,17 @@ value signal — plausibly *the* reason EXPERIMENT_V1's loop went nowhere and
 this one ties. The bottleneck is value calibration / outcome signal, not
 opponent modeling.
 
+**More-gens test (same evening): negative.** Self-play loop, gens 1–3 vs
+the gen0 champion (1000 paired deals, sims 200 each): 0.483, 0.477, 0.479
+— all flat, gen0 sweeps significantly more in every match, none promoted;
+vs greedy stable at ~0.69–0.70. Three consecutive flat generations with
+memory reproduces EXPERIMENT_V1's ceiling exactly. Gens 4–5 were abandoned
+(concurrent series-level rewrite changed the model interface mid-loop;
+gen4 parquet exists, no model). Conclusion: more generations do not break
+the ceiling. The fix has to change the *learning target*, not the loop —
+hence the series-level (multi-deal match) direction, whose richer score
+signal directly addresses the thin per-deal outcome problem.
+
 ## Next steps
 
 1. ~~**Full-scale gen0**~~ — done (see above). Champion = gen0.
