@@ -129,22 +129,26 @@ struct PlayerSample {
   int game_id, turn_idx;
   int hist_idx;  // moves applied before this decision (sequence readout index)
   std::array<int, 13> hand, opp_max, trick;
+  std::array<int, 13> opp_hand{};  // opponent's EXACT current hand (belief target)
   int opp_size, our_size;
   std::vector<int> legal;
   std::vector<int> visit_moves, visit_counts;
   int mover;
   float value = 0.0f;
+  int margin = 0;  // signed final loser_cards from owner POV (won:+ lost:-)
 };
 
 struct OppSample {
   int game_id, turn_idx;
   int hist_idx;  // moves applied before this decision (sequence readout index)
   std::array<int, 13> hand, opp_max, trick;  // hand = observer's exact hand
+  std::array<int, 13> opp_hand{};  // mover's EXACT current hand (belief target)
   int opp_size, our_size;
   std::vector<int> legal;
   int move_id;
   int observer;
   float value = 0.0f;
+  int margin = 0;  // signed final loser_cards from owner (observer) POV
 };
 
 // One row per finished game: the full applied-move sequence (transformer
@@ -189,6 +193,7 @@ static void record_player_sample(const Game &game, int mover,
   PlayerSample ps;
   ps.game_id = game_id; ps.turn_idx = turn_idx; ps.hist_idx = hist_idx;
   ps.hand = hand;
+  ps.opp_hand = game.player_hand(obs);  // opponent's exact hand (belief target)
   ps.opp_max = opp_max_counts(hand, discard);
   ps.trick = trick_counts(last);
   ps.opp_size = game.get_player_hand_size(obs);
@@ -210,6 +215,7 @@ static void record_opp_sample(const Game &game, int mover, int chosen_move,
   OppSample os;
   os.game_id = game_id; os.turn_idx = turn_idx; os.hist_idx = hist_idx;
   os.hand = ohand;                               // observer's exact hand (NN input)
+  os.opp_hand = game.player_hand(mover);         // mover's exact hand (belief target)
   os.opp_max = opp_max_counts(ohand, discard);  // observer's upper bound on the mover
   os.trick = trick_counts(last);
   os.opp_size = game.get_player_hand_size(mover);   // mover hand size
@@ -256,10 +262,14 @@ static int backfill_values(const Game &game, const int pts[2],
   const float tw =  // P(this game's winner wins the series)
       series ? series_value_after_win(*series, pts[winner], pts[loser], loser_cards)
              : 1.0f;
-  for (std::size_t i = p_from; i < ps.size(); ++i)
+  for (std::size_t i = p_from; i < ps.size(); ++i) {
     ps[i].value = (ps[i].mover == winner) ? tw : 1.0f - tw;
-  for (std::size_t i = o_from; i < os.size(); ++i)
+    ps[i].margin = (ps[i].mover == winner) ? loser_cards : -loser_cards;
+  }
+  for (std::size_t i = o_from; i < os.size(); ++i) {
     os[i].value = (os[i].observer == winner) ? tw : 1.0f - tw;
+    os[i].margin = (os[i].observer == winner) ? loser_cards : -loser_cards;
+  }
   return loser_cards;
 }
 
@@ -775,10 +785,11 @@ static void append_hand(std::vector<std::unique_ptr<arrow::Int32Builder>> &b,
 
 static void write_player_parquet(const std::string &path, const std::vector<PlayerSample> &v) {
   auto pool = arrow::default_memory_pool();
-  arrow::Int32Builder game_id, turn_idx, hist_idx, owner_seat, opp_size, our_size;
+  arrow::Int32Builder game_id, turn_idx, hist_idx, owner_seat, opp_size, our_size, margin;
   arrow::FloatBuilder value;
-  std::vector<std::unique_ptr<arrow::Int32Builder>> hand;
+  std::vector<std::unique_ptr<arrow::Int32Builder>> hand, opp_hand;
   for (int r = 0; r < 13; ++r) hand.push_back(std::make_unique<arrow::Int32Builder>());
+  for (int r = 0; r < 13; ++r) opp_hand.push_back(std::make_unique<arrow::Int32Builder>());
   arrow::ListBuilder legal(pool, std::make_shared<arrow::Int32Builder>(pool));  // concrete ids
   arrow::ListBuilder vmoves(pool, std::make_shared<arrow::Int32Builder>(pool));
   arrow::ListBuilder vcounts(pool, std::make_shared<arrow::Int32Builder>(pool));
@@ -790,8 +801,9 @@ static void write_player_parquet(const std::string &path, const std::vector<Play
     game_id.Append(s.game_id); turn_idx.Append(s.turn_idx);
     hist_idx.Append(s.hist_idx); owner_seat.Append(s.mover);
     opp_size.Append(s.opp_size); our_size.Append(s.our_size);
-    value.Append(s.value);
+    value.Append(s.value); margin.Append(s.margin);
     append_hand(hand, s.hand);
+    append_hand(opp_hand, s.opp_hand);
     legal.Append(); legal_v->AppendValues(s.legal.data(), (int64_t)s.legal.size());
     vmoves.Append(); vmoves_v->AppendValues(s.visit_moves.data(), (int64_t)s.visit_moves.size());
     vcounts.Append(); vcounts_v->AppendValues(s.visit_counts.data(), (int64_t)s.visit_counts.size());
@@ -809,8 +821,11 @@ static void write_player_parquet(const std::string &path, const std::vector<Play
   push(arrow::field("opp_size", arrow::int32()), finish_i32(opp_size));
   push(arrow::field("our_size", arrow::int32()), finish_i32(our_size));
   push(arrow::field("value", arrow::float32()), finish_f32(value));
+  push(arrow::field("margin", arrow::int32()), finish_i32(margin));
   for (int r = 0; r < 13; ++r)
     push(arrow::field("hand_" + std::to_string(r), arrow::int32()), finish_i32(*hand[r]));
+  for (int r = 0; r < 13; ++r)
+    push(arrow::field("opp_hand_" + std::to_string(r), arrow::int32()), finish_i32(*opp_hand[r]));
   std::shared_ptr<arrow::Array> la, vma, vca;
   legal.Finish(&la); vmoves.Finish(&vma); vcounts.Finish(&vca);
   push(arrow::field("legal", arrow::list(arrow::int32())), la);          // concrete move ids
@@ -821,10 +836,11 @@ static void write_player_parquet(const std::string &path, const std::vector<Play
 
 static void write_opp_parquet(const std::string &path, const std::vector<OppSample> &v) {
   auto pool = arrow::default_memory_pool();
-  arrow::Int32Builder game_id, turn_idx, hist_idx, owner_seat, opp_size, our_size, target_idx;
+  arrow::Int32Builder game_id, turn_idx, hist_idx, owner_seat, opp_size, our_size, target_idx, margin;
   arrow::FloatBuilder value;
-  std::vector<std::unique_ptr<arrow::Int32Builder>> hand;
+  std::vector<std::unique_ptr<arrow::Int32Builder>> hand, opp_hand;
   for (int r = 0; r < 13; ++r) hand.push_back(std::make_unique<arrow::Int32Builder>());
+  for (int r = 0; r < 13; ++r) opp_hand.push_back(std::make_unique<arrow::Int32Builder>());
   arrow::ListBuilder legal(pool, std::make_shared<arrow::Int32Builder>(pool));  // head slots
   auto *legal_v = static_cast<arrow::Int32Builder *>(legal.value_builder());
 
@@ -834,8 +850,9 @@ static void write_opp_parquet(const std::string &path, const std::vector<OppSamp
     hist_idx.Append(s.hist_idx); owner_seat.Append(s.observer);
     opp_size.Append(s.opp_size); our_size.Append(s.our_size);
     target_idx.Append(az_opp_head_index(s.move_id));  // head-slot target (no Python map)
-    value.Append(s.value);
+    value.Append(s.value); margin.Append(s.margin);
     append_hand(hand, s.hand);
+    append_hand(opp_hand, s.opp_hand);
     hidx.clear(); for (int m : s.legal) hidx.push_back(az_opp_head_index(m));  // map once in C++
     legal.Append(); legal_v->AppendValues(hidx.data(), (int64_t)hidx.size());
   }
@@ -852,8 +869,11 @@ static void write_opp_parquet(const std::string &path, const std::vector<OppSamp
   push(arrow::field("opp_size", arrow::int32()), finish_i32(opp_size));
   push(arrow::field("our_size", arrow::int32()), finish_i32(our_size));
   push(arrow::field("value", arrow::float32()), finish_f32(value));
+  push(arrow::field("margin", arrow::int32()), finish_i32(margin));
   for (int r = 0; r < 13; ++r)
     push(arrow::field("hand_" + std::to_string(r), arrow::int32()), finish_i32(*hand[r]));
+  for (int r = 0; r < 13; ++r)
+    push(arrow::field("opp_hand_" + std::to_string(r), arrow::int32()), finish_i32(*opp_hand[r]));
   std::shared_ptr<arrow::Array> la;
   legal.Finish(&la);
   push(arrow::field("legal", arrow::list(arrow::int32())), la);     // opp head-slot indices

@@ -171,6 +171,13 @@ class Big2NetSeqAZ(nn.Module):
         self.policy_head = PolicyHead(256, PLAYER_HEAD_DIM)
         self.behavior_head = PolicyHead(256, OPP_HEAD_DIM)
         self.qa_head = PerMoveValueHead(256, OPP_HEAD_DIM)
+        # Auxiliary TRAINING-ONLY heads (shared trunk regularisers; not in the
+        # scripted C++ surface). margin: tanh, signed final loser_cards / 16 from
+        # owner POV — a denser, lower-noise value signal than win/loss. opp_hand:
+        # 48-dim thermometer logits for the opponent's EXACT hand — supervises the
+        # imperfect-info belief the game hinges on. See train_az_seq aux losses.
+        self.margin_head = nn.Linear(256, 1)
+        self.opp_hand_head = nn.Linear(256, ENCODING_DIM)
 
     # -- trunk pieces -------------------------------------------------------
 
@@ -300,6 +307,25 @@ class Big2NetSeqAZ(nn.Module):
         mpts: torch.Tensor,  # [B] float owner series points (/50)
         opts: torch.Tensor,  # [B] float opponent series points (/50)
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        x = self._readout_x(h, hand, oppmax, osz, usz, otm, mpts, opts)
+        value = self.value_head(x)
+        policy = self.policy_head(x)
+        behavior = self.behavior_head(x)
+        qa = self.qa_head(x)
+        return value, policy, behavior, qa
+
+    def _readout_x(
+        self,
+        h: torch.Tensor,
+        hand: torch.Tensor,
+        oppmax: torch.Tensor,
+        osz: torch.Tensor,
+        usz: torch.Tensor,
+        otm: torch.Tensor,
+        mpts: torch.Tensor,
+        opts: torch.Tensor,
+    ) -> torch.Tensor:
+        """Shared readout trunk features [B, 256] (heads applied by callers)."""
         hh = F.mish(self.layer_a(hand))
         hh = F.mish(self.layer_b_hands(hh))
         hh = F.mish(self.layer_c_player(hh))  # [B, 128]
@@ -311,12 +337,31 @@ class Big2NetSeqAZ(nn.Module):
         )  # [B,16]
         x = torch.cat([h, hh, oo, ss], dim=-1)
         x = self.junction_norm(F.selu(self.junction(x)))
-        x = self.trunk(x)
+        return self.trunk(x)
+
+    @torch.jit.ignore
+    def readout_train(
+        self,
+        h: torch.Tensor,
+        hand: torch.Tensor,
+        oppmax: torch.Tensor,
+        osz: torch.Tensor,
+        usz: torch.Tensor,
+        otm: torch.Tensor,
+        mpts: torch.Tensor,
+        opts: torch.Tensor,
+    ):
+        """Eager-only training readout: the 4 scripted heads PLUS the auxiliary
+        margin (tanh, [B]) and opp-hand belief logits ([B, 48]). Not part of the
+        TorchScript surface — C++ never calls it."""
+        x = self._readout_x(h, hand, oppmax, osz, usz, otm, mpts, opts)
         value = self.value_head(x)
         policy = self.policy_head(x)
         behavior = self.behavior_head(x)
         qa = self.qa_head(x)
-        return value, policy, behavior, qa
+        margin = torch.tanh(self.margin_head(x)).squeeze(-1)  # [B] in [-1, 1]
+        opp_hand = self.opp_hand_head(x)  # [B, 48] thermometer logits
+        return value, policy, behavior, qa, margin, opp_hand
 
     def forward(
         self,

@@ -170,6 +170,18 @@ class SeqData:
             .to_numpy()[keep]
             .astype(np.int8),
         }
+        # Auxiliary targets (margin + opponent's exact hand). Absent in legacy
+        # parquets; sentinel-filled so the loader can mask them out.
+        if "margin" in df.columns:
+            d["margin"] = df["margin"].to_numpy()[keep].astype(np.float32)
+            d["opp_hand"] = (
+                df[[f"opp_hand_{r}" for r in range(13)]].to_numpy()[keep].astype(np.int8)
+            )
+            d["has_aux"] = np.ones(int(keep.sum()), dtype=np.float32)
+        else:
+            d["margin"] = np.zeros(int(keep.sum()), dtype=np.float32)
+            d["opp_hand"] = np.zeros((int(keep.sum()), 13), dtype=np.int8)
+            d["has_aux"] = np.zeros(int(keep.sum()), dtype=np.float32)
         lflat, loff = _ragged_np(t.column("legal").chunk(0))
         d["legal_flat"], d["legal_off"] = _sub_ragged(lflat, loff, keep)
         if player:
@@ -430,6 +442,9 @@ class SeqLoader:
                 p_value=self.p["value"][sidx],
                 p_mask=mask,
                 p_policy=policy,
+                p_margin=self.p["margin"][sidx] / 16.0,
+                p_opp_hand=encode_thermo_t(self.p["opp_hand"][sidx]),
+                p_haux=self.p["has_aux"][sidx],
             )
             # opp rows
             sidx, local = self._sample_rows(self.o, grows)
@@ -453,6 +468,9 @@ class SeqLoader:
                 o_value=self.o["value"][sidx],
                 o_mask=mask,
                 o_target=target,
+                o_margin=self.o["margin"][sidx] / 16.0,
+                o_opp_hand=encode_thermo_t(self.o["opp_hand"][sidx]),
+                o_haux=self.o["has_aux"][sidx],
             )
             yield batch
 

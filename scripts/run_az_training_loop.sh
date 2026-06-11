@@ -172,18 +172,20 @@ for GEN in $(seq "$START" "$END"); do
         VCSV=$(pf "$SERIES_V" "$GEN")
         echo "  [0/4] Estimate series chain → $VCSV (shrink-k=$SHRINK_K)..." | tee_log
         CHAIN_ARGS=()
-        prevGD=$(pf "$GAMES_DATA" $((GEN - 1)))
-        [[ -f "$prevGD" ]] && CHAIN_ARGS+=(--games "$prevGD")
-        prevOUT=$(pf "$EVAL_OUTCOMES" $((GEN - 1)))
-        [[ -f "$prevOUT" ]] && CHAIN_ARGS+=(--outcomes "$prevOUT")
-        # Bootstrap-global when there is no prior series table to specialise from
-        # (the previous gen's games may also predate the series schema).
         BOOT=""
-        [[ ! -f "$(pf "$SERIES_V" $((GEN - 1)))" ]] && BOOT="--bootstrap-global"
-        if [[ ${#CHAIN_ARGS[@]} -eq 0 ]]; then
-            # No champion data yet: seed from all existing games parquets.
-            for f in data/az_games_gen*.parquet; do CHAIN_ARGS+=(--games "$f"); done
+        if [[ ! -f "$(pf "$SERIES_V" $((GEN - 1)))" ]]; then
+            # Transition / cold start: no prior series table to specialise from.
+            # Pool ALL existing games (incl. the teacher gen0) for a big,
+            # state-independent outcome estimate.
             BOOT="--bootstrap-global"
+            for f in data/az_games_gen*.parquet; do CHAIN_ARGS+=(--games "$f"); done
+        else
+            # Warm: specialise per-state from the champion's recent games + the
+            # last eval's per-game outcome dump.
+            prevGD=$(pf "$GAMES_DATA" $((GEN - 1)))
+            [[ -f "$prevGD" ]] && CHAIN_ARGS+=(--games "$prevGD")
+            prevOUT=$(pf "$EVAL_OUTCOMES" $((GEN - 1)))
+            [[ -f "$prevOUT" ]] && CHAIN_ARGS+=(--outcomes "$prevOUT")
         fi
         uv run python analysis/series_markov.py "${CHAIN_ARGS[@]}" \
             --out "$VCSV" --shrink-k "$SHRINK_K" $BOOT --gen "$GEN" 2>&1 | tee_log
@@ -215,9 +217,11 @@ for GEN in $(seq "$START" "$END"); do
     done
     T0=$(date +%s)
     # shellcheck disable=SC2086
+    # Warm-start from the current champion so each gen refines it rather than
+    # relearning play from random init (the teacher knowledge lives in gen0).
     uv run python -m nn.train_az_seq \
         --games-data $GAMES_FILES --player-data $PLAYER_FILES --opp-data $OPP_FILES \
-        --out "$M" \
+        --out "$M" --init models/az_seq.pt \
         --epochs "$EPOCHS" --batch-games "$BATCH_GAMES" --mix-decay "$MIX_DECAY" \
         $TRAIN_SERIES \
         2>&1 | grep -E '\[seq\]' | tee_log

@@ -55,7 +55,7 @@ def _gather_h(H: torch.Tensor, local: torch.Tensor, hist: torch.Tensor):
     return H[local, hist]
 
 
-def _step(model, C, batch, no_memory=False):
+def _step(model, C, batch, no_memory=False, lam_margin=1.0, lam_ohand=1.0):
     """Forward + the four losses for one game-batch. Returns (loss, parts, ns).
 
     no_memory: zero the trunk hidden before the junction — an apples-to-apples
@@ -80,7 +80,7 @@ def _step(model, C, batch, no_memory=False):
     )
     mpts = torch.cat([batch["p_mpts"], batch["o_mpts"]])
     opts = torch.cat([batch["p_opts"], batch["o_opts"]])
-    value, policy, behavior, qa = model.readout(
+    value, policy, behavior, qa, margin, opp_hand = model.readout_train(
         h, hand, oppm, osz, usz, otm, mpts, opts
     )
 
@@ -112,8 +112,20 @@ def _step(model, C, batch, no_memory=False):
         wo,
     )
 
-    loss = loss_v + loss_p + loss_b + loss_q
-    return loss, (loss_v, loss_p, loss_b, loss_q), (n_p, n_o)
+    # Auxiliary (shared-trunk) targets over ALL rows. Weighted by the natural-
+    # frequency weight AND has_aux (0 for legacy parquets w/o the columns), so
+    # mixing old data is safe — those rows contribute no aux gradient.
+    mtgt = torch.cat([batch["p_margin"], batch["o_margin"]])
+    otgt_hand = torch.cat([batch["p_opp_hand"], batch["o_opp_hand"]])
+    waux = torch.cat([wp * batch["p_haux"], wo * batch["o_haux"]])
+    loss_m = _wmean((margin - mtgt) ** 2, waux)
+    loss_oh = _wmean(
+        F.binary_cross_entropy_with_logits(opp_hand, otgt_hand, reduction="none").mean(-1),
+        waux,
+    )
+
+    loss = loss_v + loss_p + loss_b + loss_q + lam_margin * loss_m + lam_ohand * loss_oh
+    return loss, (loss_v, loss_p, loss_b, loss_q, loss_m, loss_oh), (n_p, n_o)
 
 
 def train(cfg) -> None:
@@ -144,6 +156,33 @@ def train(cfg) -> None:
         n_heads=cfg.heads,
         d_ff=cfg.d_ff,
     ).to(device)
+    if cfg.init:
+        # Warm-start from a TorchScript checkpoint (the champion): inherit the
+        # teacher-bootstrapped weights instead of restarting from random init,
+        # so each generation refines the champion rather than relearning play.
+        src = torch.jit.load(cfg.init, map_location=device)
+        sd = dict(src.state_dict())
+        msd = model.state_dict()
+        copied = 0
+        for k in msd:
+            if k in sd and sd[k].shape == msd[k].shape:
+                msd[k] = sd[k]
+                copied += 1
+        missing = [k for k in msd if k not in sd or sd[k].shape != msd[k].shape]
+        # New aux heads (margin/opp_hand) are absent from a pre-aux champion —
+        # they stay randomly initialised. Only fail if a CORE (non-aux) tensor
+        # didn't transfer, which would mean a real architecture mismatch.
+        core_missing = [k for k in missing if "margin_head" not in k and "opp_hand_head" not in k]
+        if core_missing:
+            raise SystemExit(
+                f"--init core shape/key mismatch ({copied}/{len(msd)}): {core_missing[:5]}"
+            )
+        model.load_state_dict(msd)
+        model.to(device)
+        print(
+            f"[seq] warm-start from {cfg.init}: {copied}/{len(msd)} tensors"
+            + (f" ({len(missing)} aux heads random-init)" if missing else "")
+        )
     C = load_compose_matrix().to(device)
     opt = _make_optim(model, cfg.lr, cfg.weight_decay)
     sched, per_batch = _make_sched(opt, cfg, cfg.epochs * len(tl))
@@ -152,7 +191,7 @@ def train(cfg) -> None:
     for epoch in range(1, cfg.epochs + 1):
         model.train()
         for batch in tl:
-            loss, _, _ = _step(model, C, batch, cfg.no_memory)
+            loss, _, _ = _step(model, C, batch, cfg.no_memory, cfg.lam_margin, cfg.lam_ohand)
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -161,27 +200,35 @@ def train(cfg) -> None:
                 sched.step()
 
         model.eval()
-        sums = [0.0] * 4
+        # per-row-weighted sums: value/policy/margin/opp_hand over player+opp rows,
+        # behavior/qa over opp rows (n = n_p + n_o for the all-row aux heads).
+        sums = [0.0] * 6
         nps = nos = 0
         with torch.no_grad():
             for batch in vl:
-                _, parts, (n_p, n_o) = _step(model, C, batch, cfg.no_memory)
-                lv, lp, lb, lq = (float(x) for x in parts)
+                _, parts, (n_p, n_o) = _step(
+                    model, C, batch, cfg.no_memory, cfg.lam_margin, cfg.lam_ohand
+                )
+                lv, lp, lb, lq, lm, loh = (float(x) for x in parts)
                 sums[0] += lv * n_p
                 sums[1] += lp * n_p
                 sums[2] += lb * n_o
                 sums[3] += lq * n_o
+                sums[4] += lm * (n_p + n_o)
+                sums[5] += loh * (n_p + n_o)
                 nps += n_p
                 nos += n_o
         vv, vp = sums[0] / max(nps, 1), sums[1] / max(nps, 1)
         vb, vq = sums[2] / max(nos, 1), sums[3] / max(nos, 1)
+        vm, voh = sums[4] / max(nps + nos, 1), sums[5] / max(nps + nos, 1)
         blended = vv + vp + vb + vq
         mon = vp + vb if cfg.ckpt_metric == "head" else blended
         if not per_batch:
             sched.step(mon)
         print(
             f"[seq] epoch {epoch}/{cfg.epochs}  val={blended:.4f} "
-            f"[v={vv:.3f} p={vp:.3f} b={vb:.3f} q={vq:.3f}]  lr={_cur_lr(opt):.2e}"
+            f"[v={vv:.3f} p={vp:.3f} b={vb:.3f} q={vq:.3f}]  "
+            f"aux[margin={vm:.4f} ohand={voh:.4f}]  lr={_cur_lr(opt):.2e}"
         )
         if mon < best:
             best = mon
@@ -221,10 +268,28 @@ def main() -> None:
     p.add_argument("--lr-floor", type=float, default=1e-6)
     p.add_argument("--mix-decay", type=float, default=1.0)
     p.add_argument(
+        "--init",
+        default="",
+        help="warm-start from this TorchScript checkpoint (e.g. the champion) "
+        "instead of training from random init",
+    )
+    p.add_argument(
         "--series-v",
         default="",
         help="series V/natural-freq CSV; enables natural-frequency sample "
         "weights (and is the series-objective companion to az_selfplay --series-v)",
+    )
+    p.add_argument(
+        "--lam-margin",
+        type=float,
+        default=1.0,
+        help="weight on the auxiliary margin-regression loss (0 disables)",
+    )
+    p.add_argument(
+        "--lam-ohand",
+        type=float,
+        default=1.0,
+        help="weight on the auxiliary opponent-hand-belief loss (0 disables)",
     )
     p.add_argument("--weight-decay", type=float, default=1e-5)
     p.add_argument("--grad-clip", type=float, default=0.5)

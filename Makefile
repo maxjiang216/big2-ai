@@ -453,6 +453,25 @@ $(BIN_DIR)/eval_az_series: $(EVAL_AZ_SERIES_OBJS)
 eval_az_series: dirs $(BIN_DIR)/eval_az_series
 
 # ============================================================================
+# bin/az_regret — policy-improvement regret probe (needs LibTorch+Arrow)
+# ============================================================================
+
+$(BUILD_DIR)/src/datagen/az_regret.o: src/datagen/az_regret.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
+
+AZ_REGRET_OBJS := $(CORE_OBJS) \
+                  $(BUILD_DIR)/src/simulation/game_simulator.o \
+                  $(TYPED_SEARCH_OBJS) \
+                  $(AZ_SEARCH_OBJS) \
+                  $(BUILD_DIR)/src/datagen/az_regret.o
+
+$(BIN_DIR)/az_regret: $(AZ_REGRET_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS_TORCH)
+	@echo "✓ $(BIN_DIR)/az_regret"
+
+az_regret: dirs $(BIN_DIR)/az_regret
+
+# ============================================================================
 # bin/az_nn_check — cross-check C++ NN inference vs Python (needs LibTorch)
 # ============================================================================
 
