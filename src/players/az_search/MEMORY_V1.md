@@ -201,6 +201,41 @@ different, smaller self-play data and is not a clean control).
 The `--no-memory` model (`models/az_seq_gen0_nomem.pt`) is a diagnostic
 artifact, not a champion. Champion = memory-on gen0 (`models/az_seq.pt`).
 
+## Strength evals + the real bottleneck (2026-06-10)
+
+All evals: 1000 paired deals ×2, sims 200, new search core both sides.
+
+| match | A wins | Wilson 95% CI | verdict |
+|---|---|---|---|
+| gen0(memory) vs old two-net champion (legacy-b) | 0.512 | [0.491, 0.534] | tie (sweeps lean A 140:115, n.s.) |
+| gen1 vs gen0 (one self-play gen, 20k games sims-200) | 0.483 | [0.461, 0.505] | no improvement |
+
+So the −0.131-nats prediction gain did NOT convert to strength, and one
+self-play generation didn't move it either (EXPERIMENT_V1's pattern again).
+
+**Cross-distribution diagnostic** (`analysis/az_xdist_behavior.py`: score
+gen0's heads on gen1 NN-self-play data it never trained on):
+
+| head | gen0 on own dist | gen0 on gen1 (unseen opponent) |
+|---|---|---|
+| behavior | 2.349 | 2.398 (+0.05 — generalizes fine) |
+| value | 0.487 | **1.027** (above the 0.693 coin-flip ceiling) |
+| q_a | 0.468 | **1.031** |
+
+The behavior head transfers across opponent policies — memory learned
+opponent-reading, not teacher quirks. The lesion is **value/q_a off
+distribution**: confidently *wrong* (not merely uncertain) on positions
+arising from NN-search play. Search backups lean on value/q_a far more than
+on the opp prior, so both eval sides navigate with miscalibrated values and
+memory's prediction edge washes out.
+
+Structural suspicion: between equal-strength players the outcome is nearly
+a coin flip dominated by card luck (gen1's value trained on its own data
+only reaches 0.639, barely under 0.693), so self-play outcomes carry thin
+value signal — plausibly *the* reason EXPERIMENT_V1's loop went nowhere and
+this one ties. The bottleneck is value calibration / outcome signal, not
+opponent modeling.
+
 ## Next steps
 
 1. ~~**Full-scale gen0**~~ — done (see above). Champion = gen0.
