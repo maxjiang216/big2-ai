@@ -591,6 +591,72 @@ void test_advance_root_gc() {
   assert(run_and_advance(123u) == run_and_advance(123u));  // GC preserves determinism
 }
 
+void test_series_values() {
+  // Monotone synthetic V table (increasing in a, decreasing in b).
+  SeriesTable tbl;
+  for (int a = 0; a < kSeriesTarget; ++a)
+    for (int b = 0; b < kSeriesTarget; ++b)
+      tbl.v[a][b] = 0.4f + 0.004f * a - 0.003f * b;
+  tbl.loaded = true;
+  SearchConfig cfg{1.5f, 64, 0, true};
+  cfg.series = &tbl;
+
+  // Forced win: single '2' lead, opp holds 8 cards, scoring p=8. my_pts=10,
+  // opp_pts=5 -> winner total 18 < 50 -> root value = V(18, 5).
+  SearchState root{counts({{12, 1}}), 8, {}, kPASS, kUs};
+  root.my_pts = 10;
+  root.opp_pts = 5;
+  Search search(root, {}, cfg);
+  StubEval ev;
+  search.run(ev);
+  assert(std::abs(search.root_value() - series_value_after_win(tbl, 10, 5, 8)) <
+         1e-5);
+  assert(search.best_move() == kSINGLE_START + 12);
+
+  // Series-ending win: opp holds 16 cards (p=50); my_pts=10 -> 60 >= 50 -> 1.0.
+  SearchState root2{counts({{12, 1}}), 16, {}, kPASS, kUs};
+  root2.my_pts = 10;
+  Search s2(root2, {}, cfg);
+  StubEval ev2;
+  s2.run(ev2);
+  assert(std::abs(s2.root_value() - 1.0f) < 1e-6);
+
+  // Opp-wins terminal mirror: opp already emptied (opp_size 0); we hold 7 cards.
+  // value(P we win series) = 1 - V_after_win(opp_pts=20, my_pts=5, 7 cards).
+  SearchState lost{counts({{0, 4}, {1, 3}}), 0, {}, kPASS, kUs};
+  lost.my_pts = 5;
+  lost.opp_pts = 20;
+  Search s3(lost, {}, cfg);
+  float exp_loss = 1.0f - series_value_after_win(tbl, 20, 5, 7);
+  assert(std::abs(s3.root_value() - exp_loss) < 1e-5);
+
+  // Legacy path (null series table) keeps 1/0 terminal values.
+  SearchState win_legacy{counts({{12, 1}}), 8, {}, kPASS, kUs};
+  Search s4(win_legacy, {}, {1.5f, 64});
+  StubEval ev4;
+  s4.run(ev4);
+  assert(std::abs(s4.root_value() - 1.0f) < 1e-6);
+}
+
+void test_opp1_series_pin() {
+  // No-straight opp1 hand (pair of 5s + single K), opp has 1 card, lead.
+  // az_definitive_move pins the series oracle's move (the pair, combos first).
+  SearchState s{counts({{2, 2}, {10, 1}}), 1, {}, kPASS, kUs};
+  auto m = az_definitive_move(s, /*allow_forced_win=*/false);
+  assert(m && *m == opp1_series_move(s.our_hand));
+  assert(Move(*m).combination == Move::Combination::kDouble);
+
+  // A straight-holding opp1 hand is NOT pinned by the opp1 oracle (it falls
+  // through to search). Hand 3-4-5-6-7 (a straight) plus an isolated J: the
+  // straight is not hand-emptying (J left over) and there is no other definitive
+  // move, so with allow_forced_win=false az_definitive_move returns none.
+  SearchState st{counts({{0, 1}, {1, 1}, {2, 1}, {3, 1}, {4, 1}, {8, 1}}), 1,
+                 {}, kPASS, kUs};
+  assert(hand_has_straight_lead(st.our_hand));
+  auto m2 = az_definitive_move(st, /*allow_forced_win=*/false);
+  assert(!m2);
+}
+
 }  // namespace
 
 void run_az_search_tests() {
@@ -614,4 +680,6 @@ void run_az_search_tests() {
   test_play_mode_is_seed_independent();
   test_advance_root_reuse();
   test_advance_root_gc();
+  test_series_values();
+  test_opp1_series_pin();
 }

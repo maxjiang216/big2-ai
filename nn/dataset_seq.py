@@ -96,7 +96,7 @@ class SeqData:
         validate: bool = True,
     ) -> None:
         mc = _move_cards()
-        g_tok, g_len, g_first, g_win = [], [], [], []
+        g_tok, g_len, g_first, g_win, g_pts = [], [], [], [], []
         p_parts, o_parts = [], []
         base = 0
         for i, (gp, pp, op) in enumerate(triples):
@@ -118,6 +118,18 @@ class SeqData:
             g_len.append(lens)
             g_first.append(gt.column("first_player").chunk(0).to_numpy()[keep])
             g_win.append(gt.column("winner").chunk(0).to_numpy()[keep])
+            cols = set(gt.schema.names)
+            if "pts0" in cols and "pts1" in cols:
+                pts = np.stack(
+                    [
+                        gt.column("pts0").chunk(0).to_numpy()[keep],
+                        gt.column("pts1").chunk(0).to_numpy()[keep],
+                    ],
+                    axis=1,
+                )  # [G, 2] seat-indexed series points at game start
+            else:
+                pts = np.zeros((int(keep.sum()), 2), dtype=np.int64)  # legacy data
+            g_pts.append(pts)
             # game_id -> merged game row for THIS file's samples
             row_of_gid = {int(g): base + j for j, g in enumerate(gid[kept_rows])}
             p_parts.append(self._load_samples(pp, row_of_gid, player=True))
@@ -128,6 +140,8 @@ class SeqData:
         self.glen = torch.from_numpy(np.concatenate(g_len).astype(np.int64))
         self.first_player = torch.from_numpy(np.concatenate(g_first).astype(np.int64))
         self.winner = torch.from_numpy(np.concatenate(g_win).astype(np.int64))
+        self.pts = torch.from_numpy(np.concatenate(g_pts).astype(np.int64))  # [G, 2]
+        self.game_w = torch.ones(self.tokens.shape[0], dtype=torch.float32)  # [G]
         self.G = self.tokens.shape[0]
         self.p = self._merge(p_parts, player=True)
         self.o = self._merge(o_parts, player=False)
@@ -244,6 +258,36 @@ class SeqData:
                 np.int64
             )
 
+    def compute_game_weights(self, v_csv_path: str) -> None:
+        """Per-game importance weights so the (state-diversified) selfplay sample
+        distribution is reweighted toward the chain's NATURAL start-state
+        frequencies. Keyed by leader-perspective (a, b) = (pts[first_player],
+        pts[other]); w_g = natural_freq(a,b) / empirical_freq(a,b in this
+        dataset). Using the dataset's own empirical frequencies makes the weights
+        correct for any sampling mixture and recomputable without regenerating
+        data. Clipped to [0.1, 10] and normalised to mean 1."""
+        natural = np.zeros((50, 50), dtype=np.float64)
+        with open(v_csv_path) as f:
+            for line in f:
+                if not line or line[0] == "#" or line[0] < "0" or line[0] > "9":
+                    continue
+                a, b, _v, nat = line.strip().split(",")
+                natural[int(a), int(b)] = float(nat)
+        pts = self.pts.numpy()
+        fp = self.first_player.numpy()
+        a = pts[np.arange(self.G), fp]
+        b = pts[np.arange(self.G), 1 - fp]
+        a = np.clip(a, 0, 49)
+        b = np.clip(b, 0, 49)
+        # Empirical count of games per (a, b) in this dataset.
+        counts = np.zeros((50, 50), dtype=np.float64)
+        np.add.at(counts, (a, b), 1.0)
+        emp = counts[a, b]  # >= 1 (each game contributes its own state)
+        w = natural[a, b] / np.maximum(emp, 1.0)
+        w = np.clip(w, 0.1, 10.0)
+        w = w / max(w.mean(), 1e-8)
+        self.game_w = torch.from_numpy(w.astype(np.float32))
+
 
 def _within(lens: np.ndarray) -> np.ndarray:
     """[sum(lens)] 0..len_i-1 ramps, vectorised."""
@@ -291,6 +335,8 @@ class SeqLoader:
         self.shuffle = shuffle
         self.tokens = data.tokens.to(device)
         self.glen = data.glen.to(device)
+        self.pts = data.pts.to(device)          # [G, 2] seat-indexed series points
+        self.game_w = data.game_w.to(device)    # [G] importance weight per game
         self.p = {k: _to_dev(v, device) for k, v in data.p.items()}
         self.o = {k: _to_dev(v, device) for k, v in data.o.items()}
         self.n_p = self._count(self.p)  # sample rows in THIS split's games
@@ -330,11 +376,20 @@ class SeqLoader:
     def _side_inputs(self, d, sidx):
         hand48 = encode_exact_t(d["hand"][sidx])
         opp48 = encode_thermo_t(d["oppmax"][sidx])
+        grow = d["grow"][sidx]
+        owner = d["owner"][sidx]
+        # Owner-relative series points (the NN input is from the hand owner's POV).
+        mpts = self.pts[grow, owner].float() / 50.0
+        opts = self.pts[grow, 1 - owner].float() / 50.0
+        w = self.game_w[grow]
         return (
             hand48,
             opp48,
             d["osz"][sidx] / 16.0,
             d["usz"][sidx] / 16.0,
+            mpts,
+            opts,
+            w,
         )
 
     def __iter__(self):
@@ -361,7 +416,7 @@ class SeqLoader:
             _, pc = self._gather_ragged(self.p["vc_flat"], self.p["vm_off"], sidx)
             policy.index_put_((pr, pm), pc.float(), accumulate=True)
             policy /= policy.sum(1, keepdim=True).clamp_min(1.0)  # value-only -> 0
-            h48, o48, osz, usz = self._side_inputs(self.p, sidx)
+            h48, o48, osz, usz, mpts, opts, w = self._side_inputs(self.p, sidx)
             batch.update(
                 p_local=local,
                 p_hist=self.p["hist"][sidx],
@@ -369,6 +424,9 @@ class SeqLoader:
                 p_opp=o48,
                 p_osz=osz,
                 p_usz=usz,
+                p_mpts=mpts,
+                p_opts=opts,
+                p_w=w,
                 p_value=self.p["value"][sidx],
                 p_mask=mask,
                 p_policy=policy,
@@ -381,7 +439,7 @@ class SeqLoader:
             mask[r, v] = True
             target = self.o["target"][sidx]
             mask[torch.arange(no, device=self.dev), target] = True
-            h48, o48, osz, usz = self._side_inputs(self.o, sidx)
+            h48, o48, osz, usz, mpts, opts, w = self._side_inputs(self.o, sidx)
             batch.update(
                 o_local=local,
                 o_hist=self.o["hist"][sidx],
@@ -389,6 +447,9 @@ class SeqLoader:
                 o_opp=o48,
                 o_osz=osz,
                 o_usz=usz,
+                o_mpts=mpts,
+                o_opts=opts,
+                o_w=w,
                 o_value=self.o["value"][sidx],
                 o_mask=mask,
                 o_target=target,
@@ -410,9 +471,14 @@ def make_seq_split(
     seed: int = 0,
     mix_decay: float = 1.0,
     validate: bool = True,
+    series_v: str | None = None,
 ) -> tuple[SeqLoader, SeqLoader]:
-    """(train_loader, val_loader) split by GAME over the merged dataset."""
+    """(train_loader, val_loader) split by GAME over the merged dataset. When
+    series_v is given, per-game natural-frequency importance weights are attached
+    (else all weights are 1)."""
     data = SeqData(triples, mix_decay=mix_decay, seed=seed, validate=validate)
+    if series_v:
+        data.compute_game_weights(series_v)
     rng = np.random.default_rng(seed)
     perm = rng.permutation(data.G)
     n_val = max(1, int(data.G * val_frac))

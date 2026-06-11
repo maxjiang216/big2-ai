@@ -65,6 +65,8 @@ def main():
                 torch.tensor([osz / 16.0]),
                 torch.tensor([usz / 16.0]),
                 torch.tensor([otm]),
+                torch.tensor([0.0]),  # my_pts/50
+                torch.tensor([0.0]),  # opp_pts/50
             )
         p, b, q = pol[0], beh[0], qa[0]
         print(

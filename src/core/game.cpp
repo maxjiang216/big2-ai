@@ -43,6 +43,8 @@ void Game::shuffle_deal(std::mt19937 &rng) {
 
 int Game::current_player() const { return current_player_; }
 
+void Game::set_first_player(int player) { current_player_ = player; }
+
 bool Game::is_over() const {
   return hand_size_[0] == 0 || hand_size_[1] == 0;
 }

@@ -2,7 +2,7 @@
 
 #include "considered_moves.h"
 #include "features.h"
-#include "tablebase_opp1.h"
+#include "series.h"
 #include "typed_search/move_grouping.h"
 
 #include <algorithm>
@@ -73,27 +73,14 @@ void normalize_forced_pass(SearchState &s) {
 // ---------------------------------------------------------------------------
 
 // opp-has-1-card endgame line (lead position only). Returns a move id or none.
+// Series-optimal greedy shed (series.h:opp1_series_move), valid only when the
+// hand has no legal straight lead — straight-holding hands fall through to
+// ordinary search. (The old straight-prefix tablebase optimised for winning,
+// not for minimising our remaining cards when losing, so it is no longer used.)
 static std::optional<int> opp1_move(const SearchState &s) {
   if (s.opp_size != 1 || s.last_move != kPASS) return std::nullopt;
-  auto legal = compute_legal_moves(s.our_hand, Move(kPASS));
-  // All singles -> play the highest single.
-  int best_rank = -1;
-  bool all_singles = true;
-  for (int mid : legal) {
-    Move m(mid);
-    if (m.combination != Move::Combination::kSingle) { all_singles = false; break; }
-    if (m.rank > best_rank) best_rank = m.rank;
-  }
-  if (all_singles && best_rank != -1)
-    return encodeMove(Move(Move::Combination::kSingle, best_rank));
-
-  Opp1Result o = lookup_opp1(s.our_hand);
-  if (o.first_move_id != 0) {
-    for (int mid : legal)
-      if (mid == o.first_move_id) return mid;
-  }
-  if (auto def = opp1_default_strategy_move(s.our_hand)) return *def;
-  return std::nullopt;
+  if (hand_has_straight_lead(s.our_hand)) return std::nullopt;
+  return opp1_series_move(s.our_hand);
 }
 
 bool az_is_forced_win(const SearchState &s, int &first_move) {
@@ -145,11 +132,27 @@ Node *Search::alloc_node(const SearchState &s) {
   return n;
 }
 
+float Search::win_value(const SearchState &s) const {
+  if (!cfg_.series) return 1.0f;
+  // Root player wins; opponent is the loser holding s.opp_size cards.
+  return series_value_after_win(*cfg_.series, s.my_pts, s.opp_pts, s.opp_size);
+}
+
+float Search::loss_value(const SearchState &s) const {
+  if (!cfg_.series) return 0.0f;
+  // Opponent wins; root player is the loser holding hand_size(our_hand) cards.
+  // P(root wins series) = 1 - P(opponent wins series after their win).
+  return 1.0f - series_value_after_win(*cfg_.series, s.opp_pts, s.my_pts,
+                                       hand_size(s.our_hand));
+}
+
 void Search::finalize_terminal(Node *n) {
   if (hand_size(n->st.our_hand) == 0) {
-    n->terminal = true; n->expanded = true; n->nn_value = n->value = 1.0f;
+    n->terminal = true; n->expanded = true;
+    n->nn_value = n->value = win_value(n->st);
   } else if (n->st.opp_size == 0) {
-    n->terminal = true; n->expanded = true; n->nn_value = n->value = 0.0f;
+    n->terminal = true; n->expanded = true;
+    n->nn_value = n->value = loss_value(n->st);
   }
 }
 
@@ -167,7 +170,9 @@ void Search::expand_player(Node *n, const float *logits) {
   }
   if (win != -1) {
     n->terminal = true; n->forced_win_move = win;
-    n->nn_value = n->value = 1.0f;
+    // All hand-emptying moves leave the opponent at the same opp_size, so the
+    // series value is identical regardless of which one we pick.
+    n->nn_value = n->value = win_value(n->st);
     return;
   }
 
@@ -421,6 +426,8 @@ LeafRequest Search::select_leaf() {
       req.feat.opp_size = cur->st.opp_size;
       req.feat.our_size = hand_size(cur->st.our_hand);
       req.feat.owner_to_move = (cur->st.side == kUs);
+      req.feat.my_pts = cur->st.my_pts;   // owner is always the root player
+      req.feat.opp_pts = cur->st.opp_pts;
       req.feat.path_tokens = path_tokens_;
       return req;
     }
@@ -490,7 +497,9 @@ void Search::apply_root_forced_win() {
   int fm;
   if (az_is_forced_win(root_->st, fm)) {
     root_->forced_win_move = fm;
-    root_->value = 1.0f;
+    // Opponent only ever passes down a held-lead line, so opp_size (and thus
+    // the points scored) is frozen at its current value.
+    root_->value = win_value(root_->st);
   }
 }
 
@@ -526,8 +535,9 @@ constexpr int kForcedDepthCap = 4;
 float forced_subtree_value(const std::array<int, 13> &hand,
                            const std::array<int, 13> &discard,
                            const HandBits &opp_bits, int opp_size,
-                           Evaluator &ev, int depth, std::vector<int> &toks) {
-  if (hand_size(hand) == 0) return 1.0f;
+                           Evaluator &ev, int depth, std::vector<int> &toks,
+                           float win_val, int my_pts, int opp_pts) {
+  if (hand_size(hand) == 0) return win_val;
   EvalFeatures f;
   f.hand = hand;
   f.opp_max = opp_max_counts(hand, discard);
@@ -535,9 +545,11 @@ float forced_subtree_value(const std::array<int, 13> &hand,
   f.opp_size = opp_size;
   f.our_size = hand_size(hand);
   f.owner_to_move = true;
+  f.my_pts = my_pts;
+  f.opp_pts = opp_pts;
   f.path_tokens = toks;
   float best = ev.eval(f).value;  // option: stop here, trust this position
-  if (best >= 1.0f || depth <= 0) return best;
+  if (best >= win_val || depth <= 0) return best;
 
   auto legal = compute_legal_moves(hand, Move(kPASS));
   for (int m : legal) {
@@ -546,14 +558,15 @@ float forced_subtree_value(const std::array<int, 13> &hand,
     std::array<int, 13> nh = hand, nd = discard;
     const auto &cost = MOVE_TO_CARDS[m];
     for (int r = 0; r < 13; ++r) { nh[r] -= cost[r]; nd[r] += cost[r]; }
-    if (hand_size(nh) == 0) return 1.0f;
+    if (hand_size(nh) == 0) return win_val;
     toks.push_back(m);
     toks.push_back(kPASS);
     best = std::max(best, forced_subtree_value(nh, nd, opp_bits, opp_size, ev,
-                                               depth - 1, toks));
+                                               depth - 1, toks, win_val,
+                                               my_pts, opp_pts));
     toks.pop_back();
     toks.pop_back();
-    if (best >= 1.0f) return best;
+    if (best >= win_val) return best;
   }
   return best;
 }
@@ -572,6 +585,10 @@ void Search::forced_expand_root(Evaluator &ev) {
   const HandBits ob =
       opp_possible_bits(root_->st.our_hand, root_->st.discard);
   const int osz = root_->st.opp_size;
+  // Opponent only passes down a held-lead line, so opp_size and thus the win
+  // value are frozen; win_val is the ceiling for every forced line here.
+  const float win_val = win_value(root_->st);
+  const int mp = root_->st.my_pts, op = root_->st.opp_pts;
 
   float best = root_->value;  // floor: never downgrade the searched value
   int best_move = -1;
@@ -584,13 +601,14 @@ void Search::forced_expand_root(Evaluator &ev) {
     for (int r = 0; r < 13; ++r) { nh[r] -= cost[r]; nd[r] += cost[r]; }
     float v;
     if (hand_size(nh) == 0) {
-      v = 1.0f;
+      v = win_val;
     } else {
       toks.assign({m, kPASS});
-      v = forced_subtree_value(nh, nd, ob, osz, ev, kForcedDepthCap - 1, toks);
+      v = forced_subtree_value(nh, nd, ob, osz, ev, kForcedDepthCap - 1, toks,
+                               win_val, mp, op);
     }
     if (v > best) { best = v; best_move = m; }
-    if (best >= 1.0f) break;
+    if (best >= win_val) break;
   }
   root_->value = best;
   if (best_move != -1) root_->forced_win_move = best_move;

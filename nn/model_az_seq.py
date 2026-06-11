@@ -28,9 +28,9 @@ TorchScript surface used by C++ (LibTorch, via get_method):
   encode_prefix(tokens[B,P] i64, lens[B] i64)
                   -> kv[B,L,2,H,P+1,Dh], h_last[B,d]
   forward_leaf(kv, plen[B], h_last, path[B,T] i64, path_len[B],
-               hand[B,48], oppmax[B,48], osz[B], usz[B], otm[B])
+               hand[B,48], oppmax[B,48], osz[B], usz[B], otm[B], mpts[B], opts[B])
                   -> value[B], policy[B,138], behavior[B,458], qa[B,458]
-  readout(h, hand, oppmax, osz, usz, otm) -> same 4-tuple (debug/training)
+  readout(h, hand, oppmax, osz, usz, otm, mpts, opts) -> 4-tuple (debug/training)
   forward_full(tokens[B,T] i64) -> hidden[B,T+1,d] (training / --no-kv-cache)
 """
 
@@ -56,6 +56,7 @@ from nn.model_az import (
 NUM_MOVES = 468
 SEQ_CAP = 66  # BOS + 64-move history cap + 1 slack
 SIZE_NORM = 16.0
+PTS_NORM = 50.0  # series points normaliser (target = kSeriesTarget)
 NEG_MASK = -1e9  # additive attention mask for invalid keys (finite: no NaN rows)
 
 
@@ -155,8 +156,11 @@ class Big2NetSeqAZ(nn.Module):
         self.layer_b_hands = _init_swish(nn.Linear(64, 64))
         self.layer_c_player = _init_swish(nn.Linear(64, 128))
         self.layer_c_opp = _init_swish(nn.Linear(64, 96))
-        # (opp_size/16, our_size/16, owner_to_move) -> small embedding.
-        self.size_embed = _init_swish(nn.Linear(3, 16))
+        # (opp_size/16, our_size/16, owner_to_move, my_pts/50, opp_pts/50)
+        # -> small embedding. The two series-points inputs let the net modulate
+        # aggression by match state; converting an old (3-input) checkpoint
+        # zero-fills their weight columns (scripts/convert_az_seq_series.py).
+        self.size_embed = _init_swish(nn.Linear(5, 16))
 
         # Junction: [hist d_model, hand128, opp96, size16] -> 256.
         self.junction = _init_selu(nn.Linear(d_model + 128 + 96 + 16, 256))
@@ -240,6 +244,8 @@ class Big2NetSeqAZ(nn.Module):
         osz: torch.Tensor,  # [B] float (/16)
         usz: torch.Tensor,  # [B] float (/16)
         otm: torch.Tensor,  # [B] float owner_to_move
+        mpts: torch.Tensor,  # [B] float owner series points (/50)
+        opts: torch.Tensor,  # [B] float opponent series points (/50)
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         kv = kv.to(h_last.dtype)
         B, T = path.shape
@@ -280,7 +286,7 @@ class Big2NetSeqAZ(nn.Module):
         idx = (path_len - 1).clamp(min=0).view(B, 1, 1).expand(B, 1, self.d_model)
         h_path = h.gather(1, idx).squeeze(1)
         h_out = torch.where((path_len == 0).unsqueeze(1), h_last, h_path)
-        return self.readout(h_out, hand, oppmax, osz, usz, otm)
+        return self.readout(h_out, hand, oppmax, osz, usz, otm, mpts, opts)
 
     @torch.jit.export
     def readout(
@@ -291,6 +297,8 @@ class Big2NetSeqAZ(nn.Module):
         osz: torch.Tensor,  # [B] float (/16)
         usz: torch.Tensor,  # [B] float (/16)
         otm: torch.Tensor,  # [B] float owner_to_move
+        mpts: torch.Tensor,  # [B] float owner series points (/50)
+        opts: torch.Tensor,  # [B] float opponent series points (/50)
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         hh = F.mish(self.layer_a(hand))
         hh = F.mish(self.layer_b_hands(hh))
@@ -298,7 +306,9 @@ class Big2NetSeqAZ(nn.Module):
         oo = F.mish(self.layer_a(oppmax))
         oo = F.mish(self.layer_b_hands(oo))
         oo = F.mish(self.layer_c_opp(oo))  # [B, 96]
-        ss = F.mish(self.size_embed(torch.stack([osz, usz, otm], dim=-1)))  # [B,16]
+        ss = F.mish(
+            self.size_embed(torch.stack([osz, usz, otm, mpts, opts], dim=-1))
+        )  # [B,16]
         x = torch.cat([h, hh, oo, ss], dim=-1)
         x = self.junction_norm(F.selu(self.junction(x)))
         x = self.trunk(x)
@@ -317,13 +327,15 @@ class Big2NetSeqAZ(nn.Module):
         osz: torch.Tensor,
         usz: torch.Tensor,
         otm: torch.Tensor,
+        mpts: torch.Tensor,
+        opts: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Convenience single-pass path (one readout per sequence row)."""
         H = self.forward_full(tokens)
         B = tokens.shape[0]
         idx = hist_idx.view(B, 1, 1).expand(B, 1, self.d_model)
         h = H.gather(1, idx).squeeze(1)
-        return self.readout(h, hand, oppmax, osz, usz, otm)
+        return self.readout(h, hand, oppmax, osz, usz, otm, mpts, opts)
 
     @torch.jit.ignore
     def embedding_param_ids(self) -> set:

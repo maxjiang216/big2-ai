@@ -9,6 +9,7 @@ void run_tablebase_tests();
 void run_legal_moves_tests();
 void run_typed_search_tests();
 void run_az_search_tests();
+void run_series_tests();
 
 int main() {
   std::cout << "[ move        ] ";
@@ -45,6 +46,10 @@ int main() {
 
   std::cout << "[ az_search   ] ";
   run_az_search_tests();
+  std::cout << "PASS\n";
+
+  std::cout << "[ series      ] ";
+  run_series_tests();
   std::cout << "PASS\n";
 
   std::cout << "All tests passed.\n";

@@ -29,7 +29,22 @@
 #   --seed N         RNG seed                       (default: 42)
 #   --log FILE       append log here                (default: logs/az_training.log)
 #
+#   --series         SERIES objective (see below)   (default: off, single-game)
+#   --natural-frac F selfplay start-state mixture    (default: 0.5)
+#   --shrink-k K     Markov per-state shrinkage      (default: 100)
+#   --eval-pairs N   mirrored series pairs per eval   (default: eval-deals)
+#
 # Self-play runs the NN forward on --device (the forward dominates wall time).
+#
+# SERIES objective: optimise series wins (first to 50) rather than single games.
+# Each generation, before self-play, the series Markov chain is (re)estimated
+# from the previous champion's games + accumulated eval outcome dumps into
+# data/series_v_genN.csv; self-play and training condition on it (--series-v),
+# value targets become series win probabilities, and promotion is gated on the
+# eval_az_series series-win CI. Bootstrap (no prior series table): the chain is
+# seeded --bootstrap-global from existing az_games_gen*.parquet, and the champion
+# models/az_seq.pt must already be series-aware (run
+# scripts/convert_az_seq_series.py on a pre-series checkpoint first).
 
 set -euo pipefail
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:.venv/lib/python3.13/site-packages/nvidia/cu13/lib"
@@ -49,6 +64,10 @@ EVAL_SIMS=200
 DEVICE=cuda
 SEED=42
 LOG_FILE="logs/az_training.log"
+SERIES=0
+NATURAL_FRAC=0.5
+SHRINK_K=100
+EVAL_PAIRS=""
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -67,6 +86,10 @@ while [[ $# -gt 0 ]]; do
         --device)      DEVICE=$2;      shift 2 ;;
         --seed)        SEED=$2;        shift 2 ;;
         --log)         LOG_FILE=$2;    shift 2 ;;
+        --series)      SERIES=1;       shift 1 ;;
+        --natural-frac) NATURAL_FRAC=$2; shift 2 ;;
+        --shrink-k)    SHRINK_K=$2;    shift 2 ;;
+        --eval-pairs)  EVAL_PAIRS=$2;  shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -79,11 +102,15 @@ PLAYER_DATA="data/az_player_gen%d.parquet"
 OPP_DATA="data/az_opp_gen%d.parquet"
 GAMES_DATA="data/az_games_gen%d.parquet"
 MODEL="models/az_seq_gen%d.pt"
+SERIES_V="data/series_v_gen%d.csv"
+EVAL_OUTCOMES="data/eval_outcomes_gen%d.csv"
+[[ -z "$EVAL_PAIRS" ]] && EVAL_PAIRS=$EVAL_DEALS
 
 pf() { printf "$1" "$2"; }  # pf <fmt> <gen>
 
-# eval_az_match output parsers.
-parse_winrate() { grep -oP 'A wins \d+ / \d+ = \K[0-9.]+' "$1" | head -1; }
+# eval output parsers (tolerant of eval_az_match "= X" and eval_az_series
+# "series = X").
+parse_winrate() { grep -oP 'A wins \d+ / \d+ (?:series )?= \K[0-9.]+' "$1" | head -1; }
 parse_ci()      { grep -oP 'Wilson 95% CI \K\[[0-9., ]+\]' "$1" | head -1; }
 parse_ci_lo()   { grep -oP 'Wilson 95% CI \[\K[0-9.]+' "$1" | head -1; }
 ci_clears_half() {  # 1 if Wilson lower bound > 0.5
@@ -139,15 +166,41 @@ for GEN in $(seq "$START" "$END"); do
         printf '  %s\n%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$DIV"
     } | tee_log
 
+    # ── 0. (series) Re-estimate the Markov chain from the champion's data ─────
+    SP_SERIES=""; TRAIN_SERIES=""; VCSV=""
+    if [[ "$SERIES" == 1 ]]; then
+        VCSV=$(pf "$SERIES_V" "$GEN")
+        echo "  [0/4] Estimate series chain → $VCSV (shrink-k=$SHRINK_K)..." | tee_log
+        CHAIN_ARGS=()
+        prevGD=$(pf "$GAMES_DATA" $((GEN - 1)))
+        [[ -f "$prevGD" ]] && CHAIN_ARGS+=(--games "$prevGD")
+        prevOUT=$(pf "$EVAL_OUTCOMES" $((GEN - 1)))
+        [[ -f "$prevOUT" ]] && CHAIN_ARGS+=(--outcomes "$prevOUT")
+        # Bootstrap-global when there is no prior series table to specialise from
+        # (the previous gen's games may also predate the series schema).
+        BOOT=""
+        [[ ! -f "$(pf "$SERIES_V" $((GEN - 1)))" ]] && BOOT="--bootstrap-global"
+        if [[ ${#CHAIN_ARGS[@]} -eq 0 ]]; then
+            # No champion data yet: seed from all existing games parquets.
+            for f in data/az_games_gen*.parquet; do CHAIN_ARGS+=(--games "$f"); done
+            BOOT="--bootstrap-global"
+        fi
+        uv run python analysis/series_markov.py "${CHAIN_ARGS[@]}" \
+            --out "$VCSV" --shrink-k "$SHRINK_K" $BOOT --gen "$GEN" 2>&1 | tee_log
+        SP_SERIES="--series-v $VCSV --natural-frac $NATURAL_FRAC"
+        TRAIN_SERIES="--series-v $VCSV"
+    fi
+
     # ── 1. Self-play with the current champion ───────────────────────────────
     echo "  [1/4] Self-play $GAMES games vs champion (sims=$SIMS)..." | tee_log
     T0=$(date +%s)
+    # shellcheck disable=SC2086
     bin/az_selfplay \
         --games "$GAMES" --sims "$SIMS" --slots "$SLOTS" --device "$DEVICE" \
         --seed "$((SEED + GEN))" \
-        --model models/az_seq.pt \
+        --model models/az_seq.pt $SP_SERIES \
         --player-out "$PD" --opp-out "$OD" --games-out "$GD" \
-        2>&1 | grep -E 'samples:|device=' | tee_log
+        2>&1 | grep -E 'samples:|device=|series objective' | tee_log
     echo "      self-play time: $(( $(date +%s) - T0 ))s" | tee_log
 
     # ── 2. Train (mixed over the last MIX_GENS gens) ─────────────────────────
@@ -166,22 +219,40 @@ for GEN in $(seq "$START" "$END"); do
         --games-data $GAMES_FILES --player-data $PLAYER_FILES --opp-data $OPP_FILES \
         --out "$M" \
         --epochs "$EPOCHS" --batch-games "$BATCH_GAMES" --mix-decay "$MIX_DECAY" \
+        $TRAIN_SERIES \
         2>&1 | grep -E '\[seq\]' | tee_log
     echo "      train time: $(( $(date +%s) - T0 ))s" | tee_log
 
     # ── 3. Eval genN vs champion (promotion) + vs greedy (tracking) ──────────
     # Pin each eval to a single torch thread; the two run in parallel cheaply.
-    echo "  [3/4] Eval (deals=$EVAL_DEALS, sims=$EVAL_SIMS)..." | tee_log
+    # Series mode evaluates full series (eval_az_series) and dumps the per-game
+    # outcomes so the next gen's chain build can re-use them.
     E_CHAMP=$(mktemp); E_GREEDY=$(mktemp)
-    OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bin/eval_az_match \
-        --model-a "$M" --model-b models/az_seq.pt \
-        --deals "$EVAL_DEALS" --sims "$EVAL_SIMS" --seed "$SEED" \
-        >"$E_CHAMP" 2>&1 &
-    OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bin/eval_az_match \
-        --model-a "$M" --classic greedy \
-        --deals "$EVAL_DEALS" --sims "$EVAL_SIMS" --seed "$SEED" \
-        >"$E_GREEDY" 2>&1 &
-    wait
+    if [[ "$SERIES" == 1 ]]; then
+        echo "  [3/4] Series eval (pairs=$EVAL_PAIRS, sims=$EVAL_SIMS)..." | tee_log
+        EOUT=$(pf "$EVAL_OUTCOMES" "$GEN")
+        OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bin/eval_az_series \
+            --model-a "$M" --model-b models/az_seq.pt --series-v "$VCSV" \
+            --pairs "$EVAL_PAIRS" --sims "$EVAL_SIMS" --seed "$SEED" \
+            --dump-outcomes "$EOUT" \
+            >"$E_CHAMP" 2>&1 &
+        OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bin/eval_az_series \
+            --model-a "$M" --classic greedy --series-v "$VCSV" \
+            --pairs "$EVAL_PAIRS" --sims "$EVAL_SIMS" --seed "$SEED" \
+            >"$E_GREEDY" 2>&1 &
+        wait
+    else
+        echo "  [3/4] Eval (deals=$EVAL_DEALS, sims=$EVAL_SIMS)..." | tee_log
+        OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bin/eval_az_match \
+            --model-a "$M" --model-b models/az_seq.pt \
+            --deals "$EVAL_DEALS" --sims "$EVAL_SIMS" --seed "$SEED" \
+            >"$E_CHAMP" 2>&1 &
+        OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 bin/eval_az_match \
+            --model-a "$M" --classic greedy \
+            --deals "$EVAL_DEALS" --sims "$EVAL_SIMS" --seed "$SEED" \
+            >"$E_GREEDY" 2>&1 &
+        wait
+    fi
     {
         printf '      vs champion : %s  %s\n' "$(parse_winrate "$E_CHAMP")"  "$(parse_ci "$E_CHAMP")"
         printf '      vs greedy   : %s  %s\n' "$(parse_winrate "$E_GREEDY")" "$(parse_ci "$E_GREEDY")"

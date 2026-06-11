@@ -29,7 +29,9 @@ def _rand_inputs(B: int):
     osz = torch.rand(B)
     usz = torch.rand(B)
     otm = (torch.rand(B) < 0.5).float()
-    return hand, oppmax, osz, usz, otm
+    mpts = torch.rand(B)
+    opts = torch.rand(B)
+    return hand, oppmax, osz, usz, otm, mpts, opts
 
 
 def _rand_tokens(B: int, T: int) -> torch.Tensor:

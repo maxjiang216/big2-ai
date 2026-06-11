@@ -27,6 +27,7 @@
 
 #include "evaluator.h"
 #include "move.h"
+#include "series.h"
 #include "util.h"
 
 #include <array>
@@ -48,6 +49,8 @@ struct SearchState {
   std::array<int, 13> discard;   // cards played so far (fixed on first visit)
   int last_move;                 // trick to beat; kPASS == lead position
   int side;                      // who moves at this node
+  int my_pts = 0;                // root player's series points (constant/game)
+  int opp_pts = 0;               // opponent's series points
 };
 
 struct SearchConfig {
@@ -58,6 +61,9 @@ struct SearchConfig {
   // it weighted-random (exploration); evaluation/play takes the max-probability
   // member (deterministic, strongest line).
   bool training = true;
+  // Series win-probability table. When set, terminal / forced-win / insta-win
+  // values become V(resulting series state) instead of 1/0. Null => legacy 1/0.
+  const SeriesTable *series = nullptr;
 };
 
 struct Node;
@@ -147,6 +153,13 @@ public:
 
 private:
   Node *alloc_node(const SearchState &s);
+  // Value (P root wins) of a state in which the root player has just won the
+  // game (opponent is the loser holding st.opp_size cards). Series-aware when
+  // cfg_.series is set; else 1.0 (legacy single-game objective).
+  float win_value(const SearchState &s) const;
+  // Value (P root wins) when the opponent has just won (root player is the
+  // loser holding hand_size(s.our_hand) cards). 0.0 in the legacy objective.
+  float loss_value(const SearchState &s) const;
   void finalize_terminal(Node *n);
   void expand_player(Node *n, const float *logits);
   void expand_opp(Node *n, const float *move_value, const float *logits);

@@ -91,6 +91,8 @@ NNEvaluator::eval_batch(const std::vector<int> &slot_ids,
   auto t_osz = torch::zeros({B}, fopts);
   auto t_usz = torch::zeros({B}, fopts);
   auto t_otm = torch::zeros({B}, fopts);
+  auto t_mpts = torch::zeros({B}, fopts);
+  auto t_opts = torch::zeros({B}, fopts);
   float *h = t_hand.data_ptr<float>();
   float *o = t_opp.data_ptr<float>();
   for (int i = 0; i < B; ++i) {
@@ -99,6 +101,8 @@ NNEvaluator::eval_batch(const std::vector<int> &slot_ids,
     t_osz.data_ptr<float>()[i] = feats[i].opp_size / kSizeNorm;
     t_usz.data_ptr<float>()[i] = feats[i].our_size / kSizeNorm;
     t_otm.data_ptr<float>()[i] = feats[i].owner_to_move ? 1.0f : 0.0f;
+    t_mpts.data_ptr<float>()[i] = feats[i].my_pts / kPtsNorm;
+    t_opts.data_ptr<float>()[i] = feats[i].opp_pts / kPtsNorm;
   }
 
   torch::NoGradGuard ng;
@@ -128,7 +132,9 @@ NNEvaluator::eval_batch(const std::vector<int> &slot_ids,
                                            t_opp.to(device_),
                                            t_osz.to(device_),
                                            t_usz.to(device_),
-                                           t_otm.to(device_)})
+                                           t_otm.to(device_),
+                                           t_mpts.to(device_),
+                                           t_opts.to(device_)})
               .toTuple();
   } else {
     // Full recompute: tokens = prefix + path per row, readout at the end.
@@ -152,7 +158,8 @@ NNEvaluator::eval_batch(const std::vector<int> &slot_ids,
     auto hsel = H.gather(1, gather_idx).squeeze(1);
     out = net_.get_method("readout")({hsel, t_hand.to(device_),
                                       t_opp.to(device_), t_osz.to(device_),
-                                      t_usz.to(device_), t_otm.to(device_)})
+                                      t_usz.to(device_), t_otm.to(device_),
+                                      t_mpts.to(device_), t_opts.to(device_)})
               .toTuple();
   }
 

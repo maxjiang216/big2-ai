@@ -28,6 +28,8 @@ struct EvalFeatures {
   int opp_size;                 // opponent hand size
   int our_size;                 // searcher hand size
   bool owner_to_move;           // true at our-turn leaves, false at opp-turn
+  int my_pts = 0;               // searcher's series points (constant per game)
+  int opp_pts = 0;              // opponent's series points
   std::vector<int> path_tokens; // move ids root -> leaf (after the game prefix)
 };
 

@@ -78,18 +78,39 @@ def _step(model, C, batch, no_memory=False):
             torch.zeros(n_o, device=h.device),
         ]
     )
-    value, policy, behavior, qa = model.readout(h, hand, oppm, osz, usz, otm)
+    mpts = torch.cat([batch["p_mpts"], batch["o_mpts"]])
+    opts = torch.cat([batch["p_opts"], batch["o_opts"]])
+    value, policy, behavior, qa = model.readout(
+        h, hand, oppm, osz, usz, otm, mpts, opts
+    )
+
+    # Natural-frequency importance weights (all 1 without --series-v). Weighting
+    # every head matches the deployment state distribution consistently — policy
+    # / behavior / q_a all shift with the match state (risk appetite near 50).
+    wp = batch["p_w"]
+    wo = batch["o_w"]
+
+    def _wmean(loss_per_row, w):
+        return (loss_per_row * w).sum() / w.sum().clamp_min(EPS)
 
     # player rows: value BCE + composed-policy CE
-    loss_v = F.binary_cross_entropy(value[:n_p].clamp(EPS, 1 - EPS), batch["p_value"])
+    loss_v = _wmean(
+        F.binary_cross_entropy(
+            value[:n_p].clamp(EPS, 1 - EPS), batch["p_value"], reduction="none"
+        ),
+        wp,
+    )
     logp = masked_log_softmax(policy[:n_p] @ C.t(), batch["p_mask"])
-    loss_p = -(batch["p_policy"] * logp).sum(-1).mean()
+    loss_p = _wmean(-(batch["p_policy"] * logp).sum(-1), wp)
     # opp rows: behavior NLL + q_a BCE at the played slot
     tgt = batch["o_target"]
     logb = masked_log_softmax(behavior[n_p:], batch["o_mask"])
-    loss_b = F.nll_loss(logb, tgt)
+    loss_b = _wmean(F.nll_loss(logb, tgt, reduction="none"), wo)
     q = qa[n_p:].gather(1, tgt.unsqueeze(1)).squeeze(1)
-    loss_q = F.binary_cross_entropy(q.clamp(EPS, 1 - EPS), batch["o_value"])
+    loss_q = _wmean(
+        F.binary_cross_entropy(q.clamp(EPS, 1 - EPS), batch["o_value"], reduction="none"),
+        wo,
+    )
 
     loss = loss_v + loss_p + loss_b + loss_q
     return loss, (loss_v, loss_p, loss_b, loss_q), (n_p, n_o)
@@ -109,6 +130,7 @@ def train(cfg) -> None:
         seed=cfg.seed,
         mix_decay=cfg.mix_decay,
         validate=not cfg.no_validate,
+        series_v=cfg.series_v or None,
     )
     print(
         f"[seq] games train={tl.rows.numel():,} val={vl.rows.numel():,}  "
@@ -198,6 +220,12 @@ def main() -> None:
     p.add_argument("--plateau-patience", type=int, default=2)
     p.add_argument("--lr-floor", type=float, default=1e-6)
     p.add_argument("--mix-decay", type=float, default=1.0)
+    p.add_argument(
+        "--series-v",
+        default="",
+        help="series V/natural-freq CSV; enables natural-frequency sample "
+        "weights (and is the series-objective companion to az_selfplay --series-v)",
+    )
     p.add_argument("--weight-decay", type=float, default=1e-5)
     p.add_argument("--grad-clip", type=float, default=0.5)
     p.add_argument("--seed", type=int, default=0)

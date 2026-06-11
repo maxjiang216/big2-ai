@@ -16,6 +16,7 @@
 namespace az_search {
 
 constexpr float kSizeNorm = 16.0f;
+constexpr float kPtsNorm = 50.0f;  // series points normaliser (kSeriesTarget)
 
 // NN input/output structs live in evaluator.h (unified EvalFeatures/NetEval);
 // this header keeps the torch-free feature derivations shared by the search

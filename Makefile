@@ -434,6 +434,25 @@ $(BIN_DIR)/eval_az_match: $(EVAL_AZ_MATCH_OBJS)
 eval_az_match: dirs $(BIN_DIR)/eval_az_match
 
 # ============================================================================
+# bin/eval_az_series — full-series az_search evaluation (needs LibTorch+Arrow)
+# ============================================================================
+
+$(BUILD_DIR)/src/datagen/eval_az_series.o: src/datagen/eval_az_series.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
+
+EVAL_AZ_SERIES_OBJS := $(CORE_OBJS) \
+                       $(BUILD_DIR)/src/simulation/game_simulator.o \
+                       $(TYPED_SEARCH_OBJS) \
+                       $(AZ_SEARCH_OBJS) \
+                       $(BUILD_DIR)/src/datagen/eval_az_series.o
+
+$(BIN_DIR)/eval_az_series: $(EVAL_AZ_SERIES_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS_TORCH)
+	@echo "✓ $(BIN_DIR)/eval_az_series"
+
+eval_az_series: dirs $(BIN_DIR)/eval_az_series
+
+# ============================================================================
 # bin/az_nn_check — cross-check C++ NN inference vs Python (needs LibTorch)
 # ============================================================================
 

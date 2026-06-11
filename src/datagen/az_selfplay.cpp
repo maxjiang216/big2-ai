@@ -14,15 +14,17 @@
 // head's NN (classify_position / PosType) — we don't train a head on positions
 // it resolves trivially:
 //   * PLAYER policy (visit distribution): real decisions only.
-//   * PLAYER value: real decisions AND tablebase (opp-1) positions (the move is
+//   * PLAYER value: real decisions AND opp-1 oracle positions (the move is
 //     pinned but the leaf VALUE is still used); recorded as a value-only player
 //     sample (empty visit list -> no policy gradient). Excluded at insta-win /
-//     forced-win (value trivially 1) and forced-pass (node fused).
+//     forced-win (value resolved without an NN value query) and forced-pass.
 //   * OPP behavior + value: every position except the mover's forced-pass or
-//     hand-emptying insta-win (the observer can't tell forced-win / tablebase
+//     hand-emptying insta-win (the observer can't tell forced-win / opp-1
 //     positions from public info, so it must model them).
-// Both value targets are backfilled from the game winner. At real decisions the
-// move played is sampled proportional to the root visit counts (exploration).
+// Both value targets are backfilled from the game outcome: under the series
+// objective the target is V(resulting series state) (series_value_after_win);
+// without a series table it is the legacy 1/0 game win/loss. At real decisions
+// the move played is sampled proportional to the root visit counts.
 //
 // Output: three Parquet files matching the nn/dataset_seq.py schemas
 // (az_player_genN.parquet, az_opp_genN.parquet, az_games_genN.parquet). The
@@ -42,7 +44,7 @@
 #include "game_simulator.h"
 #include "move.h"
 #include "player_factory_registry.h"
-#include "tablebase_opp1.h"
+#include "series.h"
 #include "util.h"
 
 #include <arrow/builder.h>
@@ -68,38 +70,8 @@
 using namespace az_search;
 
 // ---------------------------------------------------------------------------
-// Tablebase / forced detection (mirror of eval_helpers / nn_game_runner).
+// Forced / endgame detection (mirror of az_search's expand_player oracles).
 // ---------------------------------------------------------------------------
-static int tablebase_move_id(const Game &game, int cp,
-                             const std::vector<int> &legal) {
-  auto hand = game.player_hand(cp);
-  int hand_size = game.get_player_hand_size(cp);
-  int opp_size = game.get_player_hand_size(1 - cp);
-  for (int mid : legal)
-    if (mid != kPASS && MOVE_TO_CARDS[mid][13] == hand_size) return mid;
-  if (game.last_move().combination != Move::Combination::kPass) return -1;
-  auto discard = game.discard_pile();
-  if (opp_size == 1) {
-    int best_rank = -1;
-    bool all_singles = true;
-    for (int mid : legal) {
-      if (mid == kPASS) continue;
-      Move m(mid);
-      if (m.combination != Move::Combination::kSingle) { all_singles = false; break; }
-      if (m.rank > best_rank) best_rank = m.rank;
-    }
-    if (all_singles && best_rank != -1)
-      for (int mid : legal)
-        if (mid != kPASS && Move(mid).rank == best_rank) return mid;
-    Opp1Result o = lookup_opp1(hand);
-    if (o.first_move_id != 0)
-      for (int mid : legal)
-        if (mid == o.first_move_id) return mid;
-    if (auto def = opp1_default_strategy_move(hand)) return *def;
-  }
-  if (auto seq = find_forced_win(hand, discard, opp_size)) return (*seq)[0];
-  return -1;
-}
 
 // Position classification for the mover, used to decide which heads (if any) get
 // a training sample — the rule is "will the search ever query that head's NN on
@@ -107,8 +79,8 @@ static int tablebase_move_id(const Game &game, int cp,
 // trivially). See advance_to_decision below for the per-type recording.
 enum PosType {
   POS_REAL,        // >=2 genuine choices: player policy + value + opp recorded
-  POS_TABLEBASE,   // opp-1 line: move pinned but VALUE used -> value + opp (no policy)
-  POS_FORCED_WIN,  // proven win: player value=1 trivial -> opp only
+  POS_OPP1,        // opp-1 series oracle: move pinned but VALUE used -> value + opp
+  POS_FORCED_WIN,  // proven win: player value (V of resulting state) -> opp only
   POS_INSTA_WIN,   // hand-emptying move: terminal before NN -> nothing
   POS_FORCED_PASS, // must pass: node fused in search -> nothing
 };
@@ -137,9 +109,11 @@ static PosType classify_position(const Game &game, const std::vector<int> &legal
       forced_move = (*seq)[0];
       return POS_FORCED_WIN;
     }
-    if (opp_size == 1) {
-      int tb = tablebase_move_id(game, mover, legal);  // opp-1 line (move known)
-      if (tb >= 0) { forced_move = tb; return POS_TABLEBASE; }
+    // opp-has-1-card series oracle: only when the hand has no straight lead
+    // (mirrors az_search::opp1_move). Straight-holding hands fall to POS_REAL.
+    if (opp_size == 1 && !hand_has_straight_lead(hand)) {
+      forced_move = opp1_series_move(hand);
+      return POS_OPP1;
     }
   }
   // A size-1 legal set is always either {pass} (forced pass) or, on the lead
@@ -174,21 +148,29 @@ struct OppSample {
 };
 
 // One row per finished game: the full applied-move sequence (transformer
-// tokens) plus winner / first player for Python-side validation.
+// tokens) plus winner / first player and the series context. pts0/pts1 are the
+// per-seat series points at game START; loser_cards is the loser's remaining
+// count (drives the points scored). Training derives owner-relative series-state
+// inputs and joins natural-frequency weights from these.
 struct GameRow {
   int game_id;
   int first_player;
   int winner;
+  int pts0;
+  int pts1;
+  int loser_cards;
   std::vector<int> moves;
 };
 
-static SearchState mover_state(const Game &game, int mover) {
+static SearchState mover_state(const Game &game, int mover, const int pts[2]) {
   SearchState s;
   s.our_hand = game.player_hand(mover);
   s.opp_size = game.get_player_hand_size(1 - mover);
   s.discard = game.discard_pile();
   s.last_move = encodeMove(game.last_move());
   s.side = kUs;
+  s.my_pts = pts[mover];
+  s.opp_pts = pts[1 - mover];
   return s;
 }
 
@@ -260,12 +242,25 @@ static int sample_from_visits(const std::vector<std::pair<int, long>> &visits,
   return visits.back().first;
 }
 
-static void backfill_values(int winner, std::size_t p_from, std::size_t o_from,
-                            std::vector<PlayerSample> &ps, std::vector<OppSample> &os) {
+// Backfill value targets from the game outcome. With a series table the target
+// is V(resulting series state) from the WINNER's POV (series_value_after_win);
+// without one it is the legacy 1/0 game win/loss. pts is seat-indexed start
+// points. Returns the loser's remaining card count (for the games row).
+static int backfill_values(const Game &game, const int pts[2],
+                           const SeriesTable *series, std::size_t p_from,
+                           std::size_t o_from, std::vector<PlayerSample> &ps,
+                           std::vector<OppSample> &os) {
+  const int winner = game.get_winner();
+  const int loser = 1 - winner;
+  const int loser_cards = game.get_player_hand_size(loser);
+  const float tw =  // P(this game's winner wins the series)
+      series ? series_value_after_win(*series, pts[winner], pts[loser], loser_cards)
+             : 1.0f;
   for (std::size_t i = p_from; i < ps.size(); ++i)
-    ps[i].value = (ps[i].mover == winner) ? 1.0f : 0.0f;
+    ps[i].value = (ps[i].mover == winner) ? tw : 1.0f - tw;
   for (std::size_t i = o_from; i < os.size(); ++i)
-    os[i].value = (os[i].observer == winner) ? 1.0f : 0.0f;
+    os[i].value = (os[i].observer == winner) ? tw : 1.0f - tw;
+  return loser_cards;
 }
 
 // Advance through forced positions to the next real decision, recording exactly
@@ -284,7 +279,7 @@ static std::vector<int> advance_to_decision(Game &game, int game_id, int &turn,
     if (t == POS_REAL) return legal;
     const int mover = game.current_player();
     const int hidx = (int)history.size();
-    if (t == POS_TABLEBASE) {
+    if (t == POS_OPP1) {
       record_player_sample(game, mover, {}, game_id, turn, hidx, ps);  // value-only
       record_opp_sample(game, mover, fm, game_id, turn, hidx, os);
       ++turn;
@@ -303,10 +298,12 @@ static std::vector<int> advance_to_decision(Game &game, int game_id, int &turn,
 // gen0: uniform-random self-play (no search).
 // ---------------------------------------------------------------------------
 static void run_random_selfplay(int total_games, unsigned seed,
+                                const SeriesTable *series,
                                 std::vector<PlayerSample> &ps,
                                 std::vector<OppSample> &os,
                                 std::vector<GameRow> &gs) {
   std::mt19937 rng(seed);
+  const int pts[2] = {0, 0};  // bootstrap: games always start a fresh series
   for (int g = 0; g < total_games; ++g) {
     Game game;
     game.shuffle_deal(rng);
@@ -324,8 +321,9 @@ static void run_random_selfplay(int total_games, unsigned seed,
       history.push_back(m);
     }
     if (game.is_over()) {
-      backfill_values(game.get_winner(), pf, of, ps, os);
-      gs.push_back({g, first_player, game.get_winner(), std::move(history)});
+      const int lc = backfill_values(game, pts, series, pf, of, ps, os);
+      gs.push_back({g, first_player, game.get_winner(), pts[0], pts[1], lc,
+                    std::move(history)});
     }
   }
 }
@@ -341,10 +339,12 @@ static void run_random_selfplay(int total_games, unsigned seed,
 // ---------------------------------------------------------------------------
 static void run_classic_selfplay(const std::string &policy, double param,
                                  int total_games, unsigned seed,
+                                 const SeriesTable *series,
                                  std::vector<PlayerSample> &ps,
                                  std::vector<OppSample> &os,
                                  std::vector<GameRow> &gs) {
   auto factory = make_player_factory(policy, param, seed);
+  const int pts[2] = {0, 0};  // teacher bootstrap: fresh series each game
   std::mt19937 rng(seed);
   for (int g = 0; g < total_games; ++g) {
     GameSimulator sim(factory->create_player(), factory->create_player(), rng);
@@ -367,7 +367,7 @@ static void run_classic_selfplay(const std::string &policy, double param,
         record_player_sample(game, mover, {{played, 1}}, g, turn, hidx, ps);  // one-hot
         record_opp_sample(game, mover, played, g, turn, hidx, os);
         ++turn;
-      } else if (t == POS_TABLEBASE) {
+      } else if (t == POS_OPP1) {
         record_player_sample(game, mover, {}, g, turn, hidx, ps);  // value-only
         record_opp_sample(game, mover, played, g, turn, hidx, os);
         ++turn;
@@ -378,9 +378,10 @@ static void run_classic_selfplay(const std::string &policy, double param,
       // POS_INSTA_WIN / POS_FORCED_PASS: no NN head queried -> no sample.
       history.push_back(played);
     }
-    backfill_values(rec.game().get_winner(), pf, of, ps, os);
+    const int lc = backfill_values(rec.game(), pts, series, pf, of, ps, os);
     const int first_player = rec.turns().empty() ? 0 : rec.turns().front().current_player;
-    gs.push_back({g, first_player, rec.game().get_winner(), std::move(history)});
+    gs.push_back({g, first_player, rec.game().get_winner(), pts[0], pts[1], lc,
+                  std::move(history)});
   }
 }
 
@@ -406,9 +407,54 @@ static void run_classic_selfplay(const std::string &policy, double param,
 // composition, which can flip a tie-broken move. --slots 1 (always batch-of-1)
 // is fully reproducible. The variation is benign for data generation.
 // ---------------------------------------------------------------------------
+// Per-game series start-state sampler. With probability natural_frac a start
+// state is drawn from the chain's natural visit frequencies (matches the
+// deployment distribution); otherwise uniformly over reachable states (broad
+// coverage, incl. rare late-series states). Reachable = {(0,0)} ∪ {1<=a<=49,
+// 0<=b<=49} in leader perspective (a = leader points). Inactive (always (0,0))
+// when no series table is loaded — the legacy single-game objective.
+struct StartStateSampler {
+  std::vector<std::pair<int, int>> states;  // reachable (a, b), leader-perspective
+  std::vector<double> nat_cdf;              // cumulative natural_freq over `states`
+  double nat_total = 0.0;
+  float natural_frac = 0.5f;
+  bool active = false;
+
+  void build(const SeriesTable *series, float frac) {
+    natural_frac = frac;
+    active = (series != nullptr);
+    if (!active) return;
+    states.emplace_back(0, 0);
+    for (int a = 1; a < kSeriesTarget; ++a)
+      for (int b = 0; b < kSeriesTarget; ++b)
+        states.emplace_back(a, b);
+    nat_cdf.reserve(states.size());
+    for (auto [a, b] : states) {
+      nat_total += series->natural[a][b];
+      nat_cdf.push_back(nat_total);
+    }
+  }
+
+  // Returns leader-perspective (a, b). (0,0) when inactive.
+  std::pair<int, int> sample(std::mt19937 &rng) const {
+    if (!active) return {0, 0};
+    std::uniform_real_distribution<float> u01(0.0f, 1.0f);
+    if (nat_total > 0.0 && u01(rng) < natural_frac) {
+      double r = std::uniform_real_distribution<double>(0.0, nat_total)(rng);
+      auto it = std::lower_bound(nat_cdf.begin(), nat_cdf.end(), r);
+      std::size_t idx = std::min<std::size_t>(it - nat_cdf.begin(), states.size() - 1);
+      return states[idx];
+    }
+    std::size_t idx =
+        std::uniform_int_distribution<std::size_t>(0, states.size() - 1)(rng);
+    return states[idx];
+  }
+};
+
 struct Slot {
   int game_id = -1;
   Game game;
+  int pts[2] = {0, 0};              // seat-indexed series points at game start
   std::mt19937 rng;                 // per-game RNG (reseeded at game start)
   std::unique_ptr<Search> tree[2];  // persistent per-seat search trees
   std::vector<int> history;         // every applied move (token sequence)
@@ -439,9 +485,12 @@ struct EvalReq {
 
 static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
                                 int sims, unsigned seed,
+                                const SeriesTable *series, float natural_frac,
                                 std::vector<PlayerSample> &ps,
                                 std::vector<OppSample> &os,
                                 std::vector<GameRow> &gs) {
+  StartStateSampler sampler;
+  sampler.build(series, natural_frac);
   const int hw = std::max(1, (int)std::thread::hardware_concurrency() - 1);
   const int n_workers = std::max(1, std::min(hw, slots_n));
   const int per = (slots_n + n_workers - 1) / n_workers;
@@ -481,6 +530,22 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
       s.turn = 0;
       s.rng.seed((unsigned)(seed ^ (0x9E3779B9u * (unsigned)(gid + 1))));
       s.game.shuffle_deal(s.rng);
+      // Sample the series start state. Leader (a points) is seat 0 for any
+      // state != (0,0); at (0,0) the 3-of-spades rule picks the opener.
+      auto [a, b] = sampler.sample(s.rng);
+      if (a == 0 && b == 0) {
+        int fp = sampler.active
+                     ? sample_first_player_3s(s.game.player_hand(0),
+                                              s.game.player_hand(1), s.rng)
+                     : 0;
+        s.game.set_first_player(fp);
+        s.pts[0] = 0;
+        s.pts[1] = 0;
+      } else {
+        s.game.set_first_player(0);  // seat 0 leads at a non-initial state
+        s.pts[0] = a;
+        s.pts[1] = b;
+      }
       s.history.clear();
       s.first_player = s.game.current_player();
       s.prefix_dirty = true;
@@ -497,15 +562,17 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
       auto legal = advance_to_decision(s.game, s.game_id, s.turn, s.history, lps, los);
       if (legal.empty()) return false;
       s.mover = s.game.current_player();
-      SearchState st = mover_state(s.game, s.mover);
+      SearchState st = mover_state(s.game, s.mover, s.pts);
       auto &tr = s.tree[s.mover];
       unsigned tseed =
           (unsigned)(seed ^ (0x9E3779B9u * (unsigned)(s.game_id * 2 + s.mover)));
-      if (!tr)
-        tr = std::make_unique<Search>(st, s.history,
-                                      SearchConfig{1.5f, sims, tseed, true});
-      else
+      if (!tr) {
+        SearchConfig sc{1.5f, sims, tseed, true};
+        sc.series = series;
+        tr = std::make_unique<Search>(st, s.history, sc);
+      } else {
         tr->advance_root(st, s.history);
+      }
       s.sims_done = 0;
       s.searching = true;
       s.prefix_dirty = true;  // history grew since the last decision
@@ -534,8 +601,10 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
 
     auto finalize_game = [&](Slot &s) {
       if (s.game.is_over()) {
-        backfill_values(s.game.get_winner(), s.p_from, s.o_from, lps, los);
-        lgs.push_back({s.game_id, s.first_player, s.game.get_winner(), s.history});
+        const int lc =
+            backfill_values(s.game, s.pts, series, s.p_from, s.o_from, lps, los);
+        lgs.push_back({s.game_id, s.first_player, s.game.get_winner(), s.pts[0],
+                       s.pts[1], lc, s.history});
       }
       s.active = false;
       s.searching = false;
@@ -794,12 +863,13 @@ static void write_opp_parquet(const std::string &path, const std::vector<OppSamp
 
 static void write_games_parquet(const std::string &path, const std::vector<GameRow> &v) {
   auto pool = arrow::default_memory_pool();
-  arrow::Int32Builder game_id, first_player, winner;
+  arrow::Int32Builder game_id, first_player, winner, pts0, pts1, loser_cards;
   arrow::ListBuilder moves(pool, std::make_shared<arrow::Int32Builder>(pool));
   auto *moves_v = static_cast<arrow::Int32Builder *>(moves.value_builder());
   for (const auto &g : v) {
     game_id.Append(g.game_id); first_player.Append(g.first_player);
     winner.Append(g.winner);
+    pts0.Append(g.pts0); pts1.Append(g.pts1); loser_cards.Append(g.loser_cards);
     moves.Append(); moves_v->AppendValues(g.moves.data(), (int64_t)g.moves.size());
   }
   std::vector<std::shared_ptr<arrow::Field>> f;
@@ -807,6 +877,9 @@ static void write_games_parquet(const std::string &path, const std::vector<GameR
   f.push_back(arrow::field("game_id", arrow::int32())); a.push_back(finish_i32(game_id));
   f.push_back(arrow::field("first_player", arrow::int32())); a.push_back(finish_i32(first_player));
   f.push_back(arrow::field("winner", arrow::int32())); a.push_back(finish_i32(winner));
+  f.push_back(arrow::field("pts0", arrow::int32())); a.push_back(finish_i32(pts0));
+  f.push_back(arrow::field("pts1", arrow::int32())); a.push_back(finish_i32(pts1));
+  f.push_back(arrow::field("loser_cards", arrow::int32())); a.push_back(finish_i32(loser_cards));
   std::shared_ptr<arrow::Array> ma;
   moves.Finish(&ma);
   f.push_back(arrow::field("moves", arrow::list(arrow::int32()))); a.push_back(ma);
@@ -839,6 +912,23 @@ int main(int argc, char **argv) {
   const std::string teacher = arg(argc, argv, "--teacher", "");
   const double teacher_param = std::atof(arg(argc, argv, "--teacher-param", "0"));
   const unsigned seed = (unsigned)std::strtoul(arg(argc, argv, "--seed", "0"), nullptr, 10);
+  // Series objective: a V/natural-frequency table makes value targets the series
+  // win probability (and lets NN selfplay sample start states). Absent => legacy
+  // single-game win/loss objective at the (0,0) state only.
+  const std::string series_v = arg(argc, argv, "--series-v", "");
+  const float natural_frac = (float)std::atof(arg(argc, argv, "--natural-frac", "0.5"));
+  SeriesTable series_table;
+  const SeriesTable *series = nullptr;
+  if (!series_v.empty()) {
+    if (!load_series_table(series_v, series_table)) {
+      std::fprintf(stderr, "[az_selfplay] failed to load series table %s\n",
+                   series_v.c_str());
+      return 1;
+    }
+    series = &series_table;
+    std::printf("[az_selfplay] series objective: V table %s, natural-frac=%.2f\n",
+                series_v.c_str(), natural_frac);
+  }
   // Inference device: the NN forward dominates self-play wall time, so CUDA is a
   // big win (the batched-across-slots forward is exactly the GPU's strength).
   std::string device_str = arg(argc, argv, "--device", "cpu");
@@ -856,15 +946,15 @@ int main(int argc, char **argv) {
   if (gen0 && !teacher.empty()) {
     std::printf("[az_selfplay] gen0 teacher self-play (%s, param=%.3g): %d games\n",
                 teacher.c_str(), teacher_param, games);
-    run_classic_selfplay(teacher, teacher_param, games, seed, ps, os, gs);
+    run_classic_selfplay(teacher, teacher_param, games, seed, series, ps, os, gs);
   } else if (gen0) {
     std::printf("[az_selfplay] gen0 random self-play: %d games\n", games);
-    run_random_selfplay(games, seed, ps, os, gs);
+    run_random_selfplay(games, seed, series, ps, os, gs);
   } else {
     std::printf("[az_selfplay] NN self-play: %d games, sims=%d, slots=%d, device=%s, kv=%s\n",
                 games, sims, slots, device_str.c_str(), use_kv_cache ? "on" : "off");
     NNEvaluator nn(model, device, /*max_slots=*/slots, use_kv_cache);
-    run_search_selfplay(nn, games, slots, sims, seed, ps, os, gs);
+    run_search_selfplay(nn, games, slots, sims, seed, series, natural_frac, ps, os, gs);
   }
 
   std::printf("[az_selfplay] samples: player=%zu opp=%zu games=%zu -> %s, %s, %s\n",
