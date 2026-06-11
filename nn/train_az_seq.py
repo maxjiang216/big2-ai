@@ -55,13 +55,19 @@ def _gather_h(H: torch.Tensor, local: torch.Tensor, hist: torch.Tensor):
     return H[local, hist]
 
 
-def _step(model, C, batch):
-    """Forward + the four losses for one game-batch. Returns (loss, parts, ns)."""
+def _step(model, C, batch, no_memory=False):
+    """Forward + the four losses for one game-batch. Returns (loss, parts, ns).
+
+    no_memory: zero the trunk hidden before the junction — an apples-to-apples
+    memory-off control (identical side-input pathways, transformer contributes
+    nothing and receives no gradient)."""
     H = model.forward_full(batch["tokens"])
     hp = _gather_h(H, batch["p_local"], batch["p_hist"])
     ho = _gather_h(H, batch["o_local"], batch["o_hist"])
     n_p, n_o = hp.shape[0], ho.shape[0]
     h = torch.cat([hp, ho], dim=0)
+    if no_memory:
+        h = torch.zeros_like(h)
     hand = torch.cat([batch["p_hand"], batch["o_hand"]])
     oppm = torch.cat([batch["p_opp"], batch["o_opp"]])
     osz = torch.cat([batch["p_osz"], batch["o_osz"]])
@@ -124,7 +130,7 @@ def train(cfg) -> None:
     for epoch in range(1, cfg.epochs + 1):
         model.train()
         for batch in tl:
-            loss, _, _ = _step(model, C, batch)
+            loss, _, _ = _step(model, C, batch, cfg.no_memory)
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -137,7 +143,7 @@ def train(cfg) -> None:
         nps = nos = 0
         with torch.no_grad():
             for batch in vl:
-                _, parts, (n_p, n_o) = _step(model, C, batch)
+                _, parts, (n_p, n_o) = _step(model, C, batch, cfg.no_memory)
                 lv, lp, lb, lq = (float(x) for x in parts)
                 sums[0] += lv * n_p
                 sums[1] += lp * n_p
@@ -196,6 +202,11 @@ def main() -> None:
     p.add_argument("--grad-clip", type=float, default=0.5)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="auto")
+    p.add_argument(
+        "--no-memory",
+        action="store_true",
+        help="ablation: zero the transformer hidden (memory-off control)",
+    )
     p.add_argument(
         "--no-validate",
         action="store_true",

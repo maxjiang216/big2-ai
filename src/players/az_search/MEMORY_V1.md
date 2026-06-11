@@ -171,10 +171,39 @@ search core.
 | 1000-game typed_search teacher smoke: train 8 epochs | policy CE 1.47 (uniform-over-legal ≈2.5); 0.500 vs greedy @ sims 50 — sane for 2% of normal data |
 | `eval_az_match` vs classic + vs legacy champion | runs; legacy champion crushes the tiny smoke model, as expected |
 
+## Gen0 results (2026-06-10) — memory ablation
+
+Full-scale gen0 ran: `az_selfplay --teacher typed_search --games 50000`
+(574,517 player / 592,718 opp sample rows, max history 41), then
+`train_az_seq --epochs 30 --batch-games 512` (onecycle, seed 42).
+
+The key question — *does history-memory improve opponent-behavior
+prediction?* — answered with a clean ablation: the **same** data / split /
+seed / code, re-trained with `--no-memory` (zeros the trunk hidden before
+the junction; identical side-input pathways, transformer gets no gradient).
+
+| head (val loss) | memory-OFF | memory-ON | Δ |
+|---|---|---|---|
+| value | 0.544 | 0.522 | −0.022 |
+| policy | 0.915 | 0.928 | +0.013 |
+| **behavior** | 2.572 | **2.441** | **−0.131** |
+| q_a | 0.520 | 0.508 | −0.012 |
+
+Memory's payoff lands exactly where hypothesized: **opponent behavior**,
+−0.131 nats (perplexity 13.1 → 11.5, ~12% fewer effective guesses). Value
+and q_a improve modestly (history aids hidden-info win-prob inference).
+Player **policy is flat-to-slightly-worse** (+0.013, within noise) — the
+mover's own hand + legal set already carry most of what policy needs;
+history adds little there. This isolates memory's contribution from any
+data-source/scale confound (the old two-net opp baseline b≈2.55 was on
+different, smaller self-play data and is not a clean control).
+
+The `--no-memory` model (`models/az_seq_gen0_nomem.pt`) is a diagnostic
+artifact, not a champion. Champion = memory-on gen0 (`models/az_seq.pt`).
+
 ## Next steps
 
-1. **Full-scale gen0**: `./bin/az_selfplay --teacher typed_search --games
-   50000` (+ `--games-out`), full `train_az_seq` run.
+1. ~~**Full-scale gen0**~~ — done (see above). Champion = gen0.
 2. **The headline comparison**: new gen0 vs old champion
    (`models/az_s100_champion_{player,opp}.pt`) via `--legacy-*-b`, plus
    both vs typed_search at matched sims. This isolates what memory buys at
