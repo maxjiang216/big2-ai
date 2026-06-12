@@ -149,8 +149,8 @@ for GEN in $(seq "$START" "$END"); do
     echo "  [3/4] Eval gen$GEN vs champion ($EVAL_DEALS deals, sims=$EVAL_SIMS)..." | tee_log
     EV="logs/az_pi_eval_gen${GEN}.txt"
     bin/eval_az_pi_match --p0 "pi:$M" --p1 "pi:$CHAMP" \
-        --deals "$EVAL_DEALS" --sims "$EVAL_SIMS" --device "$DEVICE" \
-        --seed "$SEED" 2>&1 | tee "$EV" | tee_log
+        --deals "$EVAL_DEALS" --sims "$EVAL_SIMS" --max-slots "$SLOTS" \
+        --device "$DEVICE" --seed "$SEED" 2>&1 | tee "$EV" | tee_log
     PROMOTED=0
     if ci_clears_half "$EV"; then
         cp "$M" "$CHAMP"
@@ -168,7 +168,8 @@ for GEN in $(seq "$START" "$END"); do
         # the raw % tracks how bad a hand the champion can still win.
         for OPP in classic:greedy classic:typed_search; do
             bin/eval_az_pi_match --p0 "pi:$CHAMP" --p1 "$OPP" \
-                --deals "$EVAL_DEALS" --sims "$EVAL_SIMS" --device "$DEVICE" \
+                --deals "$EVAL_DEALS" --sims "$EVAL_SIMS" \
+                --max-slots "$SLOTS" --device "$DEVICE" \
                 --seed "$SEED" 2>&1 | grep -E 'win rate' | tee_log
         done
     else

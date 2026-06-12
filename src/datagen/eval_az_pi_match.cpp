@@ -140,28 +140,10 @@ int main(int argc, char **argv) {
     return cfg;
   };
 
-  const int n_slots = 2 * deals;
-  std::vector<ESlot> slots(n_slots);
-  for (int d = 0; d < deals; ++d) {
-    std::mt19937 rng(seed + d);
-    Game base;
-    base.shuffle_deal(rng);
-    for (int g = 0; g < 2; ++g) {
-      ESlot &s = slots[2 * d + g];
-      s.game = base;  // same shuffle
-      s.game_in_deal = g;
-      // game 0: seat0=p0, seat1=p1. game 1: seats swapped.
-      s.assign[0] = (g == 0) ? 0 : 1;
-      s.assign[1] = (g == 0) ? 1 : 0;
-      for (int seat = 0; seat < 2; ++seat) {
-        const int pidx = s.assign[seat];
-        if (!specs[pidx].is_pi) {
-          s.classic[seat] = factories[pidx]->create_player();
-          s.classic[seat]->accept_deal(s.game, seat);
-        }
-      }
-    }
-  }
+  // Deals are played in waves of at most max_slots/2 to bound live-tree
+  // memory: 2*deals concurrent games at high sims is many GB of search trees.
+  const int max_slots = std::atoi(arg(argc, argv, "--max-slots", "1024"));
+  const int deals_per_wave = std::max(1, max_slots / 2);
 
   // Apply a move: update the non-mover classic player and advance every live
   // PI tree (both seats keep their subtree across turns).
@@ -222,53 +204,81 @@ int main(int argc, char **argv) {
   };
 
   auto t0 = std::chrono::steady_clock::now();
-  std::vector<PiEvalFeatures> feats[2];
-  std::vector<int> fslot[2];
-
-  // Prime: pump every slot to its first parked leaf eval (or completion).
-  // Slots are independent games, so the pump parallelises freely.
-#pragma omp parallel for schedule(dynamic, 4)
-  for (int i = 0; i < n_slots; ++i) advance(slots[i]);
-
-  for (;;) {
-    feats[0].clear();
-    feats[1].clear();
-    fslot[0].clear();
-    fslot[1].clear();
-    for (int i = 0; i < n_slots; ++i) {
-      ESlot &s = slots[i];
-      if (s.waiting) {
-        feats[s.cur_eval].push_back(s.pending);
-        fslot[s.cur_eval].push_back(i);
-      }
-    }
-    if (fslot[0].empty() && fslot[1].empty()) break;  // all games finished
-    for (int e = 0; e < 2; ++e) {
-      if (fslot[e].empty()) continue;
-      auto res = evals[e]->eval_batch(feats[e]);
-      // Distribute results and re-pump each slot to its next parked eval.
-#pragma omp parallel for schedule(dynamic, 4)
-      for (std::size_t k = 0; k < fslot[e].size(); ++k) {
-        ESlot &s = slots[fslot[e][k]];
-        s.tree[s.game.current_player()]->apply_eval(res[k]);
-        ++s.sims_done;
-        s.waiting = false;
-        advance(s);
-      }
-    }
-  }
-
-  // Tally p0 results.
   long p0_wins = 0;
   long sweeps = 0, sweeps1 = 0;
-  for (int d = 0; d < deals; ++d) {
-    const ESlot &g0 = slots[2 * d];      // seat0 = p0
-    const ESlot &g1 = slots[2 * d + 1];  // seat0 = p1, so p0 is seat1
-    const bool p0_won_g0 = (g0.winner == 0);
-    const bool p0_won_g1 = (g1.winner == 1);
-    p0_wins += (p0_won_g0 ? 1 : 0) + (p0_won_g1 ? 1 : 0);
-    if (p0_won_g0 && p0_won_g1) ++sweeps;
-    if (!p0_won_g0 && !p0_won_g1) ++sweeps1;
+
+  for (int wave_d0 = 0; wave_d0 < deals; wave_d0 += deals_per_wave) {
+    const int wave_deals = std::min(deals_per_wave, deals - wave_d0);
+    const int n_slots = 2 * wave_deals;
+    std::vector<ESlot> slots(n_slots);
+    for (int wd = 0; wd < wave_deals; ++wd) {
+      const int d = wave_d0 + wd;
+      std::mt19937 rng(seed + d);
+      Game base;
+      base.shuffle_deal(rng);
+      for (int g = 0; g < 2; ++g) {
+        ESlot &s = slots[2 * wd + g];
+        s.game = base;  // same shuffle
+        s.game_in_deal = g;
+        // game 0: seat0=p0, seat1=p1. game 1: seats swapped.
+        s.assign[0] = (g == 0) ? 0 : 1;
+        s.assign[1] = (g == 0) ? 1 : 0;
+        for (int seat = 0; seat < 2; ++seat) {
+          const int pidx = s.assign[seat];
+          if (!specs[pidx].is_pi) {
+            s.classic[seat] = factories[pidx]->create_player();
+            s.classic[seat]->accept_deal(s.game, seat);
+          }
+        }
+      }
+    }
+
+    std::vector<PiEvalFeatures> feats[2];
+    std::vector<int> fslot[2];
+
+    // Prime: pump every slot to its first parked leaf eval (or completion).
+    // Slots are independent games, so the pump parallelises freely.
+#pragma omp parallel for schedule(dynamic, 4)
+    for (int i = 0; i < n_slots; ++i) advance(slots[i]);
+
+    for (;;) {
+      feats[0].clear();
+      feats[1].clear();
+      fslot[0].clear();
+      fslot[1].clear();
+      for (int i = 0; i < n_slots; ++i) {
+        ESlot &s = slots[i];
+        if (s.waiting) {
+          feats[s.cur_eval].push_back(s.pending);
+          fslot[s.cur_eval].push_back(i);
+        }
+      }
+      if (fslot[0].empty() && fslot[1].empty()) break;  // wave finished
+      for (int e = 0; e < 2; ++e) {
+        if (fslot[e].empty()) continue;
+        auto res = evals[e]->eval_batch(feats[e]);
+        // Distribute results and re-pump each slot to its next parked eval.
+#pragma omp parallel for schedule(dynamic, 4)
+        for (std::size_t k = 0; k < fslot[e].size(); ++k) {
+          ESlot &s = slots[fslot[e][k]];
+          s.tree[s.game.current_player()]->apply_eval(res[k]);
+          ++s.sims_done;
+          s.waiting = false;
+          advance(s);
+        }
+      }
+    }
+
+    // Tally this wave's p0 results.
+    for (int wd = 0; wd < wave_deals; ++wd) {
+      const ESlot &g0 = slots[2 * wd];      // seat0 = p0
+      const ESlot &g1 = slots[2 * wd + 1];  // seat0 = p1, so p0 is seat1
+      const bool p0_won_g0 = (g0.winner == 0);
+      const bool p0_won_g1 = (g1.winner == 1);
+      p0_wins += (p0_won_g0 ? 1 : 0) + (p0_won_g1 ? 1 : 0);
+      if (p0_won_g0 && p0_won_g1) ++sweeps;
+      if (!p0_won_g0 && !p0_won_g1) ++sweeps1;
+    }
   }
 
   const long total = 2L * deals;
