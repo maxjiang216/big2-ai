@@ -72,6 +72,38 @@ void test_solver_budget_exhaustion() {
   assert(solve(g, lim) == Proof::LOSS);
 }
 
+void test_solver_exact_margins() {
+  // Margin minimax. P0 {3,3} vs opp {4}: P0 must lead a 3 (or the pair);
+  // pair 33 empties the hand at once -> win margin = 1 (opp keeps its card).
+  // Single 3 is beaten by the 4 (opp empties -> we lose) — so the pair is the
+  // ONLY win and the margin is exactly 1.
+  solver_clear_memo();
+  {
+    Game g(hand({{0, 2}}), hand({{1, 1}}), {}, kLead, 0);
+    int m = -1;
+    assert(solve(g, SolverLimits{}, &m) == Proof::WIN);
+    assert(m == 1);
+  }
+  // P0 {3,4,5} vs opp {6}: every P0 lead is beaten by the 6 unless... the 6
+  // beats any single; opp then empties -> P0 LOSES. Loser margin = P0's final
+  // cards: P0 sheds exactly one card before opp finishes -> margin 2.
+  {
+    Game g(hand({{0, 1}, {1, 1}, {2, 1}}), hand({{3, 1}}), {}, kLead, 0);
+    int m = -1;
+    assert(solve(g, SolverLimits{}, &m) == Proof::LOSS);
+    assert(m == 2);
+  }
+  // Win margin maximisation: P0 {7,8} vs opp {3,4}. P0 leads the 7 or 8, opp
+  // cannot beat either (must pass), P0 plays the other and wins with opp still
+  // holding BOTH cards -> margin exactly 2 (the ceiling).
+  {
+    Game g(hand({{4, 1}, {5, 1}}), hand({{0, 1}, {1, 1}}), {}, kLead, 0);
+    int m = -1;
+    assert(solve(g, SolverLimits{}, &m) == Proof::WIN);
+    assert(m == 2);
+  }
+}
+
 // ----------------------------- search -----------------------------
 
 // Stub evaluator: uniform priors, fixed scalar value. Lets the search core be
@@ -197,6 +229,44 @@ void test_search_proven_root_best_move() {
   assert(end.is_over() && end.get_winner() == 0);
 }
 
+void test_search_series_values() {
+  // With a series table, proven roots back up series_value_after_win instead
+  // of 1/0. Flat stub table: V = 0.7 everywhere.
+  SeriesTable t;
+  for (auto &row : t.v) row.fill(0.7f);
+  t.loaded = true;
+
+  solver_clear_memo();
+  Game g(hand({{0, 1}, {1, 1}}), hand({{0, 1}}), {}, kLead, 0);  // proven win
+  {
+    PiSearchConfig cfg;
+    cfg.sims = 16;
+    cfg.series = &t;  // pts (0,0): the win never ends the series -> V = 0.7
+    PiSearch s(g, cfg);
+    StubEvaluator ev(0.5f);
+    s.run(ev);
+    assert(std::fabs(s.root_value() - 0.7f) < 1e-4f);
+  }
+  {
+    PiSearchConfig cfg;
+    cfg.sims = 16;
+    cfg.series = &t;
+    cfg.pts[0] = 49;  // any win ends the series -> exact 1.0
+    PiSearch s(g, cfg);
+    StubEvaluator ev(0.5f);
+    s.run(ev);
+    assert(s.root_value() > 0.999f);
+  }
+  {
+    PiSearchConfig cfg;  // no table: classic 1/0 backup unchanged
+    cfg.sims = 16;
+    PiSearch s(g, cfg);
+    StubEvaluator ev(0.5f);
+    s.run(ev);
+    assert(s.root_value() > 0.99f);
+  }
+}
+
 void test_prune_dominated_attachments() {
   // Hand: bomb 5555 + loose singles 8 and K (no straight possible), plus a
   // loose pair of 9s and triple of 3s (full house bases).
@@ -274,12 +344,14 @@ void run_az_pi_tests() {
   test_solver_win_by_squeeze();
   test_solver_card_threshold();
   test_solver_budget_exhaustion();
+  test_solver_exact_margins();
   test_search_visit_count();
   test_search_terminal_win_dominates();
   test_search_mean_backup();
   test_search_solver_finds_win();
   test_search_advance_root_reuse();
   test_search_proven_root_best_move();
+  test_search_series_values();
   test_prune_dominated_attachments();
   test_search_full_game_legal();
 }

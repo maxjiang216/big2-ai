@@ -29,10 +29,11 @@ struct SolverLimits {
 // (the key is the complete PI state, so entries stay valid across calls,
 // trees, games, and threads).
 //
-// `margin` (optional) receives the LOSER's final card count along the proven
-// line — a secondary tie-break objective (winner maximises it, loser
-// minimises). Exact for proven losses; for wins it reflects the first proven
-// win found (the primary search is not extended to optimise it).
+// `margin` (optional) receives the LOSER's final card count under optimal
+// play — exact margin minimax (winner maximises it, loser minimises it).
+// Series points are monotone in the margin, so margin-optimal play is
+// series-optimal. The only scan shortcut is winning at the opponent's
+// current card count (the ceiling at that state).
 Proof solve(const Game &g, const SolverLimits &limits, int *margin = nullptr);
 
 // Drop the calling thread's persistent memo (test isolation).

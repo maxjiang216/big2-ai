@@ -22,8 +22,10 @@ struct PiEvalFeatures {
   std::array<int, 13> hand;      // mover's exact remaining cards
   std::array<int, 13> opp_hand;  // opponent's exact remaining cards
   std::array<int, 13> trick;     // trick_counts(last_move_id); all-zero = lead
-  int our_size = 0;              // mover hand size (informational; net input)
-  int opp_size = 0;             // opponent hand size
+  int our_size = 0;              // mover hand size (kept for parquet; NOT a net input)
+  int opp_size = 0;              // opponent hand size (kept for parquet)
+  float my_pts = 0.0f;           // mover series points / 50 (net input)
+  float opp_pts = 0.0f;          // opponent series points / 50 (net input)
 };
 
 struct PiNetEval {

@@ -28,6 +28,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
+from torch.utils.data import ConcatDataset
+
 from nn.dataset import GpuLoader, collate_az_player, make_az_split
 from nn.model_az import NUM_MOVES, load_compose_matrix
 from nn.model_az_pi import Big2NetAZPI
@@ -42,10 +44,48 @@ from nn.train_az import (
 )
 
 
+def load_series_v(csv_path: str) -> torch.Tensor:
+    """50x50 V table (a,b,v,natural_freq CSV from analysis/series_markov.py)."""
+    V = torch.zeros(50, 50)
+    with open(csv_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("a,"):
+                continue
+            a, b, v = line.split(",")[:3]
+            V[int(a), int(b)] = float(v)
+    return V
+
+
+def relabel_series(ds, V: torch.Tensor) -> None:
+    """Replace the binary game outcome with the series target, in place:
+    value = P(mover wins the SERIES) = series_value_after_win(margin), using
+    the per-row scores and the per-game loser card count stored by selfplay."""
+    parts = ds.datasets if isinstance(ds, ConcatDataset) else [ds]
+    for part in parts:
+        if not getattr(part, "series", False):
+            raise SystemExit("--series-table given but data has no my_pts column")
+        win = part.value > 0.5  # mover won the game (C++ writes 1/0)
+        a, b, lc = part.my_pts_raw, part.opp_pts_raw, part.loser_cards
+        p = torch.where(lc <= 12, lc, 10 * (lc - 11))  # points_for_cards
+        wpts = torch.where(win, a, b)
+        lpts = torch.where(win, b, a)
+        nxt = wpts + p
+        tw = torch.where(
+            nxt >= 50, torch.ones(1), V[nxt.clamp(max=49), lpts]
+        ).float()
+        part.value = torch.where(win, tw, 1.0 - tw).float()
+
+
 def train(paths, out_path, cfg, device):
     train_ds, val_ds = make_az_split(
         paths, "player", cfg.val_frac, cfg.seed, cfg.mix_decay
     )
+    if cfg.series_table:
+        V = load_series_v(cfg.series_table)
+        relabel_series(train_ds, V)
+        relabel_series(val_ds, V)
+        print(f"[pi] series targets from {cfg.series_table}  V(0,0)={V[0,0]:.3f}")
     print(f"[pi] train={len(train_ds):,}  val={len(val_ds):,}")
     if _use_gpu_resident(cfg, device):
         tl = GpuLoader(train_ds, NUM_MOVES, cfg.batch, device, shuffle=True)
@@ -73,6 +113,15 @@ def train(paths, out_path, cfg, device):
         )
 
     model = Big2NetAZPI(cfg.width, cfg.blocks, cfg.embed).to(device)
+    if cfg.init_from:
+        src = torch.jit.load(cfg.init_from, map_location="cpu").state_dict()
+        tgt = model.state_dict()
+        # Name+shape matching warm start. The old net's size_embed never maps
+        # onto pts_embed (different semantics); the value head transfers as a
+        # same-shape init and adapts to the series target.
+        hit = {k: v for k, v in src.items() if k in tgt and tgt[k].shape == v.shape}
+        model.load_state_dict(hit, strict=False)
+        print(f"[pi] warm start {cfg.init_from}: {len(hit)}/{len(tgt)} tensors")
     C = load_compose_matrix().to(device)
     opt = _make_optim(model, cfg.lr, cfg.weight_decay)
     sched, per_batch = _make_sched(opt, cfg, cfg.epochs * len(tl))
@@ -81,12 +130,13 @@ def train(paths, out_path, cfg, device):
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
-        for hand, opp, trick, osz, usz, value, mask, policy in tl:
+        # Slots 3/4 carry my_pts/opp_pts for series files (see dataset.py).
+        for hand, opp, trick, mpts, opts, value, mask, policy in tl:
             hand, opp, trick = hand.to(device), opp.to(device), trick.to(device)
-            osz, usz, value = osz.to(device), usz.to(device), value.to(device)
+            mpts, opts, value = mpts.to(device), opts.to(device), value.to(device)
             mask, policy = mask.to(device), policy.to(device)
 
-            v, head = model(hand, opp, trick, osz, usz)
+            v, head = model(hand, opp, trick, mpts, opts)
             loss_v = F.binary_cross_entropy(v.clamp(eps, 1 - eps), value)
             logp = masked_log_softmax(head @ C.t(), mask)
             loss_p = -(policy * logp).sum(-1).mean()
@@ -103,11 +153,11 @@ def train(paths, out_path, cfg, device):
         vl_loss = vv = vp = 0.0
         n = 0
         with torch.no_grad():
-            for hand, opp, trick, osz, usz, value, mask, policy in vl:
+            for hand, opp, trick, mpts, opts, value, mask, policy in vl:
                 hand, opp, trick = hand.to(device), opp.to(device), trick.to(device)
-                osz, usz, value = osz.to(device), usz.to(device), value.to(device)
+                mpts, opts, value = mpts.to(device), opts.to(device), value.to(device)
                 mask, policy = mask.to(device), policy.to(device)
-                v, head = model(hand, opp, trick, osz, usz)
+                v, head = model(hand, opp, trick, mpts, opts)
                 lv = F.binary_cross_entropy(v.clamp(eps, 1 - eps), value)
                 lp = -(policy * masked_log_softmax(head @ C.t(), mask)).sum(-1).mean()
                 bs = len(value)
@@ -159,6 +209,16 @@ def main() -> None:
     p.add_argument("--plateau-patience", type=int, default=2)
     p.add_argument("--lr-floor", type=float, default=1e-6)
     p.add_argument("--mix-decay", type=float, default=1.0)
+    p.add_argument(
+        "--series-table",
+        help="series V CSV (analysis/series_markov.py); relabels values as "
+        "P(win series) at load time. Requires my_pts/opp_pts/loser_cards "
+        "columns in the data (series selfplay).",
+    )
+    p.add_argument(
+        "--init-from",
+        help="warm-start weights from a scripted checkpoint (name+shape match)",
+    )
     p.add_argument("--weight-decay", type=float, default=1e-5)
     p.add_argument("--grad-clip", type=float, default=0.5)
     p.add_argument("--workers", type=int, default=8)

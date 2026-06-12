@@ -16,10 +16,6 @@ using az_search::player_family_id;
 using az_search::player_subgroup_key;
 
 namespace {
-float proven_value(const PiNode *n) {
-  return (n->proof == Proof::WIN) ? 1.0f : 0.0f;  // terminal => proof LOSS => 0
-}
-
 // Greedy lexicographic score of the mover's hand AFTER playing mv (higher is
 // better; mirrors greedy_hand_eval). Used to break ties among proven moves so
 // the agent keeps shedding cards instead of passing out lost (or won) games.
@@ -57,6 +53,31 @@ int greedy_pick(const Game &g, const std::vector<int> &candidates) {
   return have ? best : kPASS;
 }
 }  // namespace
+
+// Exact value of a proven position in `mover_seat`'s perspective. Without a
+// series table this is the classic 1/0; with one it is P(mover wins the
+// SERIES) given the scores and the proven margin (loser's final card count).
+float PiSearch::exact_value(int mover_seat, Proof proof, int margin) const {
+  const bool mover_wins = (proof == Proof::WIN);
+  if (!cfg_.series) return mover_wins ? 1.0f : 0.0f;
+  const int w = mover_wins ? mover_seat : 1 - mover_seat;
+  const float vw = series_value_after_win(*cfg_.series, cfg_.pts[w],
+                                          cfg_.pts[1 - w], margin);
+  return mover_wins ? vw : 1.0f - vw;
+}
+
+// Node-level wrapper: a terminal node's mover is the loser (its proof field
+// may be unset when reached directly), margin = the mover's own card count.
+float PiSearch::node_exact_value(const PiNode *n) const {
+  Proof p = n->proof;
+  int m = n->margin;
+  const int mover = n->state.current_player();
+  if (n->terminal && p == Proof::UNKNOWN) {
+    p = Proof::LOSS;
+    m = n->state.get_player_hand_size(mover);
+  }
+  return exact_value(mover, p, m);
+}
 
 PiSearch::PiSearch(const Game &root, const PiSearchConfig &cfg,
                    PiNodePool *pool)
@@ -295,7 +316,7 @@ PiLeafRequest PiSearch::select_leaf() {
     if (n->terminal || n->proof != Proof::UNKNOWN) {
       // n is the reached node; backup() resolves it from the last path step
       // (or root_ when the path is empty) and propagates the exact value.
-      backup(proven_value(n));
+      backup(node_exact_value(n));
       return PiLeafRequest{false, {}};
     }
     if (!n->expanded) {
@@ -308,6 +329,8 @@ PiLeafRequest PiSearch::select_leaf() {
       req.feat.trick = az_search::trick_counts(n->state.last_move_id());
       req.feat.our_size = n->state.get_player_hand_size(mover);
       req.feat.opp_size = n->state.get_player_hand_size(1 - mover);
+      req.feat.my_pts = cfg_.pts[mover] / float(kSeriesTarget);
+      req.feat.opp_pts = cfg_.pts[1 - mover] / float(kSeriesTarget);
       return req;
     }
 
@@ -354,14 +377,20 @@ PiLeafRequest PiSearch::select_leaf() {
 
     path_.push_back(Step{n, gi, si, ei});
     PiEdge &e = n->edges[ei];
+    // Childless proven edges carry the proof in the PARENT mover's
+    // perspective; flip to the child mover for the backup.
+    const int child_seat = 1 - n->state.current_player();
     if (!e.child && e.proof != Proof::UNKNOWN) {
-      // Proven childless edge: exact value, child-mover perspective.
-      backup(e.proof == Proof::WIN ? 0.0f : 1.0f);
+      backup(exact_value(child_seat,
+                         e.proof == Proof::WIN ? Proof::LOSS : Proof::WIN,
+                         e.margin));
       return PiLeafRequest{false, {}};
     }
     PiNode *c = e.child ? e.child : resolve_child(n, e);
     if (!c) {  // freshly proven by the solver — same exact backup
-      backup(e.proof == Proof::WIN ? 0.0f : 1.0f);
+      backup(exact_value(child_seat,
+                         e.proof == Proof::WIN ? Proof::LOSS : Proof::WIN,
+                         e.margin));
       return PiLeafRequest{false, {}};
     }
     n = c;
@@ -375,7 +404,7 @@ void PiSearch::apply_eval(const PiNetEval &e) {
   expand(n, e.policy.data());
   float v = n->nn_value;
   if (n->proof != Proof::UNKNOWN) {
-    v = proven_value(n);
+    v = node_exact_value(n);
     // n just became proven by an eager-terminal edge; lift it up the path.
     if (!path_.empty()) {
       PiEdge &up = path_.back().node->edges[path_.back().ei];
@@ -473,8 +502,7 @@ void PiSearch::advance_root(int played_move) {
 // ----------------------------- results -------------------------------
 
 float PiSearch::root_value() const {
-  if (root_->proof == Proof::WIN) return 1.0f;
-  if (root_->proof == Proof::LOSS) return 0.0f;
+  if (root_->proof != Proof::UNKNOWN) return node_exact_value(root_);
   return (root_->N > 0) ? static_cast<float>(root_->W / root_->N) : 0.5f;
 }
 

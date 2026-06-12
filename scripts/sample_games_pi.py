@@ -113,11 +113,16 @@ def net_values(df: pd.DataFrame, model_path: str, device: str) -> np.ndarray:
     hand = torch.tensor(enc[:, :48], dtype=torch.float32)
     opp = torch.tensor(enc[:, 48:96], dtype=torch.float32)
     trick = torch.tensor(enc[:, 96:144], dtype=torch.float32)
-    osz = torch.tensor(df["opp_size"].to_numpy(), dtype=torch.float32) / 16.0
-    usz = torch.tensor(df["our_size"].to_numpy(), dtype=torch.float32) / 16.0
+    series_net = any("pts_embed" in k for k in m.state_dict().keys())
+    if series_net and "my_pts" in df.columns:  # score inputs (/50)
+        s0 = torch.tensor(df["my_pts"].to_numpy(), dtype=torch.float32) / 50.0
+        s1 = torch.tensor(df["opp_pts"].to_numpy(), dtype=torch.float32) / 50.0
+    else:  # legacy score-blind net: hand sizes (/16)
+        s0 = torch.tensor(df["opp_size"].to_numpy(), dtype=torch.float32) / 16.0
+        s1 = torch.tensor(df["our_size"].to_numpy(), dtype=torch.float32) / 16.0
     with torch.no_grad():
         v, _ = m(hand.to(device), opp.to(device), trick.to(device),
-                 osz.to(device), usz.to(device))
+                 s0.to(device), s1.to(device))
     return v.cpu().numpy().reshape(-1)
 
 
@@ -186,8 +191,15 @@ def render_game(gdf: pd.DataFrame, net_v: np.ndarray | None) -> str:
             f"<td>{val_s}</td><td>{sv_s}</td></tr>"
         )
     gid = recs[0]["game_id"]
+    score = ""
+    if "my_pts" in recs[0]:
+        # Seat-relative: recs[0]'s mover holds my_pts. Map back to seats.
+        m0 = recs[0]["turn_idx"] % 2  # seat 0 leads; parity gives the mover
+        a, b = recs[0]["my_pts"], recs[0]["opp_pts"]
+        s0, s1 = (a, b) if m0 == 0 else (b, a)
+        score = f" &mdash; series score {s0}&ndash;{s1}"
     head = (f'Game {gid} &mdash; <span class="w{winner}">P{winner} wins</span> '
-            f'({len(recs)} recorded decisions)')
+            f'({len(recs)} recorded decisions){score}')
     cols = ("<tr><th>ply</th><th>mover</th><th>mover hand</th><th>opp hand</th>"
             "<th>trick</th><th>played</th><th>search visits</th><th>net value</th>"
             "<th>search value</th></tr>")

@@ -72,8 +72,8 @@ inline uint64_t sig_of(const Key &k) {
 }
 
 // Entry word layout: [sig:57][margin:5][proof:2]. Margin = the LOSER's final
-// card count under the searched line (winner maximises it, loser minimises);
-// a tie-break objective only, exact for losses, first-win-greedy for wins.
+// card count under optimal play (winner maximises it, loser minimises) —
+// exact margin minimax, since series points are monotone in the margin.
 constexpr int kMarginBits = 5;
 constexpr int kLowBits = kMarginBits + 2;
 
@@ -126,29 +126,37 @@ struct Solver {
     if (budget <= 0) return Proof::UNKNOWN;
     --budget;
 
+    // Margin minimax: a WIN node takes the MAX margin over all winning moves,
+    // a LOSS node the MIN over all moves — no first-win break. The one sound
+    // cut: winning at the opponent's CURRENT card count (they shed nothing
+    // further) is the ceiling at this state, so stop scanning siblings.
+    const int me = g.current_player();
+    const int ceiling = g.get_player_hand_size(1 - me);
+
     Proof result = Proof::LOSS;  // no winning move found yet
     int loss_m = 32, win_m = -1;
     bool any_unknown = false;
     std::vector<int> legal = g.get_legal_moves();
-    prune_dominated_attachments(g.player_hand(g.current_player()), legal);
+    prune_dominated_attachments(g.player_hand(me), legal);
     for (int mv : legal) {
       Game child = g;
       child.apply_move(mv);
-      if (child.is_over()) {  // emptied our hand -> immediate win
+      if (child.is_over()) {  // emptied our hand -> win at the ceiling
         result = Proof::WIN;
-        win_m = std::max(win_m,
-                         g.get_player_hand_size(1 - g.current_player()));
-        break;  // first proven win ends the scan (margin = best so far)
+        win_m = ceiling;
+        break;
       }
       int sub_m = 0;
       const Proof sub = rec(child, sub_m);  // opponent to move in child
       if (sub == Proof::LOSS) {             // opponent loses => we win
         result = Proof::WIN;
         win_m = std::max(win_m, sub_m);
-        break;
+        if (win_m >= ceiling) break;
+      } else if (sub == Proof::WIN) {
+        loss_m = std::min(loss_m, sub_m);
+      } else {
+        any_unknown = true;
       }
-      if (sub == Proof::WIN) loss_m = std::min(loss_m, sub_m);
-      if (sub == Proof::UNKNOWN) any_unknown = true;
     }
 
     // If we found no win but some line is unresolved, the result is unknown and
@@ -156,6 +164,9 @@ struct Solver {
     if (result != Proof::WIN && any_unknown) return Proof::UNKNOWN;
 
     margin = (result == Proof::WIN) ? win_m : loss_m;
+    // A WIN that skipped unresolved siblings is a sound proof but its margin
+    // may be improvable: usable now, not memoizable as exact.
+    if (result == Proof::WIN && any_unknown && win_m < ceiling) return result;
     memo_insert(key, result, margin);
     return result;
   }

@@ -12,11 +12,11 @@ writer fills them with exact encodings — see src/datagen/nn_encode.h):
   hand     [B,48] exact   : side-to-move's exact hand
   opp      [B,48] exact   : opponent's exact hand
   trick    [B,48] exact   : current trick (move to beat; all-zero == lead)
-  opp_size [B]   float/16 : opponent hand size (informational; derivable)
-  our_size [B]   float/16 : mover hand size
+  my_pts   [B]   float/50 : mover's series points (series-score conditioning)
+  opp_pts  [B]   float/50 : opponent's series points
 
 Outputs:
-  value         [B]                  sigmoid, P(side to move wins this game)
+  value         [B]                  sigmoid, P(side to move wins the SERIES)
   policy_logits [B, PLAYER_HEAD_DIM]  raw factored logits (compose via C-matrix)
 
 The width/depth/embedding are constructor args so the same code drives model-size
@@ -52,7 +52,9 @@ class Big2NetAZPI(nn.Module):
         self.layer_b_trick = _init_swish(nn.Linear(e, b_trick))
         self.layer_c_player = _init_swish(nn.Linear(e, c_player))
         self.layer_c_opp = _init_swish(nn.Linear(e, c_opp))
-        self.size_embed = _init_swish(nn.Linear(2, 16))
+        # Series-score conditioning: [my_pts/50, opp_pts/50]. Hand sizes are
+        # derivable from the exact encodings and are no longer net inputs.
+        self.pts_embed = _init_swish(nn.Linear(2, 16))
 
         junction_in = c_player + c_opp + b_trick + 16
         self.junction = _init_selu(nn.Linear(junction_in, width))
@@ -67,8 +69,8 @@ class Big2NetAZPI(nn.Module):
         hand: torch.Tensor,  # [B, 48] exact
         opp: torch.Tensor,  # [B, 48] exact (opponent's true hand)
         trick: torch.Tensor,  # [B, 48] exact (all-zero == lead)
-        opp_size: torch.Tensor,  # [B] float (/16)
-        our_size: torch.Tensor,  # [B] float (/16)
+        my_pts: torch.Tensor,  # [B] float, mover series points (/50)
+        opp_pts: torch.Tensor,  # [B] float, opponent series points (/50)
     ) -> tuple[torch.Tensor, torch.Tensor]:
         h = F.mish(self.layer_a(hand))
         h = F.mish(self.layer_b_hands(h))
@@ -81,7 +83,7 @@ class Big2NetAZPI(nn.Module):
         t = F.mish(self.layer_a(trick))
         t = F.mish(self.layer_b_trick(t))
 
-        s = F.mish(self.size_embed(torch.stack([opp_size, our_size], dim=-1)))
+        s = F.mish(self.pts_embed(torch.stack([my_pts, opp_pts], dim=-1)))
 
         x = torch.cat([h, o, t, s], dim=-1)
         x = self.junction_norm(F.selu(self.junction(x)))

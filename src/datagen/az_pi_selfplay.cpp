@@ -57,13 +57,26 @@ static const char *arg(int argc, char **argv, const char *key, const char *def) 
   return def;
 }
 
+static bool has_flag(int argc, char **argv, const char *key) {
+  for (int i = 1; i < argc; ++i)
+    if (std::strcmp(argv[i], key) == 0) return true;
+  return false;
+}
+
 struct Sample {
   int game_id, turn_idx, mover, opp_size, our_size;
-  float value = 0.0f;   // backfilled at game end
-  float root_v = 0.5f;  // search value at the root (exact 1/0 when proven)
+  int my_pts = 0, opp_pts = 0;  // mover-relative series scores (raw points)
+  int loser_cards = 0;  // backfilled: loser's final card count (series margin)
+  float value = 0.0f;   // backfilled at game end (1/0 winner flag)
+  float root_v = 0.5f;  // search value at the root (exact when proven)
   std::array<int, 13> hand, opp_hand, trick;
   std::vector<int> legal;
   std::vector<int> visit_moves, visit_counts;
+};
+
+// One per finished game; the series_markov.py --outcomes CSV row.
+struct Outcome {
+  int a, b, first_player, winner, loser_cards;
 };
 
 struct Slot {
@@ -76,6 +89,7 @@ struct Slot {
   PiEvalFeatures pending{};
   int game_id = -1;
   int turn = 0;
+  int pts[2] = {0, 0};  // series scores by seat, sampled per game
   std::mt19937 rng;
   std::vector<int> sample_idx;  // indices into the slot's pending samples
   std::vector<Sample> samples;
@@ -97,6 +111,19 @@ int main(int argc, char **argv) {
   const unsigned seed = std::atoi(arg(argc, argv, "--seed", "0"));
   const std::string device_s = arg(argc, argv, "--device", "cuda");
   const int threads = std::atoi(arg(argc, argv, "--threads", "0"));  // shard count
+  // Series mode: --series-table conditions the SEARCH on series values;
+  // --series-states only samples + records scores (bootstrap: score-blind
+  // search, values relabeled at training time). --outcomes dumps one CSV row
+  // per game for analysis/series_markov.py.
+  const std::string series_csv = arg(argc, argv, "--series-table", "");
+  const bool series_states =
+      has_flag(argc, argv, "--series-states") || !series_csv.empty();
+  const std::string outcomes_path = arg(argc, argv, "--outcomes", "");
+  // --fixed-pts A,B pins every game to one series state (sample-game HTMLs).
+  const std::string fixed_pts_s = arg(argc, argv, "--fixed-pts", "");
+  int fixed_pts[2] = {-1, -1};
+  if (!fixed_pts_s.empty())
+    std::sscanf(fixed_pts_s.c_str(), "%d,%d", &fixed_pts[0], &fixed_pts[1]);
 
   if (model_path.empty()) {
     std::fprintf(stderr, "error: --model is required\n");
@@ -105,10 +132,20 @@ int main(int argc, char **argv) {
   torch::Device device(device_s == "cuda" && torch::cuda::is_available()
                            ? torch::kCUDA
                            : torch::kCPU);
-  PiNNEvaluator nn(model_path, device);
+  SeriesTable series_table;
+  if (!series_csv.empty() && !load_series_table(series_csv, series_table)) {
+    std::fprintf(stderr, "error: failed to load --series-table %s\n",
+                 series_csv.c_str());
+    return 1;
+  }
+  // With a table the model is series-aware (pts inputs); without one (incl.
+  // the --series-states bootstrap) it is a legacy score-blind net (sizes).
+  PiNNEvaluator nn(model_path, device, series_table.loaded);
 
-  std::printf("az_pi self-play: games=%d sims=%d slots=%d device=%s\n",
-              total_games, sims, n_slots, device.is_cuda() ? "cuda" : "cpu");
+  std::printf("az_pi self-play: games=%d sims=%d slots=%d device=%s%s%s\n",
+              total_games, sims, n_slots, device.is_cuda() ? "cuda" : "cpu",
+              series_states ? " series-states" : "",
+              series_table.loaded ? " series-table" : "");
 
   std::mt19937 master(seed);
   std::vector<Slot> slots(n_slots);
@@ -116,18 +153,24 @@ int main(int argc, char **argv) {
 
   std::atomic<int> games_started{0}, games_done{0};
   std::vector<Sample> all_samples;
-  std::mutex samples_mu;  // guards all_samples (hit once per finished game)
+  std::vector<Outcome> all_outcomes;
+  std::mutex samples_mu;  // guards all_samples/all_outcomes (once per game)
 
-  auto make_config = [&](unsigned s) {
+  auto make_config = [&](Slot &sl) {
     PiSearchConfig cfg;
     cfg.c_puct = cpuct;
     cfg.sims = sims;
-    cfg.seed = s;
+    cfg.seed = sl.rng();
     cfg.root_noise = true;
     cfg.dir_eps = dir_eps;
     cfg.dir_alpha = dir_alpha;
     cfg.solver.max_total_cards = solve_cards;
     cfg.solver.node_budget = solve_nodes;
+    if (series_table.loaded) {
+      cfg.series = &series_table;
+      cfg.pts[0] = sl.pts[0];
+      cfg.pts[1] = sl.pts[1];
+    }
     return cfg;
   };
 
@@ -136,6 +179,17 @@ int main(int argc, char **argv) {
     if (id >= total_games) return false;  // counter overshoot is harmless
     s.game = Game();
     s.game.shuffle_deal(s.rng);
+    // Uniform series-state sampling: even NN coverage of all 50x50 score
+    // states; the value target is table-derived, so the state distribution
+    // does not need to match natural series play. Seat 0 leads (= leader).
+    if (fixed_pts[0] >= 0) {
+      s.pts[0] = fixed_pts[0];
+      s.pts[1] = fixed_pts[1];
+    } else if (series_states) {
+      std::uniform_int_distribution<int> d(0, kSeriesTarget - 1);
+      s.pts[0] = d(s.rng);
+      s.pts[1] = d(s.rng);
+    }
     s.tree.reset();
     s.sims_done = 0;
     s.waiting = false;
@@ -148,11 +202,16 @@ int main(int argc, char **argv) {
 
   auto finalize_game = [&](Slot &s) {
     const int winner = s.game.get_winner();
-    for (auto &smp : s.samples)
+    const int loser_cards = s.game.get_player_hand_size(1 - winner);
+    for (auto &smp : s.samples) {
       smp.value = (smp.mover == winner) ? 1.0f : 0.0f;
+      smp.loser_cards = loser_cards;
+    }
     {
       std::lock_guard<std::mutex> lk(samples_mu);
       for (auto &smp : s.samples) all_samples.push_back(std::move(smp));
+      all_outcomes.push_back(
+          Outcome{s.pts[0], s.pts[1], 0, winner, loser_cards});
     }
     s.samples.clear();
     s.active = false;
@@ -184,6 +243,8 @@ int main(int argc, char **argv) {
       for (int r = 0; r < 13; ++r) smp.trick[r] = MOVE_TO_CARDS[lm][r];
     smp.our_size = s.game.get_player_hand_size(mover);
     smp.opp_size = s.game.get_player_hand_size(1 - mover);
+    smp.my_pts = s.pts[mover];
+    smp.opp_pts = s.pts[1 - mover];
     smp.root_v = s.tree->root_value();
     smp.legal = s.game.get_legal_moves();
     for (auto &[m, n] : visits) {
@@ -222,8 +283,7 @@ int main(int argc, char **argv) {
         }
       }
       if (!s.tree) {
-        s.tree = std::make_unique<PiSearch>(s.game, make_config(s.rng()),
-                                            &s.pool);
+        s.tree = std::make_unique<PiSearch>(s.game, make_config(s), &s.pool);
         s.sims_done = 0;
       }
       while (s.sims_done < sims && !s.tree->root_proven()) {
@@ -359,6 +419,7 @@ int main(int argc, char **argv) {
   // ---- Parquet write (player schema: enc list<float32>(144)) ----
   auto pool = arrow::default_memory_pool();
   arrow::Int32Builder game_id, turn_idx, opp_size, our_size;
+  arrow::Int32Builder my_pts_b, opp_pts_b, loser_cards_b;
   arrow::FloatBuilder value, root_value;
   arrow::ListBuilder enc(pool, std::make_shared<arrow::FloatBuilder>(pool));
   arrow::ListBuilder legal(pool, std::make_shared<arrow::Int32Builder>(pool));
@@ -375,6 +436,9 @@ int main(int argc, char **argv) {
     turn_idx.Append(s.turn_idx);
     opp_size.Append(s.opp_size);
     our_size.Append(s.our_size);
+    my_pts_b.Append(s.my_pts);
+    opp_pts_b.Append(s.opp_pts);
+    loser_cards_b.Append(s.loser_cards);
     value.Append(s.value);
     root_value.Append(s.root_v);
     encode_exact(s.hand, buf.data());
@@ -412,6 +476,9 @@ int main(int argc, char **argv) {
       arrow::field("enc", arrow::list(arrow::float32())),
       arrow::field("opp_size", arrow::int32()),
       arrow::field("our_size", arrow::int32()),
+      arrow::field("my_pts", arrow::int32()),
+      arrow::field("opp_pts", arrow::int32()),
+      arrow::field("loser_cards", arrow::int32()),
       arrow::field("value", arrow::float32()),
       arrow::field("root_value", arrow::float32()),
       arrow::field("legal", arrow::list(arrow::int32())),
@@ -419,9 +486,10 @@ int main(int argc, char **argv) {
       arrow::field("visit_counts", arrow::list(arrow::int32())),
   };
   std::vector<std::shared_ptr<arrow::Array>> arrays = {
-      finish_i32(game_id),   finish_i32(turn_idx), finish_list(enc),
-      finish_i32(opp_size),  finish_i32(our_size), value_arr,
-      root_value_arr,        finish_list(legal),   finish_list(vmoves),
+      finish_i32(game_id),   finish_i32(turn_idx),  finish_list(enc),
+      finish_i32(opp_size),  finish_i32(our_size),  finish_i32(my_pts_b),
+      finish_i32(opp_pts_b), finish_i32(loser_cards_b), value_arr,
+      root_value_arr,        finish_list(legal),    finish_list(vmoves),
       finish_list(vcounts),
   };
 
@@ -435,5 +503,20 @@ int main(int argc, char **argv) {
     return 1;
   }
   std::printf("✓ wrote %s\n", out_path.c_str());
+
+  if (!outcomes_path.empty()) {
+    FILE *f = std::fopen(outcomes_path.c_str(), "w");
+    if (!f) {
+      std::fprintf(stderr, "error: cannot write %s\n", outcomes_path.c_str());
+      return 1;
+    }
+    std::fprintf(f, "a,b,first_player,winner,loser_cards\n");
+    for (const auto &o : all_outcomes)
+      std::fprintf(f, "%d,%d,%d,%d,%d\n", o.a, o.b, o.first_player, o.winner,
+                   o.loser_cards);
+    std::fclose(f);
+    std::printf("✓ wrote %s (%zu games)\n", outcomes_path.c_str(),
+                all_outcomes.size());
+  }
   return 0;
 }

@@ -27,6 +27,7 @@
 #include "az_pi/pi_solver.h"
 #include "az_search/considered_moves.h"
 #include "game.h"
+#include "series.h"
 
 #include <cstdint>
 #include <deque>
@@ -46,6 +47,12 @@ struct PiSearchConfig {
   float dir_alpha = 0.3f;
   // Endgame solver applied at leaf creation.
   SolverLimits solver{};
+  // Series objective (optional). When `series` is set, proven/terminal nodes
+  // back up P(win the SERIES) = series_value_after_win(margin) instead of 1/0,
+  // conditioned on the per-seat scores in `pts`. Margin ordering in best_move
+  // is unchanged: series points are monotone in the margin.
+  const SeriesTable *series = nullptr;
+  int pts[2] = {0, 0};  // series points by SEAT (not mover-relative)
 };
 
 struct PiNode;
@@ -144,6 +151,11 @@ class PiSearch {
   std::size_t num_nodes() const { return live_nodes_; }
 
  private:
+  // Exact value of a proven position, in the given mover's perspective:
+  // series_value_after_win over (cfg_.series, cfg_.pts, margin), or 1/0
+  // when no series table is configured.
+  float exact_value(int mover_seat, Proof proof, int margin) const;
+  float node_exact_value(const PiNode *n) const;
   PiNode *alloc_node(const Game &g);
   void release(PiNode *n);
   void expand(PiNode *n, const float *logits);
