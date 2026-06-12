@@ -59,10 +59,16 @@ void test_solver_card_threshold() {
 
 void test_solver_budget_exhaustion() {
   // A position requiring multiple node expansions, but only one node of budget.
+  solver_clear_memo();  // the memo persists across calls; isolate this test
   Game g(hand({{0, 1}, {1, 1}}), hand({{2, 1}}), {}, kLead, 0);
   SolverLimits lim;
   lim.node_budget = 1;
   assert(solve(g, lim) == Proof::UNKNOWN);
+  // Persistence: a full-budget solve proves it, after which even a zero-budget
+  // call answers from the memo.
+  assert(solve(g, SolverLimits{}) == Proof::LOSS);
+  lim.node_budget = 0;
+  assert(solve(g, lim) == Proof::LOSS);
 }
 
 // ----------------------------- search -----------------------------
@@ -160,6 +166,36 @@ void test_search_advance_root_reuse() {
   assert(s.root_n() < cfg.sims);
 }
 
+void test_search_proven_root_best_move() {
+  // Advancing into a solver-proven child leaves an UNEXPANDED proven root
+  // (select_leaf never expands proven nodes). best_move() must still return a
+  // legal — and when proven WIN, winning — move, not a bogus default.
+  // P0 {3,4} vs opp {3}: P0 leads the 4 (proven win), opp must pass, then the
+  // proven-WIN root must play the 3 to win, never pass.
+  solver_clear_memo();
+  Game g(hand({{0, 1}, {1, 1}}), hand({{0, 1}}), {}, kLead, 0);
+  PiSearchConfig cfg;
+  cfg.sims = 64;
+  PiSearch s(g, cfg);
+  StubEvaluator ev(0.5f);
+  s.run(ev);
+  const int lead = s.best_move();
+  assert(lead != kPASS);  // both leads win (a tied single can't beat)
+  s.advance_root(lead);
+  // Opp node: proven LOSS, unexpanded; only legal reply is pass.
+  const int reply = s.best_move();
+  assert(reply == kPASS);
+  s.advance_root(reply);
+  // Back to P0: proven WIN, unexpanded. Must play the 3 (wins), not pass.
+  const int finish = s.best_move();
+  assert(finish != kPASS);
+  Game end = g;
+  end.apply_move(lead);
+  end.apply_move(reply);
+  end.apply_move(finish);
+  assert(end.is_over() && end.get_winner() == 0);
+}
+
 void test_search_full_game_legal() {
   // A full stub self-play game terminates and only ever plays legal moves.
   Game g;
@@ -197,5 +233,6 @@ void run_az_pi_tests() {
   test_search_mean_backup();
   test_search_solver_finds_win();
   test_search_advance_root_reuse();
+  test_search_proven_root_best_move();
   test_search_full_game_legal();
 }

@@ -33,7 +33,7 @@ set -euo pipefail
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:.venv/lib/python3.13/site-packages/nvidia/cu13/lib"
 
 START=""; END=""
-GAMES=20000; SIMS=400; SLOTS=1024
+GAMES=20000; SIMS=400; SLOTS=1024; THREADS=8
 EPOCHS=10; BATCH=2048; MIX_GENS=3; MIX_DECAY=0.5
 EVAL_DEALS=400; EVAL_SIMS=400
 WIDTH=256; BLOCKS=2; EMBED=64
@@ -47,6 +47,7 @@ while [[ $# -gt 0 ]]; do
         --games) GAMES="$2"; shift 2;;
         --sims) SIMS="$2"; shift 2;;
         --slots) SLOTS="$2"; shift 2;;
+        --threads) THREADS="$2"; shift 2;;
         --epochs) EPOCHS="$2"; shift 2;;
         --batch) BATCH="$2"; shift 2;;
         --mix-gens) MIX_GENS="$2"; shift 2;;
@@ -72,8 +73,15 @@ CHAMP="models/az_pi.pt"
 tee_log() { tee -a "$LOG_FILE"; }
 pf() { printf "$1" "$2"; }
 
-# eval_az_pi_match prints "... (Wilson95 [lo, hi])"; pull the lower bound.
-parse_ci_lo() { grep -oP 'Wilson95 \[\K[0-9.]+' "$1" | head -1; }
+# Promotion gate: sweep-share CI (decisive deals only — the skill signal;
+# split deals are card-decided). Falls back to the raw win-rate CI when no
+# decisive line is present.
+parse_ci_lo() {
+    local lo
+    lo=$(grep 'sweep share' "$1" | grep -oP 'Wilson95 \[\K[0-9.]+' | head -1)
+    [[ -z "$lo" ]] && lo=$(grep -oP 'Wilson95 \[\K[0-9.]+' "$1" | head -1)
+    echo "$lo"
+}
 ci_clears_half() {
     local lo; lo=$(parse_ci_lo "$1")
     [[ -n "$lo" ]] && python3 -c "import sys; sys.exit(0 if $lo > 0.5 else 1)"
@@ -107,11 +115,12 @@ for GEN in $(seq "$START" "$END"); do
             "$(date '+%Y-%m-%d %H:%M:%S')" "$DIV"
     } | tee_log
 
-    # 1. Self-play with the champion.
+    # 1. Self-play with the champion. No temperature: each game's fresh deal
+    # already diversifies the data; Dirichlet root noise still explores moves.
     echo "  [1/4] Self-play $GAMES games vs champion (sims=$SIMS)..." | tee_log
     bin/az_pi_selfplay --model "$CHAMP" --games "$GAMES" --sims "$SIMS" \
-        --slots "$SLOTS" --seed "$((SEED + GEN))" --device "$DEVICE" \
-        --out "$D" 2>&1 | tee_log
+        --slots "$SLOTS" --threads "$THREADS" --temp-moves 0 \
+        --seed "$((SEED + GEN))" --device "$DEVICE" --out "$D" 2>&1 | tee_log
 
     # 2. Train (mixed over last MIX_GENS gens).
     echo "  [2/4] Train gen$GEN ($EPOCHS epochs, mix=$MIX_GENS)..." | tee_log
@@ -126,25 +135,44 @@ for GEN in $(seq "$START" "$END"); do
         --epochs "$EPOCHS" --batch "$BATCH" --mix-decay "$MIX_DECAY" \
         --device "$DEVICE" 2>&1 | grep -E '\[pi\]' | tee_log
 
+    # 2b. Sample games: deterministic (no noise, argmax), FIXED deals across
+    # generations so play evolution is visible on identical cards.
+    bin/az_pi_selfplay --model "$M" --games 10 --sims "$SIMS" --slots 10 \
+        --threads "$THREADS" --temp-moves 0 --dirichlet-eps 0 --seed 777 \
+        --device "$DEVICE" \
+        --out "samples/az_pi_gen${GEN}_games.parquet" 2>&1 | grep -v '  games ' | tee_log
+    uv run python scripts/sample_games_pi.py \
+        "samples/az_pi_gen${GEN}_games.parquet" --games 10 --model "$M" \
+        --out "samples/az_pi_gen${GEN}.html" 2>&1 | tee_log
+
     # 3. Eval genN vs champion; promote on Wilson lower bound > 0.5.
     echo "  [3/4] Eval gen$GEN vs champion ($EVAL_DEALS deals, sims=$EVAL_SIMS)..." | tee_log
     EV="logs/az_pi_eval_gen${GEN}.txt"
     bin/eval_az_pi_match --p0 "pi:$M" --p1 "pi:$CHAMP" \
         --deals "$EVAL_DEALS" --sims "$EVAL_SIMS" --device "$DEVICE" \
         --seed "$SEED" 2>&1 | tee "$EV" | tee_log
+    PROMOTED=0
     if ci_clears_half "$EV"; then
         cp "$M" "$CHAMP"
+        PROMOTED=1
         echo "  ✓ gen$GEN PROMOTED -> champion" | tee_log
     else
         echo "  · gen$GEN not promoted (champion unchanged)" | tee_log
     fi
 
-    # 4. Tracking evals (champion vs classic baselines).
-    echo "  [4/4] Tracking evals vs greedy / typed_search..." | tee_log
-    for OPP in classic:greedy classic:typed_search; do
-        bin/eval_az_pi_match --p0 "pi:$CHAMP" --p1 "$OPP" \
-            --deals "$EVAL_DEALS" --sims "$EVAL_SIMS" --device "$DEVICE" \
-            --seed "$SEED" 2>&1 | grep -E 'win rate|sweep' | tee_log
-    done
+    # 4. Tracking evals (champion vs classic baselines). Skipped when the
+    # champion didn't change: same model + same seed replays identical games.
+    if [[ "$PROMOTED" == 1 ]]; then
+        echo "  [4/4] Tracking evals vs greedy / typed_search..." | tee_log
+        # Raw rate only: sweep share vs these baselines is saturated at ~1.0;
+        # the raw % tracks how bad a hand the champion can still win.
+        for OPP in classic:greedy classic:typed_search; do
+            bin/eval_az_pi_match --p0 "pi:$CHAMP" --p1 "$OPP" \
+                --deals "$EVAL_DEALS" --sims "$EVAL_SIMS" --device "$DEVICE" \
+                --seed "$SEED" 2>&1 | grep -E 'win rate' | tee_log
+        done
+    else
+        echo "  [4/4] Tracking evals skipped (champion unchanged)" | tee_log
+    fi
 done
 echo "az_pi loop done." | tee_log

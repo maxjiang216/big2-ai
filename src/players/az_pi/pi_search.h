@@ -55,31 +55,57 @@ struct PiEdge {
   float prior = 0.0f;
   PiNode *child = nullptr;        // lazily created, owned by this edge
   Proof proof = Proof::UNKNOWN;   // for the PARENT mover playing this edge
+  // Loser's final card count along this edge's proven line (valid when proof
+  // is known). Secondary objective: a winning mover maximises it, a losing
+  // mover minimises it — best over the lines actually searched.
+  int8_t margin = 0;
 };
 
-// Hierarchical selection group. Level-1 = family; each family holds Level-2
-// subgroups (rank / straight-high / bomb-kicker); each subgroup holds leaf edge
-// indices into PiNode::edges. Aggregate visit stats are kept per group, in the
-// PARENT mover's perspective (same as the node's own W/N).
-struct PiGroup {
-  int key = 0;
-  std::vector<int> idx;        // leaf edge indices (subgroups only)
-  std::vector<PiGroup> sub;    // Level-2 subgroups (families only)
+// Hierarchical selection groups, stored FLAT (no nested vectors) so recycled
+// nodes keep their vector capacity — steady-state expansion allocates nothing.
+// Level-1 family rows index a contiguous range of Level-2 subgroup rows, which
+// index a contiguous range of edge indices in PiNode::sidx. Aggregate visit
+// stats are kept per group, in the PARENT mover's perspective (same as the
+// node's own W/N).
+// int32/float stats throughout: visit counts stay far below 2^31 and W sums
+// of [0,1] values lose nothing meaningful at float precision, while the rows
+// shrink 32B -> 20B (more rows per cache line in the hot PUCT scan).
+struct PiFam {
+  int32_t key = 0;
   float prior_sum = 0.0f;
-  long N = 0;
-  double W = 0.0;
+  int32_t N = 0;
+  float W = 0.0f;
+  int16_t sb = 0, se = 0;  // subgroup rows: subs[sb, se)
+};
+struct PiSub {
+  int32_t key = 0;
+  float prior_sum = 0.0f;
+  int32_t N = 0;
+  float W = 0.0f;
+  int16_t ib = 0, ie = 0;  // edge indices: sidx[ib, ie)
 };
 
 struct PiNode {
   Game state;
   bool expanded = false;
   Proof proof = Proof::UNKNOWN;  // for the side to move at this node
+  int8_t margin = 0;             // loser's final cards on the proven line
   bool terminal = false;         // game already over at this node
   float nn_value = 0.5f;         // leaf estimate, P(mover wins)
-  long N = 0;
-  double W = 0.0;                 // sum of mover-perspective values over visits
+  int32_t N = 0;
+  float W = 0.0f;                 // sum of mover-perspective values over visits
   std::vector<PiEdge> edges;
-  std::vector<PiGroup> groups;   // hierarchical view over edges
+  std::vector<PiFam> fams;       // hierarchical view over edges (flat)
+  std::vector<PiSub> subs;
+  std::vector<int> sidx;
+};
+
+// Node pool, shareable between successive games (e.g. one per self-play slot
+// or per shard — anything single-threaded). Recycled nodes keep the capacity
+// of their edge/group vectors, so a warmed pool expands with zero mallocs.
+struct PiNodePool {
+  std::deque<PiNode> storage;
+  std::vector<PiNode *> free_list;
 };
 
 struct PiLeafRequest {
@@ -89,7 +115,13 @@ struct PiLeafRequest {
 
 class PiSearch {
  public:
-  PiSearch(const Game &root, const PiSearchConfig &cfg);
+  // `pool` (optional) shares node storage across trees/games — must only be
+  // used from one thread. Falls back to a private pool.
+  PiSearch(const Game &root, const PiSearchConfig &cfg,
+           PiNodePool *pool = nullptr);
+  ~PiSearch();  // returns all nodes to the pool
+  PiSearch(const PiSearch &) = delete;
+  PiSearch &operator=(const PiSearch &) = delete;
 
   PiLeafRequest select_leaf();
   void apply_eval(const PiNetEval &e);  // expand pending leaf + back up
@@ -100,6 +132,8 @@ class PiSearch {
   void advance_root(int played_move);
 
   // Results.
+  // Root proven win/loss: further sims add nothing — caller can stop early.
+  bool root_proven() const { return root_->proof != Proof::UNKNOWN; }
   int best_move() const;  // proven-win edge first, else max visits
   float root_value() const;
   std::vector<std::pair<int, long>> root_visits() const;  // (move_id, visits)
@@ -115,7 +149,6 @@ class PiSearch {
   void expand(PiNode *n, const float *logits);
   void build_groups(PiNode *n);
   PiNode *resolve_child(PiNode *parent, PiEdge &e);
-  void classify_leaf(PiNode *child);          // terminal / solver proof + value
   void propagate_proof_up();                  // along path_ after a proven leaf
   void apply_root_noise();
   void backup(float leaf_value);              // along path_, parity-flipped
@@ -125,12 +158,14 @@ class PiSearch {
 
   PiSearchConfig cfg_;
   std::mt19937 rng_;
-  std::deque<PiNode> arena_;       // stable-address pool
-  std::vector<PiNode *> free_list_;
+  PiNodePool own_pool_;            // fallback when no external pool given
+  PiNodePool *pool_;               // node storage (external or own)
   std::size_t live_nodes_ = 0;
   PiNode *root_ = nullptr;
   PiNode *pending_ = nullptr;      // leaf awaiting apply_eval
   std::vector<Step> path_;         // internal-node selections this sim
+  std::vector<float> tmp_f_;       // scratch (priors / noise), reused
+  std::vector<int> tmp_fam_, tmp_sub_;  // scratch per-edge group keys
 };
 
 }  // namespace az_pi

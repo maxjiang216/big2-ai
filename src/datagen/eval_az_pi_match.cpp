@@ -27,6 +27,8 @@
 
 #include <torch/cuda.h>
 
+#include <omp.h>
+
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -76,7 +78,8 @@ struct ESlot {
   Game game;
   int assign[2] = {0, 1};  // seat -> player index (0 = p0, 1 = p1)
   std::unique_ptr<Player> classic[2];
-  std::unique_ptr<PiSearch> tree;
+  PiNodePool pool;  // shared node storage for this slot's trees (same thread)
+  std::unique_ptr<PiSearch> tree[2];  // per seat: pi-vs-pi must not share a tree
   int sims_done = 0;
   bool waiting = false;
   bool done = false;
@@ -98,6 +101,8 @@ int main(int argc, char **argv) {
   const long solve_nodes = std::atol(arg(argc, argv, "--solve-nodes", "10000"));
   const unsigned seed = std::atoi(arg(argc, argv, "--seed", "0"));
   const std::string device_s = arg(argc, argv, "--device", "cuda");
+  const int threads = std::atoi(arg(argc, argv, "--threads", "0"));
+  if (threads > 0) omp_set_num_threads(threads);
 
   torch::Device device(device_s == "cuda" && torch::cuda::is_available()
                            ? torch::kCUDA
@@ -158,36 +163,51 @@ int main(int argc, char **argv) {
     }
   }
 
+  // Apply a move: update the non-mover classic player and advance every live
+  // PI tree (both seats keep their subtree across turns).
+  auto apply = [&](ESlot &s, int mover, int mid) {
+    Move m(mid);
+    if (s.classic[1 - mover]) s.classic[1 - mover]->accept_opponent_move(m);
+    s.game.apply_move(mid);
+    for (auto &t : s.tree)
+      if (t) t->advance_root(mid);
+  };
+
   // Advance one slot until it parks on a PI leaf eval, or finishes.
   auto advance = [&](ESlot &s) -> bool {
     for (;;) {
       if (s.game.is_over()) {
         s.winner = s.game.get_winner();
         s.done = true;
+        // Free this slot's trees and pool immediately: with thousands of
+        // concurrent slots the retained high-water memory otherwise grows
+        // into the many-GB range and stalls the machine.
+        s.tree[0].reset();
+        s.tree[1].reset();
+        s.pool = PiNodePool();
         return false;
       }
       const int mover = s.game.current_player();
       const int pidx = s.assign[mover];
       if (s.classic[mover]) {  // classic mover
-        Move m = s.classic[mover]->select_move();
-        if (s.classic[1 - mover]) s.classic[1 - mover]->accept_opponent_move(m);
-        s.game.apply_move(m);
+        apply(s, mover, encodeMove(s.classic[mover]->select_move()));
         continue;
       }
       // PI mover
-      if (!s.tree) {
+      {
         const auto legal = s.game.get_legal_moves();
-        if (legal.size() == 1) {
-          Move m(legal[0]);
-          if (s.classic[1 - mover]) s.classic[1 - mover]->accept_opponent_move(m);
-          s.game.apply_move(legal[0]);
+        if (legal.size() == 1) {  // forced: no search even with a live tree
+          apply(s, mover, legal[0]);
           continue;
         }
-        s.tree = std::make_unique<PiSearch>(s.game, make_cfg(pidx));
+      }
+      if (!s.tree[mover]) {
+        s.tree[mover] =
+            std::make_unique<PiSearch>(s.game, make_cfg(pidx), &s.pool);
         s.sims_done = 0;
       }
-      while (s.sims_done < sims_for[pidx]) {
-        PiLeafRequest req = s.tree->select_leaf();
+      while (s.sims_done < sims_for[pidx] && !s.tree[mover]->root_proven()) {
+        PiLeafRequest req = s.tree[mover]->select_leaf();
         if (req.needs_eval) {
           s.pending = req.feat;
           s.waiting = true;
@@ -196,11 +216,7 @@ int main(int argc, char **argv) {
         }
         ++s.sims_done;
       }
-      const int mid = s.tree->best_move();
-      Move m(mid);
-      if (s.classic[1 - mover]) s.classic[1 - mover]->accept_opponent_move(m);
-      s.game.apply_move(mid);
-      s.tree.reset();
+      apply(s, mover, s.tree[mover]->best_move());
       s.sims_done = 0;
     }
   };
@@ -208,6 +224,12 @@ int main(int argc, char **argv) {
   auto t0 = std::chrono::steady_clock::now();
   std::vector<PiEvalFeatures> feats[2];
   std::vector<int> fslot[2];
+
+  // Prime: pump every slot to its first parked leaf eval (or completion).
+  // Slots are independent games, so the pump parallelises freely.
+#pragma omp parallel for schedule(dynamic, 4)
+  for (int i = 0; i < n_slots; ++i) advance(slots[i]);
+
   for (;;) {
     feats[0].clear();
     feats[1].clear();
@@ -215,30 +237,30 @@ int main(int argc, char **argv) {
     fslot[1].clear();
     for (int i = 0; i < n_slots; ++i) {
       ESlot &s = slots[i];
-      if (s.done || s.waiting) continue;
-      if (advance(s)) {
+      if (s.waiting) {
         feats[s.cur_eval].push_back(s.pending);
         fslot[s.cur_eval].push_back(i);
       }
     }
-    bool any = false;
+    if (fslot[0].empty() && fslot[1].empty()) break;  // all games finished
     for (int e = 0; e < 2; ++e) {
       if (fslot[e].empty()) continue;
-      any = true;
       auto res = evals[e]->eval_batch(feats[e]);
+      // Distribute results and re-pump each slot to its next parked eval.
+#pragma omp parallel for schedule(dynamic, 4)
       for (std::size_t k = 0; k < fslot[e].size(); ++k) {
         ESlot &s = slots[fslot[e][k]];
-        s.tree->apply_eval(res[k]);
+        s.tree[s.game.current_player()]->apply_eval(res[k]);
         ++s.sims_done;
         s.waiting = false;
+        advance(s);
       }
     }
-    if (!any) break;  // nothing parked -> all games finished
   }
 
   // Tally p0 results.
   long p0_wins = 0;
-  long sweeps = 0;
+  long sweeps = 0, sweeps1 = 0;
   for (int d = 0; d < deals; ++d) {
     const ESlot &g0 = slots[2 * d];      // seat0 = p0
     const ESlot &g1 = slots[2 * d + 1];  // seat0 = p1, so p0 is seat1
@@ -246,6 +268,7 @@ int main(int argc, char **argv) {
     const bool p0_won_g1 = (g1.winner == 1);
     p0_wins += (p0_won_g0 ? 1 : 0) + (p0_won_g1 ? 1 : 0);
     if (p0_won_g0 && p0_won_g1) ++sweeps;
+    if (!p0_won_g0 && !p0_won_g1) ++sweeps1;
   }
 
   const long total = 2L * deals;
@@ -263,11 +286,31 @@ int main(int argc, char **argv) {
               total, wr, ci.lo, ci.hi);
   std::printf("p0 sweep rate (both games of a deal): %ld/%d = %.4f\n", sweeps,
               deals, sweep_rate);
-  if (ci.lo > 0.5)
-    std::printf("=> p0 significantly stronger (95%% CI lower bound > 0.5)\n");
-  else if (ci.hi < 0.5)
-    std::printf("=> p1 significantly stronger\n");
-  else
-    std::printf("=> no significant difference\n");
+  // Decisive deals (one side wins BOTH seats) carry the skill signal: split
+  // deals are decided by the cards. The sweep share is a paired sign test —
+  // far more sensitive than the raw rate once models are close.
+  const long decisive = sweeps + sweeps1;
+  if (decisive > 0) {
+    const double share = static_cast<double>(sweeps) / decisive;
+    WilsonCI sci = wilson_ci(share, decisive);
+    std::printf(
+        "decisive deals: %ld (p0 %ld, p1 %ld)  p0 sweep share %.4f  "
+        "(Wilson95 [%.4f, %.4f])\n",
+        decisive, sweeps, sweeps1, share, sci.lo, sci.hi);
+    if (sci.lo > 0.5)
+      std::printf("=> p0 significantly stronger (sweep-share CI > 0.5)\n");
+    else if (sci.hi < 0.5)
+      std::printf("=> p1 significantly stronger (sweep-share CI < 0.5)\n");
+    else
+      std::printf("=> no significant difference (sweep share)\n");
+  } else {
+    std::printf("decisive deals: 0 — falling back to raw win rate\n");
+    if (ci.lo > 0.5)
+      std::printf("=> p0 significantly stronger (95%% CI lower bound > 0.5)\n");
+    else if (ci.hi < 0.5)
+      std::printf("=> p1 significantly stronger\n");
+    else
+      std::printf("=> no significant difference\n");
+  }
   return 0;
 }

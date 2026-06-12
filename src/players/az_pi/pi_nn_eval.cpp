@@ -29,13 +29,15 @@ std::vector<PiNetEval> PiNNEvaluator::eval_batch(
   float *h = hand.data_ptr<float>();
   float *o = opp.data_ptr<float>();
   float *tr = trick.data_ptr<float>();
+  float *op = osz.data_ptr<float>();
+  float *up = usz.data_ptr<float>();
   for (int i = 0; i < B; ++i) {
     const PiEvalFeatures &f = feats[i];
     encode_exact(f.hand, h + i * ENCODING_DIM);
     encode_exact(f.opp_hand, o + i * ENCODING_DIM);  // exact (perfect info)
     encode_exact(f.trick, tr + i * ENCODING_DIM);
-    osz.data_ptr<float>()[i] = f.opp_size / az_search::kSizeNorm;
-    usz.data_ptr<float>()[i] = f.our_size / az_search::kSizeNorm;
+    op[i] = f.opp_size / az_search::kSizeNorm;
+    up[i] = f.our_size / az_search::kSizeNorm;
   }
 
   torch::NoGradGuard ng;

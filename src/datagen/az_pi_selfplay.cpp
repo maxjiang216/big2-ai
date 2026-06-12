@@ -33,13 +33,20 @@
 #include <arrow/table.h>
 #include <parquet/arrow/writer.h>
 
+#include <omp.h>
+
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace az_pi;
@@ -52,7 +59,8 @@ static const char *arg(int argc, char **argv, const char *key, const char *def) 
 
 struct Sample {
   int game_id, turn_idx, mover, opp_size, our_size;
-  float value = 0.0f;  // backfilled at game end
+  float value = 0.0f;   // backfilled at game end
+  float root_v = 0.5f;  // search value at the root (exact 1/0 when proven)
   std::array<int, 13> hand, opp_hand, trick;
   std::vector<int> legal;
   std::vector<int> visit_moves, visit_counts;
@@ -61,6 +69,7 @@ struct Sample {
 struct Slot {
   bool active = false;
   Game game;
+  PiNodePool pool;  // node storage persists across this slot's games
   std::unique_ptr<PiSearch> tree;
   int sims_done = 0;
   bool waiting = false;
@@ -87,6 +96,7 @@ int main(int argc, char **argv) {
   const long solve_nodes = std::atol(arg(argc, argv, "--solve-nodes", "10000"));
   const unsigned seed = std::atoi(arg(argc, argv, "--seed", "0"));
   const std::string device_s = arg(argc, argv, "--device", "cuda");
+  const int threads = std::atoi(arg(argc, argv, "--threads", "0"));  // shard count
 
   if (model_path.empty()) {
     std::fprintf(stderr, "error: --model is required\n");
@@ -104,8 +114,9 @@ int main(int argc, char **argv) {
   std::vector<Slot> slots(n_slots);
   for (int i = 0; i < n_slots; ++i) slots[i].rng.seed(master());
 
-  int games_started = 0, games_done = 0;
+  std::atomic<int> games_started{0}, games_done{0};
   std::vector<Sample> all_samples;
+  std::mutex samples_mu;  // guards all_samples (hit once per finished game)
 
   auto make_config = [&](unsigned s) {
     PiSearchConfig cfg;
@@ -121,7 +132,8 @@ int main(int argc, char **argv) {
   };
 
   auto start_game = [&](Slot &s) -> bool {
-    if (games_started >= total_games) return false;
+    const int id = games_started.fetch_add(1, std::memory_order_relaxed);
+    if (id >= total_games) return false;  // counter overshoot is harmless
     s.game = Game();
     s.game.shuffle_deal(s.rng);
     s.tree.reset();
@@ -129,21 +141,30 @@ int main(int argc, char **argv) {
     s.waiting = false;
     s.turn = 0;
     s.samples.clear();
-    s.game_id = games_started++;
+    s.game_id = id;
     s.active = true;
     return true;
   };
 
   auto finalize_game = [&](Slot &s) {
     const int winner = s.game.get_winner();
-    for (auto &smp : s.samples) {
+    for (auto &smp : s.samples)
       smp.value = (smp.mover == winner) ? 1.0f : 0.0f;
-      all_samples.push_back(std::move(smp));
+    {
+      std::lock_guard<std::mutex> lk(samples_mu);
+      for (auto &smp : s.samples) all_samples.push_back(std::move(smp));
     }
     s.samples.clear();
     s.active = false;
     s.tree.reset();
-    ++games_done;
+    // Pools never shrink on their own; an unlucky game can leave a huge
+    // high-water mark. Drop oversized pools between games (tree is dead) so
+    // slot memory stays bounded — unbounded pools froze the box at high sims.
+    if (s.pool.storage.size() > 1500) {
+      s.pool.free_list.clear();
+      s.pool.storage.clear();
+    }
+    games_done.fetch_add(1, std::memory_order_relaxed);
   };
 
   auto complete_decision = [&](Slot &s) {
@@ -163,6 +184,7 @@ int main(int argc, char **argv) {
       for (int r = 0; r < 13; ++r) smp.trick[r] = MOVE_TO_CARDS[lm][r];
     smp.our_size = s.game.get_player_hand_size(mover);
     smp.opp_size = s.game.get_player_hand_size(1 - mover);
+    smp.root_v = s.tree->root_value();
     smp.legal = s.game.get_legal_moves();
     for (auto &[m, n] : visits) {
       smp.visit_moves.push_back(m);
@@ -173,7 +195,7 @@ int main(int argc, char **argv) {
     const float t = (s.turn < temp_moves) ? temp : 0.0f;
     const int played = s.tree->sample_move(t, s.rng);
     s.game.apply_move(played);
-    s.tree.reset();  // rebuild fresh (with new root noise) next decision
+    s.tree->advance_root(played);  // keep the played subtree (re-noised)
     s.sims_done = 0;
     ++s.turn;
   };
@@ -190,17 +212,21 @@ int main(int argc, char **argv) {
         finalize_game(s);
         continue;
       }
-      if (!s.tree) {
+      {
         const auto legal = s.game.get_legal_moves();
         if (legal.size() == 1) {  // forced move: skip search + recording
           s.game.apply_move(legal[0]);
+          if (s.tree) s.tree->advance_root(legal[0]);
           ++s.turn;
           continue;
         }
-        s.tree = std::make_unique<PiSearch>(s.game, make_config(s.rng()));
+      }
+      if (!s.tree) {
+        s.tree = std::make_unique<PiSearch>(s.game, make_config(s.rng()),
+                                            &s.pool);
         s.sims_done = 0;
       }
-      while (s.sims_done < sims) {
+      while (s.sims_done < sims && !s.tree->root_proven()) {
         PiLeafRequest req = s.tree->select_leaf();
         if (req.needs_eval) {
           s.pending = req.feat;
@@ -214,49 +240,126 @@ int main(int argc, char **argv) {
   };
 
   auto t0 = std::chrono::steady_clock::now();
-  std::vector<PiEvalFeatures> feats;
-  std::vector<int> fslot;
-  for (;;) {
-    feats.clear();
-    fslot.clear();
-    for (int i = 0; i < n_slots; ++i) {
-      if (slots[i].waiting) continue;  // still awaiting last batch (shouldn't)
-      if (advance(slots[i])) {
-        feats.push_back(slots[i].pending);
-        fslot.push_back(i);
+
+  // ── Sharded pipeline ────────────────────────────────────────────────────
+  // The slots are split into independent shards, each pumped by ONE thread
+  // (no intra-shard synchronisation, no global barrier — a slot stuck on a
+  // cold solver call only stalls its own shard). Shards submit their parked
+  // leaves to a single inference thread which fuses all queued requests into
+  // one forward pass, so GPU batches stay fat while CPU and GPU overlap.
+  struct EvalReq {
+    std::vector<PiEvalFeatures> feats;
+    std::vector<PiNetEval> res;
+    bool ready = false;
+    std::mutex mu;
+    std::condition_variable cv;
+  };
+  std::deque<EvalReq *> queue;
+  std::mutex qmu;
+  std::condition_variable qcv;
+  const int n_shards =
+      std::max(1, std::min(threads > 0 ? threads : 12, n_slots));
+  std::atomic<int> shards_live{n_shards};
+
+  std::thread gpu_thread([&] {
+    std::vector<EvalReq *> reqs;
+    std::vector<PiEvalFeatures> fused;
+    for (;;) {
+      reqs.clear();
+      {
+        std::unique_lock<std::mutex> lk(qmu);
+        qcv.wait(lk, [&] {
+          return !queue.empty() || shards_live.load() == 0;
+        });
+        if (queue.empty() && shards_live.load() == 0) return;
+        while (!queue.empty()) {
+          reqs.push_back(queue.front());
+          queue.pop_front();
+        }
+      }
+      fused.clear();
+      for (EvalReq *r : reqs)
+        fused.insert(fused.end(), r->feats.begin(), r->feats.end());
+      auto res = nn.eval_batch(fused);
+      std::size_t off = 0;
+      for (EvalReq *r : reqs) {
+        r->res.assign(res.begin() + off, res.begin() + off + r->feats.size());
+        off += r->feats.size();
+        {
+          std::lock_guard<std::mutex> lk(r->mu);
+          r->ready = true;
+        }
+        r->cv.notify_one();
       }
     }
-    if (feats.empty()) break;  // all games complete
+  });
 
-    auto res = nn.eval_batch(feats);
-    for (std::size_t k = 0; k < fslot.size(); ++k) {
-      Slot &s = slots[fslot[k]];
-      s.tree->apply_eval(res[k]);
-      ++s.sims_done;
-      s.waiting = false;
-    }
+  std::atomic<int> last_print{0};
+  auto shard_fn = [&](int sh) {
+    const int lo = sh * n_slots / n_shards;
+    const int hi = (sh + 1) * n_slots / n_shards;
+    EvalReq req;
+    std::vector<int> fslot;
+    for (;;) {
+      req.feats.clear();
+      fslot.clear();
+      for (int i = lo; i < hi; ++i) {
+        if (!slots[i].waiting) advance(slots[i]);
+        if (slots[i].waiting) {
+          req.feats.push_back(slots[i].pending);
+          fslot.push_back(i);
+        }
+      }
+      if (req.feats.empty()) break;  // every game in this shard finished
 
-    if (games_done && games_done % 1000 == 0) {
-      static int last = 0;
-      if (games_done != last) {
-        last = games_done;
+      req.ready = false;
+      {
+        std::lock_guard<std::mutex> lk(qmu);
+        queue.push_back(&req);
+      }
+      qcv.notify_one();
+      {
+        std::unique_lock<std::mutex> lk(req.mu);
+        req.cv.wait(lk, [&] { return req.ready; });
+      }
+      for (std::size_t k = 0; k < fslot.size(); ++k) {
+        Slot &s = slots[fslot[k]];
+        s.tree->apply_eval(req.res[k]);
+        ++s.sims_done;
+        s.waiting = false;
+      }
+
+      const int done_now = games_done.load(std::memory_order_relaxed);
+      if (done_now / 1000 > last_print.load(std::memory_order_relaxed)) {
+        last_print.store(done_now / 1000, std::memory_order_relaxed);
         double el = std::chrono::duration<double>(
                         std::chrono::steady_clock::now() - t0)
                         .count();
-        std::printf("  games %d/%d  samples %zu  %.1fs\n", games_done,
-                    total_games, all_samples.size(), el);
+        std::size_t ns;
+        {
+          std::lock_guard<std::mutex> lk(samples_mu);
+          ns = all_samples.size();
+        }
+        std::printf("  games %d/%d  samples %zu  %.1fs\n", done_now,
+                    total_games, ns, el);
         std::fflush(stdout);
       }
     }
-  }
+    if (shards_live.fetch_sub(1) == 1) qcv.notify_one();
+  };
 
-  std::printf("self-play done: %d games, %zu samples. writing %s\n", games_done,
-              all_samples.size(), out_path.c_str());
+  std::vector<std::thread> shard_threads;
+  for (int sh = 0; sh < n_shards; ++sh) shard_threads.emplace_back(shard_fn, sh);
+  for (auto &t : shard_threads) t.join();
+  gpu_thread.join();
+
+  std::printf("self-play done: %d games, %zu samples. writing %s\n",
+              games_done.load(), all_samples.size(), out_path.c_str());
 
   // ---- Parquet write (player schema: enc list<float32>(144)) ----
   auto pool = arrow::default_memory_pool();
   arrow::Int32Builder game_id, turn_idx, opp_size, our_size;
-  arrow::FloatBuilder value;
+  arrow::FloatBuilder value, root_value;
   arrow::ListBuilder enc(pool, std::make_shared<arrow::FloatBuilder>(pool));
   arrow::ListBuilder legal(pool, std::make_shared<arrow::Int32Builder>(pool));
   arrow::ListBuilder vmoves(pool, std::make_shared<arrow::Int32Builder>(pool));
@@ -273,6 +376,7 @@ int main(int argc, char **argv) {
     opp_size.Append(s.opp_size);
     our_size.Append(s.our_size);
     value.Append(s.value);
+    root_value.Append(s.root_v);
     encode_exact(s.hand, buf.data());
     encode_exact(s.opp_hand, buf.data() + ENCODING_DIM);
     encode_exact(s.trick, buf.data() + 2 * ENCODING_DIM);
@@ -298,8 +402,9 @@ int main(int argc, char **argv) {
     b.Finish(&a);
     return a;
   };
-  std::shared_ptr<arrow::Array> value_arr;
+  std::shared_ptr<arrow::Array> value_arr, root_value_arr;
   value.Finish(&value_arr);
+  root_value.Finish(&root_value_arr);
 
   std::vector<std::shared_ptr<arrow::Field>> fields = {
       arrow::field("game_id", arrow::int32()),
@@ -308,6 +413,7 @@ int main(int argc, char **argv) {
       arrow::field("opp_size", arrow::int32()),
       arrow::field("our_size", arrow::int32()),
       arrow::field("value", arrow::float32()),
+      arrow::field("root_value", arrow::float32()),
       arrow::field("legal", arrow::list(arrow::int32())),
       arrow::field("visit_moves", arrow::list(arrow::int32())),
       arrow::field("visit_counts", arrow::list(arrow::int32())),
@@ -315,7 +421,8 @@ int main(int argc, char **argv) {
   std::vector<std::shared_ptr<arrow::Array>> arrays = {
       finish_i32(game_id),   finish_i32(turn_idx), finish_list(enc),
       finish_i32(opp_size),  finish_i32(our_size), value_arr,
-      finish_list(legal),    finish_list(vmoves),  finish_list(vcounts),
+      root_value_arr,        finish_list(legal),   finish_list(vmoves),
+      finish_list(vcounts),
   };
 
   auto table = arrow::Table::Make(arrow::schema(fields), arrays);

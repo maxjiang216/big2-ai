@@ -25,7 +25,18 @@ struct SolverLimits {
 };
 
 // Solve win/loss for g.current_player(). g must NOT already be terminal.
-Proof solve(const Game &g, const SolverLimits &limits);
+// Proven results are memoized in a shared lock-free process-lifetime table
+// (the key is the complete PI state, so entries stay valid across calls,
+// trees, games, and threads).
+//
+// `margin` (optional) receives the LOSER's final card count along the proven
+// line — a secondary tie-break objective (winner maximises it, loser
+// minimises). Exact for proven losses; for wins it reflects the first proven
+// win found (the primary search is not extended to optimise it).
+Proof solve(const Game &g, const SolverLimits &limits, int *margin = nullptr);
+
+// Drop the calling thread's persistent memo (test isolation).
+void solver_clear_memo();
 
 }  // namespace az_pi
 
