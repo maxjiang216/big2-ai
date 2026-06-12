@@ -2,6 +2,7 @@
 // the exact endgame solver (pi_solver) and the PUCT search core (pi_search).
 
 #include "az_pi/pi_eval.h"
+#include "az_pi/pi_prune.h"
 #include "az_pi/pi_search.h"
 #include "az_pi/pi_solver.h"
 #include "az_search/considered_moves.h"
@@ -196,6 +197,51 @@ void test_search_proven_root_best_move() {
   assert(end.is_over() && end.get_winner() == 0);
 }
 
+void test_prune_dominated_attachments() {
+  // Hand: bomb 5555 + loose singles 8 and K (no straight possible), plus a
+  // loose pair of 9s and triple of 3s (full house bases).
+  // Bomb kicker: keep 8, drop K. FH 333+99 has no competing loose pair here.
+  auto count_att = [](const std::vector<int> &legal, Move::Combination comb,
+                      int att_rank) {
+    int n = 0;
+    for (int mid : legal) {
+      if (Move(mid).combination != comb) continue;
+      if (MOVE_TO_CARDS[mid][att_rank] == 0) continue;
+      ++n;
+    }
+    return n;
+  };
+
+  {
+    Game g(hand({{2, 4}, {5, 1}, {10, 1}, {0, 3}, {6, 2}}), hand({{1, 1}}),
+           {}, kLead, 0);
+    auto legal = g.get_legal_moves();
+    auto pruned = legal;
+    prune_dominated_attachments(g.player_hand(0), pruned);
+    // 8 (rank 5) is the lower loose single: bomb+8 kept, bomb+K (rank 10) gone.
+    assert(count_att(pruned, Move::Combination::kBomb, 5) == 1);
+    assert(count_att(pruned, Move::Combination::kBomb, 10) == 0);
+    assert(count_att(legal, Move::Combination::kBomb, 10) == 1);
+    // Non-attachment moves untouched: both FH bases (333+99, 555+99) keep
+    // their only loose pair.
+    assert(count_att(pruned, Move::Combination::kFullHouse, 6) == 2);
+    assert(pruned.size() == legal.size() - 1);
+  }
+  {
+    // Kicker inside a fully-held straight window is NOT loose: hand holds
+    // 3,4,5,6,7 singles + bomb 9999 + lone K. The 3..7 cards can form a
+    // straight, so only the K is loose — no competing loose single, nothing
+    // to prune among bomb kickers of differing loose ranks.
+    Game g(hand({{0, 1}, {1, 1}, {2, 1}, {3, 1}, {4, 1}, {6, 4}, {10, 1}}),
+           hand({{1, 1}}), {}, kLead, 0);
+    auto legal = g.get_legal_moves();
+    auto pruned = legal;
+    prune_dominated_attachments(g.player_hand(0), pruned);
+    // All straight-member kickers kept; K kept (sole loose single).
+    assert(pruned.size() == legal.size());
+  }
+}
+
 void test_search_full_game_legal() {
   // A full stub self-play game terminates and only ever plays legal moves.
   Game g;
@@ -234,5 +280,6 @@ void run_az_pi_tests() {
   test_search_solver_finds_win();
   test_search_advance_root_reuse();
   test_search_proven_root_best_move();
+  test_prune_dominated_attachments();
   test_search_full_game_legal();
 }

@@ -1,5 +1,6 @@
 #include "az_pi/pi_solver.h"
 
+#include "az_pi/pi_prune.h"
 #include "util.h"  // HandBits
 
 #include <atomic>
@@ -128,7 +129,9 @@ struct Solver {
     Proof result = Proof::LOSS;  // no winning move found yet
     int loss_m = 32, win_m = -1;
     bool any_unknown = false;
-    for (int mv : g.get_legal_moves()) {
+    std::vector<int> legal = g.get_legal_moves();
+    prune_dominated_attachments(g.player_hand(g.current_player()), legal);
+    for (int mv : legal) {
       Game child = g;
       child.apply_move(mv);
       if (child.is_over()) {  // emptied our hand -> immediate win

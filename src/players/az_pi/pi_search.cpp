@@ -1,5 +1,6 @@
 #include "az_pi/pi_search.h"
 
+#include "az_pi/pi_prune.h"
 #include "az_search/considered_moves.h"
 #include "az_search/features.h"  // trick_counts
 #include "move.h"
@@ -151,9 +152,14 @@ void PiSearch::build_groups(PiNode *n) {
 }
 
 void PiSearch::expand(PiNode *n, const float *logits) {
-  const std::vector<int> legal = n->state.get_legal_moves();
+  std::vector<int> legal = n->state.get_legal_moves();
   const int mover = n->state.current_player();
   const int our_size = n->state.get_player_hand_size(mover);
+
+  // Drop weakly dominated kicker/pair attachments — except at the root, so
+  // policy targets and recorded play keep the full move set.
+  if (n != root_)
+    prune_dominated_attachments(n->state.player_hand(mover), legal);
 
   // Composed logits -> softmax priors over legal moves.
   tmp_f_.resize(legal.size());
