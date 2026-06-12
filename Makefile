@@ -29,7 +29,7 @@ TEST_CPP    := $(wildcard test/*.cpp)
 RESEARCH_BIN_NAMES := best_hand multi_comb play_probs count_turn_states
 RESEARCH_BINS      := $(addprefix $(BUILD_DIR)/research/,$(RESEARCH_BIN_NAMES))
 
-.PHONY: all clean dirs test_core coordinator generate_data generate_nn_data eval_match eval_nn_match eval_nn_vs_classic play_games pass_greedy_datagen move_agreement benchmark tablebase_opp1_gen move_audit az_compose_gen az_vs_teacher_agree az_nn_check az_search_smoke az_play_check az_selfplay eval_az_match research help
+.PHONY: all clean dirs test_core coordinator generate_data generate_nn_data eval_match eval_nn_match eval_nn_vs_classic play_games pass_greedy_datagen move_agreement benchmark tablebase_opp1_gen move_audit az_compose_gen az_vs_teacher_agree az_nn_check az_search_smoke az_play_check az_selfplay eval_az_match az_pi_selfplay eval_az_pi_match research help
 
 all: help
 
@@ -112,6 +112,22 @@ $(BUILD_DIR)/src/players/az_search/%.o: src/players/az_search/%.cpp | dirs
 	@mkdir -p $(BUILD_DIR)/src/players/az_search
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
+# az_pi module: perfect-information AlphaZero. Same torch-free-core / torch-NN
+# split as az_search. pi_nn_eval.cpp is the only torch-dependent source.
+AZ_PI_NN_CPP    := src/players/az_pi/pi_nn_eval.cpp
+AZ_PI_CORE_CPP  := $(filter-out $(AZ_PI_NN_CPP),$(wildcard src/players/az_pi/*.cpp))
+AZ_PI_CORE_OBJS := $(patsubst src/players/az_pi/%.cpp,$(BUILD_DIR)/src/players/az_pi/%.o,$(AZ_PI_CORE_CPP))
+AZ_PI_NN_OBJS   := $(patsubst src/players/az_pi/%.cpp,$(BUILD_DIR)/src/players/az_pi/%.o,$(AZ_PI_NN_CPP))
+AZ_PI_OBJS      := $(AZ_PI_CORE_OBJS) $(AZ_PI_NN_OBJS)
+
+$(BUILD_DIR)/src/players/az_pi/%.o: src/players/az_pi/%.cpp | dirs
+	@mkdir -p $(BUILD_DIR)/src/players/az_pi
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+$(AZ_PI_NN_OBJS): $(BUILD_DIR)/src/players/az_pi/%.o: src/players/az_pi/%.cpp | dirs
+	@mkdir -p $(BUILD_DIR)/src/players/az_pi
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
+
 # Static pattern rule (overrides the pattern above for the listed targets):
 # torch-dependent az_search objects get TORCH_INCLUDES + -DBIG2_WITH_TORCH.
 $(AZ_SEARCH_NN_OBJS): $(BUILD_DIR)/src/players/az_search/%.o: src/players/az_search/%.cpp | dirs
@@ -135,6 +151,7 @@ TEST_OBJS := $(CORE_OBJS) \
              $(BUILD_DIR)/src/simulation/game_simulator.o \
              $(TYPED_SEARCH_OBJS) \
              $(AZ_SEARCH_CORE_OBJS) \
+             $(AZ_PI_CORE_OBJS) \
              $(patsubst test/%.cpp,$(BUILD_DIR)/test/%.o,$(TEST_CPP))
 
 # ============================================================================
@@ -432,6 +449,43 @@ $(BIN_DIR)/eval_az_match: $(EVAL_AZ_MATCH_OBJS)
 	@echo "✓ $(BIN_DIR)/eval_az_match"
 
 eval_az_match: dirs $(BIN_DIR)/eval_az_match
+
+# ============================================================================
+# bin/az_pi_selfplay — perfect-information AZ self-play (needs LibTorch+Arrow)
+# ============================================================================
+
+$(BUILD_DIR)/src/datagen/az_pi_selfplay.o: src/datagen/az_pi_selfplay.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
+
+AZ_PI_SELFPLAY_OBJS := $(CORE_OBJS) \
+                       $(AZ_PI_OBJS) \
+                       $(BUILD_DIR)/src/datagen/az_pi_selfplay.o
+
+$(BIN_DIR)/az_pi_selfplay: $(AZ_PI_SELFPLAY_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS_TORCH)
+	@echo "✓ $(BIN_DIR)/az_pi_selfplay"
+
+az_pi_selfplay: dirs $(BIN_DIR)/az_pi_selfplay
+
+# ============================================================================
+# bin/eval_az_pi_match — paired-deal perfect-info AZ eval (needs LibTorch+Arrow)
+# ============================================================================
+
+$(BUILD_DIR)/src/datagen/eval_az_pi_match.o: src/datagen/eval_az_pi_match.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
+
+EVAL_AZ_PI_MATCH_OBJS := $(CORE_OBJS) \
+                         $(BUILD_DIR)/src/simulation/game_simulator.o \
+                         $(TYPED_SEARCH_OBJS) \
+                         $(AZ_SEARCH_OBJS) \
+                         $(AZ_PI_OBJS) \
+                         $(BUILD_DIR)/src/datagen/eval_az_pi_match.o
+
+$(BIN_DIR)/eval_az_pi_match: $(EVAL_AZ_PI_MATCH_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS_TORCH)
+	@echo "✓ $(BIN_DIR)/eval_az_pi_match"
+
+eval_az_pi_match: dirs $(BIN_DIR)/eval_az_pi_match
 
 # ============================================================================
 # bin/eval_az_series — full-series az_search evaluation (needs LibTorch+Arrow)
