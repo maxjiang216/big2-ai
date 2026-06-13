@@ -69,7 +69,7 @@ def _step(model, C, batch, lam_outcome=1.0, lam_bomb=1.0, lam_ar=1.0):
     thermo_cnt = torch.cat([batch["p_oppmax_cnt"], batch["o_oppmax_cnt"]]).long()
     opp_cnt = torch.cat([batch["p_opp_hand_cnt"], batch["o_opp_hand_cnt"]]).long()
 
-    value, policy, behavior, outcome, bomb, ar_nll = model.readout_train(
+    value, policy, behavior, qa, outcome, bomb, ar_nll = model.readout_train(
         h, hand, oppm, osz, usz, otm, mpts, opts, thermo_cnt, opp_cnt
     )
 
@@ -91,6 +91,13 @@ def _step(model, C, batch, lam_outcome=1.0, lam_bomb=1.0, lam_ar=1.0):
     tgt = batch["o_target"]
     logb = masked_log_softmax(behavior[n_p:], batch["o_mask"])
     loss_b = _wmean(F.nll_loss(logb, tgt, reduction="none"), wo)
+    # qa BCE at the played opp slot (opp rows) — grounds opp-to-move node values
+    # for the MCTS, vs the series outcome from the observer's POV.
+    q = qa[n_p:].gather(1, tgt.unsqueeze(1)).squeeze(1)
+    loss_q = _wmean(
+        F.binary_cross_entropy(q.clamp(EPS, 1 - EPS), batch["o_value"], reduction="none"),
+        wo,
+    )
 
     # aux over ALL rows (gated by has_aux)
     waux = torch.cat([wp * batch["p_haux"], wo * batch["o_haux"]])
@@ -104,10 +111,14 @@ def _step(model, C, batch, lam_outcome=1.0, lam_bomb=1.0, lam_ar=1.0):
     loss_ar = _wmean(ar_nll, waux)
 
     loss = (
-        loss_v + loss_p + loss_b
+        loss_v + loss_p + loss_b + loss_q
         + lam_outcome * loss_o + lam_bomb * loss_bomb + lam_ar * loss_ar
     )
-    return loss, (loss_v, loss_p, loss_b, loss_o, loss_bomb, loss_ar), (n_p, n_o)
+    return (
+        loss,
+        (loss_v, loss_p, loss_b, loss_q, loss_o, loss_bomb, loss_ar),
+        (n_p, n_o),
+    )
 
 
 def _save(model, out_path, cfg, device):
@@ -166,35 +177,36 @@ def train(cfg) -> None:
                 sched.step()
 
         model.eval()
-        sums = [0.0] * 6
+        sums = [0.0] * 7
         nps = nos = 0
         with torch.no_grad():
             for batch in vl:
                 _, parts, (n_p, n_o) = _step(
                     model, C, batch, cfg.lam_outcome, cfg.lam_bomb, cfg.lam_ar
                 )
-                lv, lp, lb, lo, lbomb, lar = (float(x) for x in parts)
+                lv, lp, lb, lq, lo, lbomb, lar = (float(x) for x in parts)
                 n_all = n_p + n_o
                 sums[0] += lv * n_p
                 sums[1] += lp * n_p
                 sums[2] += lb * n_o
-                sums[3] += lo * n_all
-                sums[4] += lbomb * n_all
-                sums[5] += lar * n_all
+                sums[3] += lq * n_o
+                sums[4] += lo * n_all
+                sums[5] += lbomb * n_all
+                sums[6] += lar * n_all
                 nps += n_p
                 nos += n_o
         vv, vp = sums[0] / max(nps, 1), sums[1] / max(nps, 1)
-        vb = sums[2] / max(nos, 1)
+        vb, vq = sums[2] / max(nos, 1), sums[3] / max(nos, 1)
         n_all = max(nps + nos, 1)
-        vo, vbomb, var = sums[3] / n_all, sums[4] / n_all, sums[5] / n_all
+        vo, vbomb, var = sums[4] / n_all, sums[5] / n_all, sums[6] / n_all
         ar_ppx = math.exp(var / n_ranks)  # geo-mean per-rank perplexity
-        blended = vv + vp + vb
+        blended = vv + vp + vb + vq
         mon = vp + vb if cfg.ckpt_metric == "head" else blended
         if not per_batch:
             sched.step(mon)
         print(
             f"[ii] epoch {epoch}/{cfg.epochs}  val={blended:.4f} "
-            f"[v={vv:.3f} p={vp:.3f} b={vb:.3f}]  "
+            f"[v={vv:.3f} p={vp:.3f} b={vb:.3f} q={vq:.3f}]  "
             f"aux[outcome={vo:.3f} bomb={vbomb:.3f} ar={var:.3f} ppx/rank={ar_ppx:.3f}]  "
             f"lr={_cur_lr(opt):.2e}"
         )

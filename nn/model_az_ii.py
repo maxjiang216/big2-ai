@@ -42,7 +42,13 @@ import torch.nn.functional as F
 
 from nn.dataset import RANK_MAX_COUNTS
 from nn.model import ENCODING_DIM, ResBlock, _init_selu, _init_swish
-from nn.model_az import OPP_HEAD_DIM, PLAYER_HEAD_DIM, PolicyHead, ValueHead
+from nn.model_az import (
+    OPP_HEAD_DIM,
+    PLAYER_HEAD_DIM,
+    PerMoveValueHead,
+    PolicyHead,
+    ValueHead,
+)
 from nn.model_az_seq import NUM_MOVES, SEQ_CAP, _SeqBlock, load_token_feats
 
 # Autoregressive opp-hand decode order: highest impact rank first. Rank indices
@@ -203,6 +209,12 @@ class Big2NetII(nn.Module):
         self.value_head = ValueHead(256)
         self.policy_head = PolicyHead(256, PLAYER_HEAD_DIM)
         self.behavior_head = PolicyHead(256, OPP_HEAD_DIM)
+        # qa: per-opp-move value (P(searcher wins after opp move a)). Kept so the
+        # scripted surface matches model_az_seq and az_ii drops into the existing
+        # az_search MCTS / NNEvaluator unchanged (opp-to-move nodes have no
+        # trained scalar value otherwise). Full-expansion-without-qa is a later
+        # search optimisation, not needed to play az_ii as an AZ model.
+        self.qa_head = PerMoveValueHead(256, OPP_HEAD_DIM)
         self.outcome_head = nn.Linear(256, OUTCOME_DIM)  # aux: signed margin bucket
 
         # Belief heads off e (+ opp-thermo embedding). The AR loss + P(bomb) shape
@@ -221,6 +233,11 @@ class Big2NetII(nn.Module):
         x = torch.cat([bos, tok], dim=1)
         return x + self.pos_emb[: T + 1].unsqueeze(0)
 
+    @torch.jit.export
+    def config(self) -> List[int]:
+        return [self.n_layers, self.n_heads, self.head_dim, self.d_model, self.seq_cap]
+
+    @torch.jit.export
     def forward_full(self, tokens: torch.Tensor) -> torch.Tensor:
         """tokens [B, T] int64 -> hidden [B, T+1, d] (causal)."""
         x = self._embed(tokens)
@@ -232,6 +249,95 @@ class Big2NetII(nn.Module):
             attn = F.scaled_dot_product_attention(q, k, v, attn_mask=causal)
             x = blk.post(x, attn)
         return self.ln_f(x)
+
+    # -- KV-cache search surface (matches model_az_seq; used by az_search's
+    #    NNEvaluator so az_ii drops into the existing MCTS unchanged) ----------
+
+    @torch.jit.export
+    def encode_prefix(
+        self, tokens: torch.Tensor, lens: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = self._embed(tokens)
+        B, S, _ = x.shape
+        causal = torch.full((S, S), self.neg_mask, dtype=x.dtype, device=x.device)
+        causal = torch.triu(causal, diagonal=1).unsqueeze(0).unsqueeze(0)
+        kvs: List[torch.Tensor] = []
+        for blk in self.blocks:
+            q, k, v = blk.qkv_proj(x)
+            kvs.append(torch.stack([k, v], dim=1))
+            attn = F.scaled_dot_product_attention(q, k, v, attn_mask=causal)
+            x = blk.post(x, attn)
+        kv = torch.stack(kvs, dim=1)
+        h = self.ln_f(x)
+        idx = lens.view(B, 1, 1).expand(B, 1, self.d_model)
+        h_last = h.gather(1, idx).squeeze(1)
+        return kv, h_last
+
+    @torch.jit.export
+    def forward_leaf(
+        self,
+        kv: torch.Tensor,
+        plen: torch.Tensor,
+        h_last: torch.Tensor,
+        path: torch.Tensor,
+        path_len: torch.Tensor,
+        hand: torch.Tensor,
+        oppmax: torch.Tensor,
+        osz: torch.Tensor,
+        usz: torch.Tensor,
+        otm: torch.Tensor,
+        mpts: torch.Tensor,
+        opts: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        kv = kv.to(h_last.dtype)
+        B, T = path.shape
+        P1 = kv.shape[4]
+        tok = self.tok_proj(F.embedding(path, self.token_feats))
+        pos = plen.unsqueeze(1) + torch.arange(T, device=path.device).unsqueeze(0)
+        pos = pos.clamp(max=self.seq_cap - 1)
+        x = tok + F.embedding(pos, self.pos_emb)
+        ar_p = torch.arange(P1, device=path.device)
+        mask_pre = torch.where(
+            ar_p.unsqueeze(0) < plen.unsqueeze(1),
+            torch.zeros(B, P1, dtype=x.dtype, device=x.device),
+            torch.full((B, P1), self.neg_mask, dtype=x.dtype, device=x.device),
+        )
+        mask_pre = mask_pre.unsqueeze(1).unsqueeze(2).expand(B, 1, T, P1)
+        ar_t = torch.arange(T, device=path.device)
+        causal = torch.where(
+            ar_t.unsqueeze(1) >= ar_t.unsqueeze(0),
+            torch.zeros(T, T, dtype=x.dtype, device=x.device),
+            torch.full((T, T), self.neg_mask, dtype=x.dtype, device=x.device),
+        )
+        mask = torch.cat(
+            [mask_pre, causal.unsqueeze(0).unsqueeze(0).expand(B, 1, T, T)], dim=3
+        )
+        for i, blk in enumerate(self.blocks):
+            q, k, v = blk.qkv_proj(x)
+            pk = kv[:, i, 0]
+            pv = kv[:, i, 1]
+            attn = F.scaled_dot_product_attention(
+                q, torch.cat([pk, k], dim=2), torch.cat([pv, v], dim=2), attn_mask=mask
+            )
+            x = blk.post(x, attn)
+        h = self.ln_f(x)
+        idx = (path_len - 1).clamp(min=0).view(B, 1, 1).expand(B, 1, self.d_model)
+        h_path = h.gather(1, idx).squeeze(1)
+        h_out = torch.where((path_len == 0).unsqueeze(1), h_last, h_path)
+        return self.readout(h_out, hand, oppmax, osz, usz, otm, mpts, opts)
+
+    @torch.jit.export
+    def readout(
+        self, h, hand, oppmax, osz, usz, otm, mpts, opts
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """4-head scripted readout for the search: value, policy, behavior, qa."""
+        x, _ = self._features(h, hand, oppmax, osz, usz, otm, mpts, opts)
+        return (
+            self.value_head(x),
+            self.policy_head(x),
+            self.behavior_head(x),
+            self.qa_head(x),
+        )
 
     # -- readout ------------------------------------------------------------
 
@@ -277,16 +383,17 @@ class Big2NetII(nn.Module):
     def readout_train(self, h, hand, oppmax, osz, usz, otm, mpts, opts,
                       thermo_counts, opp_hand_counts):
         """Eager training readout. Returns
-        (value, policy, behavior, outcome_logits, bomb_logit, ar_nll).
+        (value, policy, behavior, qa, outcome_logits, bomb_logit, ar_nll).
         thermo_counts / opp_hand_counts are integer [N, 13] (AR bounds + target)."""
         x, belief = self._features(h, hand, oppmax, osz, usz, otm, mpts, opts)
         value = self.value_head(x)
         policy = self.policy_head(x)
         behavior = self.behavior_head(x)
+        qa = self.qa_head(x)
         outcome = self.outcome_head(x)
         bomb = self.bomb_head(belief).squeeze(-1)
         ar_nll = self.ar.nll(belief, thermo_counts, opp_hand_counts)
-        return value, policy, behavior, outcome, bomb, ar_nll
+        return value, policy, behavior, qa, outcome, bomb, ar_nll
 
     def embedding_param_ids(self) -> set:
         ids = set()
