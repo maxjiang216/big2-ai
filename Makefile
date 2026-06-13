@@ -509,6 +509,7 @@ EVAL_AZ_SERIES_OBJS := $(CORE_OBJS) \
                        $(BUILD_DIR)/src/simulation/game_simulator.o \
                        $(TYPED_SEARCH_OBJS) \
                        $(AZ_SEARCH_OBJS) \
+                       $(AZ_II_OBJS) \
                        $(BUILD_DIR)/src/datagen/eval_az_series.o
 
 $(BIN_DIR)/eval_az_series: $(EVAL_AZ_SERIES_OBJS)
