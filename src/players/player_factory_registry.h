@@ -25,6 +25,7 @@
 // non-torch binaries (test_core, eval_match, ...) that include this header stay
 // torch-free.
 #ifdef BIG2_WITH_TORCH
+#include "az_ii/az_ii_player_factory.h"
 #include "az_search/az_search_player_factory.h"
 #endif
 
@@ -118,6 +119,11 @@ inline std::shared_ptr<PlayerFactory> make_player_factory(const std::string &nam
     // play mode (deterministic opponent representative).
     int sims = (param <= 0.0) ? 200 : static_cast<int>(std::round(param));
     return std::make_shared<az_search::AzSearchPlayerFactory>(sims, seed);
+  }
+  if (name == "az_ii") {
+    // Policy-greedy imperfect-info distillation net. Loads models/az_ii.ts.pt
+    // (scripted Big2NetII) on CPU; no search yet.
+    return std::make_shared<az_ii::AzIiPlayerFactory>();
   }
 #endif
 

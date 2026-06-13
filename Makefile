@@ -134,6 +134,13 @@ $(AZ_SEARCH_NN_OBJS): $(BUILD_DIR)/src/players/az_search/%.o: src/players/az_sea
 	@mkdir -p $(BUILD_DIR)/src/players/az_search
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
 
+# az_ii module: imperfect-info distillation player (torch-dependent only; the
+# registry references AzIiPlayerFactory in every torch binary that includes it).
+AZ_II_OBJS := $(BUILD_DIR)/src/players/az_ii/az_ii_player.o
+$(BUILD_DIR)/src/players/az_ii/%.o: src/players/az_ii/%.cpp | dirs
+	@mkdir -p $(BUILD_DIR)/src/players/az_ii
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
+
 $(BUILD_DIR)/test/%.o: test/%.cpp | dirs
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
@@ -423,6 +430,7 @@ AZ_SELFPLAY_OBJS := $(CORE_OBJS) \
                     $(BUILD_DIR)/src/simulation/game_simulator.o \
                     $(TYPED_SEARCH_OBJS) \
                     $(AZ_SEARCH_OBJS) \
+                    $(AZ_II_OBJS) \
                     $(BUILD_DIR)/src/datagen/az_selfplay.o
 
 $(BIN_DIR)/az_selfplay: $(AZ_SELFPLAY_OBJS)
@@ -442,6 +450,7 @@ EVAL_AZ_MATCH_OBJS := $(CORE_OBJS) \
                       $(BUILD_DIR)/src/simulation/game_simulator.o \
                       $(TYPED_SEARCH_OBJS) \
                       $(AZ_SEARCH_OBJS) \
+                      $(AZ_II_OBJS) \
                       $(BUILD_DIR)/src/datagen/eval_az_match.o
 
 $(BIN_DIR)/eval_az_match: $(EVAL_AZ_MATCH_OBJS)

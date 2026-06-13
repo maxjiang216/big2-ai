@@ -98,6 +98,7 @@ class ARHand(nn.Module):
         )
         return F.log_softmax(logits.masked_fill(~valid, -1e9), dim=-1)
 
+    @torch.jit.ignore
     def nll(self, belief: torch.Tensor, thermo: torch.Tensor,
             true_counts: torch.Tensor) -> torch.Tensor:
         """Per-row summed NLL of the true opponent hand. belief [N, bd];
@@ -124,6 +125,7 @@ class ARHand(nn.Module):
             prev = F.one_hot(tc, MAXC).float()
         return total  # [N]
 
+    @torch.jit.ignore
     @torch.no_grad()
     def sample(self, belief: torch.Tensor, thermo: torch.Tensor,
                opp_size: torch.Tensor, generator=None) -> torch.Tensor:
@@ -248,6 +250,30 @@ class Big2NetII(nn.Module):
         belief = torch.cat([h, oo], dim=-1)
         return x, belief
 
+    @torch.jit.export
+    def forward(
+        self,
+        tokens: torch.Tensor,    # [B, T] int64 move-id history
+        hist_idx: torch.Tensor,  # [B] int64 readout position (moves before decision)
+        hand: torch.Tensor,      # [B, 48] exact
+        oppmax: torch.Tensor,    # [B, 48] thermo upper bound
+        osz: torch.Tensor,       # [B] float (/16)
+        usz: torch.Tensor,       # [B] float (/16)
+        otm: torch.Tensor,       # [B] float owner-to-move
+        mpts: torch.Tensor,      # [B] float owner series pts (/50)
+        opts: torch.Tensor,      # [B] float opp series pts (/50)
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Play/eval surface for C++: belief transformer over `tokens`, read off
+        at `hist_idx`, then the main heads. (value, policy, behavior); the AR /
+        bomb / outcome heads are training-only and not on this path."""
+        H = self.forward_full(tokens)
+        B = tokens.shape[0]
+        idx = hist_idx.view(B, 1, 1).expand(B, 1, self.d_model)
+        h = H.gather(1, idx).squeeze(1)
+        x, _ = self._features(h, hand, oppmax, osz, usz, otm, mpts, opts)
+        return self.value_head(x), self.policy_head(x), self.behavior_head(x)
+
+    @torch.jit.ignore
     def readout_train(self, h, hand, oppmax, osz, usz, otm, mpts, opts,
                       thermo_counts, opp_hand_counts):
         """Eager training readout. Returns
