@@ -107,7 +107,52 @@ Observations:
   line and the II memory line showed.
 - Cost scaling: 1600-sim gens ≈ 15 min, 3200 ≈ 35 min, 6400 ≈ 2.5 h.
 
-Follow-up: run killed; round-robin re-eval of gens 2/3/4 at 800 paired
-series each (sims 1600, fresh seed 1000 — the promotion evals all reused
-seed 42, i.e. identical deal streams) to pick the line's champion on
-more data (`logs/az_pi_s_roundrobin_234.txt`).
+## Round-robin re-eval — champion = gen 4
+
+Run killed; re-evaluated gens 2/3/4 against each other at 800 paired series
+(sims 1600, fresh seed 1000 — every promotion eval had reused seed 42, the
+same deal streams) to pick the line's champion on more data
+(`logs/az_pi_s_roundrobin_234.txt`).
+
+| pairing | p0 sweep share (Wilson95) | verdict |
+|---|---|---|
+| gen2 vs gen3 | 0.495 [0.40, 0.59] | tie |
+| gen2 vs gen4 | **0.391 [0.30, 0.48]** | gen4 stronger (CI < 0.5) |
+| gen3 vs gen4 | 0.500 [0.40, 0.60] | tie |
+
+gen4 dominates the partial order (beats gen2, ties gen3, no one beats it),
+so **champion := gen4** (`models/az_pi_series.pt`).
+
+The promotion gate had been wrong about gen 4: at 200 pairs / seed 42 it
+read 0.533 ("not promoted"); at 800 pairs / seed 1000 gen 4 is
+*significantly* stronger than gen 2. So "no promotion after gen 2" was
+partly a measurement artifact — 200-pair evals on a single fixed deal
+seed are underpowered for the small per-game edges this line produces.
+The plateau is real (gens 5–10 never separate from each other), but its
+floor is one gen higher than the overnight run reported.
+
+## Capacity probe — net size is not the bottleneck
+
+Trained two larger nets on the same gen-8–11 mix and schedule as the last
+challenger; baseline w256b2 = val **1.5375** [v=0.606 p=0.932].
+
+| net | params vs base | val | value | policy |
+|---|---|---|---|---|
+| w512b2 | ~4× trunk | 1.5334 | 0.603 | 0.930 |
+| w256b4 | 2× depth | 1.5556 | 0.606 | 0.950 |
+
+- 4× width buys −0.004 nats total (value −0.003, policy −0.002) —
+  smaller than gen-to-gen loss wobble.
+- 2× depth is *worse* under a 10-epoch cosine (deeper net didn't converge
+  in budget), with no sign of upside.
+- **Value head is near its information floor**: soft series targets carry a
+  per-row entropy floor of 0.576 nats (mean target 0.518); the net sits at
+  0.606, the constant predictor at 0.692. ≥74% of extractable signal is
+  captured and ≤0.03 nats remain — much of that irreducible Dirichlet
+  label noise, not modelable structure.
+
+Conclusion: the plateau is data/targets, not capacity. Search at 1600+ sims
+plus the exact solver already produces near-perfect labels for the
+positions self-play visits, and a 256-wide/2-block net has absorbed them.
+Headroom, if any, must come from harder/rarer positions (state sampling,
+more games, sharper search) — not a bigger net.
