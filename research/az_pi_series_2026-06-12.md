@@ -74,7 +74,40 @@ transfer to the II game better than edgy binary-PI lines.
 - Observed series length ≈ 11.4 games (both players score; the DP's 8.6 is
   winner-leads expectation from (0,0) under the pooled kernel).
 
-Self-escalating continuation launched (`run_az_pi_series_overnight.sh`,
-gen 4+): 3-gen stall → sims ×2, eval pairs ×2, slots ÷2; caps 12800/800/128;
-9G cgroup cap. Per-gen CSV: `logs/az_pi_series_overnight.csv` (includes the
-per-game rate column).
+## Self-escalating run (gens 4–11, killed)
+
+`run_az_pi_series_overnight.sh`: 3-gen stall → sims ×2, eval pairs ×2,
+slots ÷2; caps 12800/800/128; 9G cgroup cap. Per-gen CSV:
+`logs/az_pi_series_overnight.csv` (includes the per-game rate column).
+
+Result: **no promotion after gen 2.** Seven straight challengers tied or
+lost to the gen-2 champion; the run was killed mid-gen-11 eval after ~8 h.
+
+| gen | sims | eval pairs | game rate | raw series | sweep share | decisive |
+|---|---|---|---|---|---|---|
+| 4 | 1600 | 200 | 0.5024 | 0.5050 | 0.533 | 30 |
+| 5 | 1600 | 200 | 0.4962 | 0.4875 | 0.432 | 37 |
+| 6 | 3200 | 400 | 0.4960 | 0.4800 | 0.371 | 62 |
+| 7 | 3200 | 400 | 0.5023 | 0.4775 | 0.375 | 72 |
+| 8 | 3200 | 400 | 0.4999 | 0.4850 | 0.403 | 62 |
+| 9 | 6400 | 800 | 0.5007 | 0.4900 | 0.437 | 126 |
+| 10 | 6400 | 800 | 0.5014 | 0.4875 | 0.412 | 114 |
+
+Observations:
+
+- **Plateau hit at gen 2**, far earlier than the binary line's gen 15–16.
+  The big gen-2 jump was score conditioning; sims-doubling found nothing
+  past it.
+- Gens 6–10 sweep shares sit **below** 0.5 (challengers slightly worse
+  than champion in decisive pairs) while per-game rates are dead even —
+  the series eval resolves a deficit the per-game rate can't see, which
+  is the amplification working as designed, just in the wrong direction.
+- Value loss kept creeping down every gen (v≈0.615 → 0.606 by gen 11)
+  with zero strength gain — same loss/strength decoupling the binary
+  line and the II memory line showed.
+- Cost scaling: 1600-sim gens ≈ 15 min, 3200 ≈ 35 min, 6400 ≈ 2.5 h.
+
+Follow-up: run killed; round-robin re-eval of gens 2/3/4 at 800 paired
+series each (sims 1600, fresh seed 1000 — the promotion evals all reused
+seed 42, i.e. identical deal streams) to pick the line's champion on
+more data (`logs/az_pi_s_roundrobin_234.txt`).
