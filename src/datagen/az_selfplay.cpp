@@ -277,6 +277,7 @@ struct EvalReq {
 static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
                                 int sims, unsigned seed,
                                 const SeriesTable *series, float natural_frac,
+                                bool no_explore,
                                 std::vector<PlayerSample> &ps,
                                 std::vector<OppSample> &os,
                                 std::vector<GameRow> &gs) {
@@ -358,7 +359,7 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
       unsigned tseed =
           (unsigned)(seed ^ (0x9E3779B9u * (unsigned)(s.game_id * 2 + s.mover)));
       if (!tr) {
-        SearchConfig sc{1.5f, sims, tseed, true};
+        SearchConfig sc{1.5f, sims, tseed, !no_explore};  // training=false => deterministic opp rep
         sc.series = series;
         tr = std::make_unique<Search>(st, s.history, sc);
       } else {
@@ -382,7 +383,16 @@ static void run_search_selfplay(NNEvaluator &nn, int total_games, int slots_n,
       std::vector<std::pair<int, long>> prior;
       const std::vector<std::pair<int, long>> *dist = &visits;
       if (visits.size() < 2) { prior = tr.root_prior(); dist = &prior; }
-      int m = sample_from_visits(*dist, s.rng);
+      // --no-explore: argmax (most-visited) move; hidden info + deal RNG already
+      // spread the state distribution, so skip the visit-proportional sampling.
+      int m;
+      if (no_explore) {
+        m = dist->empty() ? kPASS : dist->front().first;
+        long bestn = -1;
+        for (auto &[mv, n] : *dist) if (n > bestn) { bestn = n; m = mv; }
+      } else {
+        m = sample_from_visits(*dist, s.rng);
+      }
       record_decision(s.game, s.mover, m, *dist, s.game_id, s.turn++,
                       (int)s.history.size(), lps, los);
       s.game.apply_move(m);  // trees persist; next setup_decision re-roots
@@ -553,8 +563,11 @@ int main(int argc, char **argv) {
   const std::string games_out = arg(argc, argv, "--games-out", "data/az_games.parquet");
   const std::string model = arg(argc, argv, "--model", "");
   bool use_kv_cache = true;  // --no-kv-cache: full-recompute debug/correctness mode
-  for (int i = 1; i < argc; ++i)
+  bool no_explore = false;  // --no-explore: argmax moves + deterministic opp rep
+  for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--no-kv-cache") == 0) use_kv_cache = false;
+    if (std::strcmp(argv[i], "--no-explore") == 0) no_explore = true;
+  }
   const int games = std::atoi(arg(argc, argv, "--games", "1000"));
   const int sims = std::atoi(arg(argc, argv, "--sims", "100"));
   const int slots = std::atoi(arg(argc, argv, "--slots", "256"));
@@ -606,7 +619,8 @@ int main(int argc, char **argv) {
     std::printf("[az_selfplay] NN self-play: %d games, sims=%d, slots=%d, device=%s, kv=%s\n",
                 games, sims, slots, device_str.c_str(), use_kv_cache ? "on" : "off");
     NNEvaluator nn(model, device, /*max_slots=*/slots, use_kv_cache);
-    run_search_selfplay(nn, games, slots, sims, seed, series, natural_frac, ps, os, gs);
+    run_search_selfplay(nn, games, slots, sims, seed, series, natural_frac,
+                        no_explore, ps, os, gs);
   }
 
   std::printf("[az_selfplay] samples: player=%zu opp=%zu games=%zu -> %s, %s, %s\n",

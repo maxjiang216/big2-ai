@@ -159,6 +159,24 @@ def train(cfg) -> None:
         load_token_feats(), d_model=cfg.d_model, n_layers=cfg.layers,
         n_heads=cfg.heads, d_ff=cfg.d_ff,
     ).to(device)
+    if cfg.init:
+        # Warm-start from a prior checkpoint so training REFINES it. Accepts a
+        # plain az_ii checkpoint OR a TorchScript net (e.g. the II champion
+        # models/az_seq.pt — Big2NetII shares its trunk + value/policy/behavior/qa
+        # tensor names, so those copy; the aux heads start fresh).
+        try:
+            sd = dict(torch.jit.load(cfg.init, map_location=device).state_dict())
+        except RuntimeError:
+            ck = torch.load(cfg.init, map_location=device, weights_only=False)
+            sd = ck["state_dict"] if "state_dict" in ck else ck
+        msd = model.state_dict()
+        copied = 0
+        for k in msd:
+            if k in sd and sd[k].shape == msd[k].shape:
+                msd[k] = sd[k].to(device)
+                copied += 1
+        model.load_state_dict(msd)
+        print(f"[ii] warm-start from {cfg.init}: {copied}/{len(msd)} tensors")
     C = load_compose_matrix().to(device)
     opt = _make_optim(model, cfg.lr, cfg.weight_decay)
     sched, per_batch = _make_sched(opt, cfg, cfg.epochs * len(tl))
@@ -243,6 +261,8 @@ def main() -> None:
     p.add_argument("--mix-decay", type=float, default=1.0)
     p.add_argument("--series-v", default="",
                    help="series V/natural-freq CSV; enables natural-freq weights")
+    p.add_argument("--init", default="",
+                   help="warm-start from this az_ii checkpoint (previous gen)")
     p.add_argument("--lam-outcome", type=float, default=1.0)
     p.add_argument("--lam-bomb", type=float, default=1.0)
     p.add_argument("--lam-ar", type=float, default=1.0)
