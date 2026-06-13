@@ -459,6 +459,8 @@ $(BUILD_DIR)/src/datagen/az_pi_selfplay.o: src/datagen/az_pi_selfplay.cpp | dirs
 
 AZ_PI_SELFPLAY_OBJS := $(CORE_OBJS) \
                        $(AZ_PI_OBJS) \
+                       $(TYPED_SEARCH_OBJS) \
+                       $(AZ_SEARCH_CORE_OBJS) \
                        $(BUILD_DIR)/src/datagen/az_pi_selfplay.o
 
 $(BIN_DIR)/az_pi_selfplay: $(AZ_PI_SELFPLAY_OBJS)

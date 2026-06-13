@@ -445,6 +445,10 @@ class SeqLoader:
                 p_margin=self.p["margin"][sidx] / 16.0,
                 p_opp_hand=encode_thermo_t(self.p["opp_hand"][sidx]),
                 p_haux=self.p["has_aux"][sidx],
+                # az_ii raw targets: AR opp-hand decode + bomb + outcome bucket.
+                p_opp_hand_cnt=self.p["opp_hand"][sidx],
+                p_oppmax_cnt=self.p["oppmax"][sidx],
+                p_margin_raw=self.p["margin"][sidx],
             )
             # opp rows
             sidx, local = self._sample_rows(self.o, grows)
@@ -471,6 +475,9 @@ class SeqLoader:
                 o_margin=self.o["margin"][sidx] / 16.0,
                 o_opp_hand=encode_thermo_t(self.o["opp_hand"][sidx]),
                 o_haux=self.o["has_aux"][sidx],
+                o_opp_hand_cnt=self.o["opp_hand"][sidx],
+                o_oppmax_cnt=self.o["oppmax"][sidx],
+                o_margin_raw=self.o["margin"][sidx],
             )
             yield batch
 

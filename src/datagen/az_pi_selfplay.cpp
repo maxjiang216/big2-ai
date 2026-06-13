@@ -21,6 +21,7 @@
 
 #include "az_pi/pi_nn_eval.h"
 #include "az_pi/pi_search.h"
+#include "az_seq_record.h"  // PI->II distillation: shared seq sample extraction
 #include "game.h"
 #include "move.h"
 #include "nn_encode.h"
@@ -93,6 +94,13 @@ struct Slot {
   std::mt19937 rng;
   std::vector<int> sample_idx;  // indices into the slot's pending samples
   std::vector<Sample> samples;
+  // --distill-out: imperfect-info ("seq") training rows derived from this PI
+  // game. history = every applied move (transformer tokens, incl. forced).
+  int first_player = 0;
+  int seq_turn = 0;
+  std::vector<int> history;
+  std::vector<az_seq_record::PlayerSample> seq_ps;
+  std::vector<az_seq_record::OppSample> seq_os;
 };
 
 int main(int argc, char **argv) {
@@ -124,6 +132,13 @@ int main(int argc, char **argv) {
   int fixed_pts[2] = {-1, -1};
   if (!fixed_pts_s.empty())
     std::sscanf(fixed_pts_s.c_str(), "%d,%d", &fixed_pts[0], &fixed_pts[1]);
+  // --distill-out PREFIX: also emit the imperfect-info games/player/opp triple
+  // (PREFIX_{games,player,opp}.parquet, dataset_seq.py schema) for PI->II
+  // distillation. Targets = the PI move actually played (one-hot cloning);
+  // belief target = the exact opponent hand; same classify_position recording
+  // filter the az_ii / az_search search will query.
+  const std::string distill_prefix = arg(argc, argv, "--distill-out", "");
+  const bool distill = !distill_prefix.empty();
 
   if (model_path.empty()) {
     std::fprintf(stderr, "error: --model is required\n");
@@ -154,7 +169,10 @@ int main(int argc, char **argv) {
   std::atomic<int> games_started{0}, games_done{0};
   std::vector<Sample> all_samples;
   std::vector<Outcome> all_outcomes;
-  std::mutex samples_mu;  // guards all_samples/all_outcomes (once per game)
+  std::vector<az_seq_record::PlayerSample> all_seq_ps;
+  std::vector<az_seq_record::OppSample> all_seq_os;
+  std::vector<az_seq_record::GameRow> all_seq_games;
+  std::mutex samples_mu;  // guards all_samples/all_outcomes + seq vectors (once per game)
 
   auto make_config = [&](Slot &sl) {
     PiSearchConfig cfg;
@@ -195,9 +213,44 @@ int main(int argc, char **argv) {
     s.waiting = false;
     s.turn = 0;
     s.samples.clear();
+    s.seq_turn = 0;
+    s.history.clear();
+    s.seq_ps.clear();
+    s.seq_os.clear();
+    s.first_player = s.game.current_player();
     s.game_id = id;
     s.active = true;
     return true;
+  };
+
+  // --distill-out: record the imperfect-info seq rows for one applied move,
+  // using the same head filter the az_ii search queries (classify_position).
+  // Call BEFORE game.apply_move / history.push_back; `played` is the PI move.
+  const SeriesTable *seq_series = series_table.loaded ? &series_table : nullptr;
+  auto seq_record_move = [&](Slot &s, int mover, int played) {
+    if (!distill) return;
+    auto legal = s.game.get_legal_moves();
+    int fm = -1;
+    const auto t = az_seq_record::classify_position(s.game, legal, fm);
+    const int hidx = (int)s.history.size();
+    if (t == az_seq_record::POS_REAL) {
+      az_seq_record::record_player_sample(s.game, mover, {{played, 1}}, s.game_id,
+                                          s.seq_turn, hidx, s.seq_ps);
+      az_seq_record::record_opp_sample(s.game, mover, played, s.game_id,
+                                       s.seq_turn, hidx, s.seq_os);
+      ++s.seq_turn;
+    } else if (t == az_seq_record::POS_OPP1) {
+      az_seq_record::record_player_sample(s.game, mover, {}, s.game_id, s.seq_turn,
+                                          hidx, s.seq_ps);  // value-only
+      az_seq_record::record_opp_sample(s.game, mover, played, s.game_id,
+                                       s.seq_turn, hidx, s.seq_os);
+      ++s.seq_turn;
+    } else if (t == az_seq_record::POS_FORCED_WIN) {
+      az_seq_record::record_opp_sample(s.game, mover, played, s.game_id,
+                                       s.seq_turn, hidx, s.seq_os);  // observer learns loss
+      ++s.seq_turn;
+    }
+    // POS_INSTA_WIN / POS_FORCED_PASS: no NN head queried -> no seq sample.
   };
 
   auto finalize_game = [&](Slot &s) {
@@ -207,13 +260,24 @@ int main(int argc, char **argv) {
       smp.value = (smp.mover == winner) ? 1.0f : 0.0f;
       smp.loser_cards = loser_cards;
     }
+    if (distill)  // backfill seq value/margin targets from the outcome
+      az_seq_record::backfill_values(s.game, s.pts, seq_series, 0, 0, s.seq_ps,
+                                     s.seq_os);
     {
       std::lock_guard<std::mutex> lk(samples_mu);
       for (auto &smp : s.samples) all_samples.push_back(std::move(smp));
       all_outcomes.push_back(
           Outcome{s.pts[0], s.pts[1], 0, winner, loser_cards});
+      if (distill) {
+        for (auto &x : s.seq_ps) all_seq_ps.push_back(std::move(x));
+        for (auto &x : s.seq_os) all_seq_os.push_back(std::move(x));
+        all_seq_games.push_back({s.game_id, s.first_player, winner, s.pts[0],
+                                 s.pts[1], loser_cards, std::move(s.history)});
+      }
     }
     s.samples.clear();
+    s.seq_ps.clear();
+    s.seq_os.clear();
     s.active = false;
     s.tree.reset();
     // Pools never shrink on their own; an unlucky game can leave a huge
@@ -255,7 +319,9 @@ int main(int argc, char **argv) {
 
     const float t = (s.turn < temp_moves) ? temp : 0.0f;
     const int played = s.tree->sample_move(t, s.rng);
+    seq_record_move(s, mover, played);
     s.game.apply_move(played);
+    if (distill) s.history.push_back(played);
     s.tree->advance_root(played);  // keep the played subtree (re-noised)
     s.sims_done = 0;
     ++s.turn;
@@ -276,7 +342,10 @@ int main(int argc, char **argv) {
       {
         const auto legal = s.game.get_legal_moves();
         if (legal.size() == 1) {  // forced move: skip search + recording
+          const int fmover = s.game.current_player();
+          seq_record_move(s, fmover, legal[0]);  // history token + filter (no seq row)
           s.game.apply_move(legal[0]);
+          if (distill) s.history.push_back(legal[0]);
           if (s.tree) s.tree->advance_root(legal[0]);
           ++s.turn;
           continue;
@@ -517,6 +586,19 @@ int main(int argc, char **argv) {
     std::fclose(f);
     std::printf("✓ wrote %s (%zu games)\n", outcomes_path.c_str(),
                 all_outcomes.size());
+  }
+
+  if (distill) {
+    az_seq_record::write_games_parquet(distill_prefix + "_games.parquet",
+                                       all_seq_games);
+    az_seq_record::write_player_parquet(distill_prefix + "_player.parquet",
+                                        all_seq_ps);
+    az_seq_record::write_opp_parquet(distill_prefix + "_opp.parquet", all_seq_os);
+    std::printf(
+        "✓ distill triple: %s_{games,player,opp}.parquet (games=%zu player=%zu "
+        "opp=%zu)\n",
+        distill_prefix.c_str(), all_seq_games.size(), all_seq_ps.size(),
+        all_seq_os.size());
   }
   return 0;
 }
