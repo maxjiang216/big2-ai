@@ -23,6 +23,8 @@
 //   ./bin/eval_az_match --model-a models/az_seq.pt \
 //       --classic greedy --deals 1000 --sims 100 --device cuda
 
+#include "az_pi/pi_nn_eval.h"
+#include "az_pimc/det_value.h"  // determinization-in-tree leaf-value override
 #include "az_search/az_search.h"
 #include "az_search/legacy_nn_eval.h"
 #include "az_search/nn_eval.h"
@@ -79,6 +81,24 @@ struct SlotEval : Evaluator {
   }
 };
 
+// Like SlotEval but overrides the leaf value with the determinized PI value
+// (Design 1). Used on seat A's synchronous forced-extension evals when --det-pi.
+struct DetSlotEval : Evaluator {
+  NNEvaluator &nn;
+  int slot;
+  az_pi::PiEvaluator &pi;
+  int det_n;
+  std::mt19937 &rng;
+  DetSlotEval(NNEvaluator &n, int s, az_pi::PiEvaluator &p, int dn,
+              std::mt19937 &r)
+      : nn(n), slot(s), pi(p), det_n(dn), rng(r) {}
+  NetEval eval(const EvalFeatures &f) override {
+    NetEval e = nn.eval_batch({slot}, {f})[0];
+    e.value = az_pimc::determinized_values({f}, pi, det_n, rng)[0];
+    return e;
+  }
+};
+
 // One concurrent game. A occupies seat `seat_a`; the other seat is B (an az tree
 // if B is az, else a CPU Player). Each az seat re-roots its tree from the true
 // game state + move history per decision; the CPU seat is driven via the
@@ -121,6 +141,14 @@ int main(int argc, char **argv) {
   const unsigned base_seed = (unsigned)std::strtoul(arg(argc, argv, "--seed", "42"), nullptr, 10);
   std::string device_str = arg(argc, argv, "--device", "cuda");
   const bool use_kv_cache = !has_flag(argc, argv, "--no-kv-cache");
+  // Determinization-in-tree (Design 1): override seat A's leaf VALUE with the
+  // determinized PI value (uniform belief). --det-pi PATH enables it.
+  const std::string det_pi = arg(argc, argv, "--det-pi", "");
+  const int det_n = std::atoi(arg(argc, argv, "--det-n", "16"));
+  // --det-belief PATH: AR-belief sampling (scripted Big2NetII.sample_opp) instead
+  // of uniform; --det-gamma uniform-floor mix.
+  const std::string det_belief = arg(argc, argv, "--det-belief", "");
+  const float det_gamma = (float)std::atof(arg(argc, argv, "--det-gamma", "0.1"));
 
   const bool b_is_seq = classic.empty() && !model_b.empty();
   const bool b_is_legacy =
@@ -139,6 +167,21 @@ int main(int argc, char **argv) {
   const int pool = std::min(slots_n, total);
 
   NNEvaluator nnA(model_a, device, /*max_slots=*/pool, use_kv_cache);
+  std::unique_ptr<az_pi::PiNNEvaluator> det_eval;
+  std::unique_ptr<torch::jit::Module> det_belief_net;
+  std::mt19937 det_rng(base_seed ^ 0xD37u);
+  if (!det_pi.empty()) {
+    det_eval = std::make_unique<az_pi::PiNNEvaluator>(det_pi, device,
+                                                      /*pts_inputs=*/false);
+    if (!det_belief.empty()) {
+      det_belief_net =
+          std::make_unique<torch::jit::Module>(torch::jit::load(det_belief, device));
+      det_belief_net->eval();
+    }
+    std::printf("[det] seat A leaf value = determinized PI (%s, N=%d, belief=%s)\n",
+                det_pi.c_str(), det_n,
+                det_belief.empty() ? "uniform" : det_belief.c_str());
+  }
   std::unique_ptr<NNEvaluator> nnB;
   std::unique_ptr<LegacyNNEvaluator> legB;
   std::shared_ptr<PlayerFactory> factory_b;
@@ -288,8 +331,13 @@ int main(int argc, char **argv) {
       // forced-move extension (matches run()); the few forced leaves evaluate
       // synchronously against this slot's prefix (rare, un-batched is fine).
       if (useA) {
-        SlotEval ev(nnA, idx);
-        s.tree[mover]->finalize(&ev);
+        if (det_eval) {
+          DetSlotEval ev(nnA, idx, *det_eval, det_n, det_rng);
+          s.tree[mover]->finalize(&ev);
+        } else {
+          SlotEval ev(nnA, idx);
+          s.tree[mover]->finalize(&ev);
+        }
       } else if (b_is_seq) {
         SlotEval ev(*nnB, idx);
         s.tree[mover]->finalize(&ev);
@@ -322,6 +370,24 @@ int main(int argc, char **argv) {
     }
     if (!fl.aF.empty()) {
       auto r = nnA.eval_batch(fl.aS, fl.aF);
+      if (det_eval) {  // override seat A's leaf values with determinized PI value
+        std::vector<float> dv;
+        if (det_belief_net) {
+          // full history per leaf = that slot's game prefix + in-tree path tokens
+          std::vector<std::vector<int>> fh(fl.aF.size());
+          for (size_t i = 0; i < fl.aF.size(); ++i) {
+            fh[i] = slots[fl.aS[i]].history;
+            fh[i].insert(fh[i].end(), fl.aF[i].path_tokens.begin(),
+                         fl.aF[i].path_tokens.end());
+          }
+          dv = az_pimc::determinized_values_ar(fl.aF, fh, *det_belief_net,
+                                               *det_eval, det_n, det_gamma,
+                                               det_rng, device);
+        } else {
+          dv = az_pimc::determinized_values(fl.aF, *det_eval, det_n, det_rng);
+        }
+        for (size_t i = 0; i < dv.size(); ++i) r[i].value = dv[i];
+      }
       for (size_t i = 0; i < fl.aS.size(); ++i) {
         slots[fl.aS[i]].neval = r[i];
         slots[fl.aS[i]].result_ready = true;

@@ -141,6 +141,13 @@ $(BUILD_DIR)/src/players/az_ii/%.o: src/players/az_ii/%.cpp | dirs
 	@mkdir -p $(BUILD_DIR)/src/players/az_ii
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
 
+# az_pimc module: determinization probe (AR belief sampler + PI-champion value).
+# Torch-dependent; the factory pulls in PiNNEvaluator (link with AZ_PI_OBJS).
+AZ_PIMC_OBJS := $(BUILD_DIR)/src/players/az_pimc/pimc_player.o
+$(BUILD_DIR)/src/players/az_pimc/%.o: src/players/az_pimc/%.cpp | dirs
+	@mkdir -p $(BUILD_DIR)/src/players/az_pimc
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
+
 $(BUILD_DIR)/test/%.o: test/%.cpp | dirs
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
@@ -451,6 +458,8 @@ EVAL_AZ_MATCH_OBJS := $(CORE_OBJS) \
                       $(TYPED_SEARCH_OBJS) \
                       $(AZ_SEARCH_OBJS) \
                       $(AZ_II_OBJS) \
+                      $(AZ_PIMC_OBJS) \
+                      $(AZ_PI_OBJS) \
                       $(BUILD_DIR)/src/datagen/eval_az_match.o
 
 $(BIN_DIR)/eval_az_match: $(EVAL_AZ_MATCH_OBJS)
@@ -510,6 +519,8 @@ EVAL_AZ_SERIES_OBJS := $(CORE_OBJS) \
                        $(TYPED_SEARCH_OBJS) \
                        $(AZ_SEARCH_OBJS) \
                        $(AZ_II_OBJS) \
+                       $(AZ_PIMC_OBJS) \
+                       $(AZ_PI_OBJS) \
                        $(BUILD_DIR)/src/datagen/eval_az_series.o
 
 $(BIN_DIR)/eval_az_series: $(EVAL_AZ_SERIES_OBJS)

@@ -90,7 +90,9 @@ class ARHand(nn.Module):
         """[N, len(AR_ORDER)] capacity of ranks AFTER each decode position — the
         budget the still-to-come ranks can still absorb. Used for the lower-bound
         mask that forces the remainder onto the tail ranks."""
-        thermo_ord = thermo[:, AR_ORDER].float()  # [N, R] in decode order
+        order = torch.tensor([12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
+                             dtype=torch.long, device=thermo.device)
+        thermo_ord = thermo.index_select(1, order).float()  # [N, R] in decode order
         incl = torch.flip(torch.cumsum(torch.flip(thermo_ord, [1]), 1), [1])
         return incl - thermo_ord  # exclusive suffix (ranks strictly after pos)
 
@@ -156,6 +158,34 @@ class ARHand(nn.Module):
             out[:, r] = c
             decided = decided + c.float()
             prev = F.one_hot(c, MAXC).float()
+        return out
+
+    def sample_n(self, belief: torch.Tensor, thermo: torch.Tensor,
+                 opp_size: torch.Tensor) -> torch.Tensor:
+        """Scriptable ancestral sampler (no generator arg). belief [N, bd],
+        thermo [N, 13] float upper bounds, opp_size [N] float -> [N, 13] long
+        counts that sum to opp_size and respect the thermo bounds."""
+        maxc = 5
+        N = belief.shape[0]
+        dev = belief.device
+        h = torch.tanh(self.seed(belief))
+        cap = self._suffix_cap(thermo)
+        decided = torch.zeros(N, device=dev)
+        prev = torch.zeros(N, maxc, device=dev)
+        eye13 = torch.eye(13, device=dev)
+        karange = torch.arange(maxc, device=dev).float()
+        out = torch.zeros(N, 13, dtype=torch.long, device=dev)
+        order = [12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
+        for i, r in enumerate(order):
+            remaining = opp_size - decided
+            bound = torch.minimum(thermo[:, r], remaining)
+            rank_oh = eye13[r].expand(N, 13)
+            h = self.cell(self._step_inputs(prev, remaining, thermo[:, r], rank_oh), h)
+            logp = self._masked_logp(h, karange, remaining, bound, cap[:, i])
+            c = torch.multinomial(logp.exp(), 1).squeeze(1)
+            out[:, r] = c
+            decided = decided + c.float()
+            prev = F.one_hot(c, maxc).float()
         return out
 
 
@@ -378,6 +408,33 @@ class Big2NetII(nn.Module):
         h = H.gather(1, idx).squeeze(1)
         x, _ = self._features(h, hand, oppmax, osz, usz, otm, mpts, opts)
         return self.value_head(x), self.policy_head(x), self.behavior_head(x)
+
+    @torch.jit.export
+    def sample_opp(
+        self,
+        tokens: torch.Tensor,    # [B, T] int64 move-id history
+        hist_idx: torch.Tensor,  # [B] int64 belief readout position
+        oppmax: torch.Tensor,    # [B, 48] thermo encoding (for the belief vector)
+        thermo13: torch.Tensor,  # [B, 13] float per-rank upper bounds (AR mask)
+        opp_size: torch.Tensor,  # [B] float opponent hand size
+        n: int,                  # samples per batch row
+    ) -> torch.Tensor:
+        """Determinization sampler for the C++ PIMC player: belief transformer
+        over `tokens`, read off at `hist_idx`, then AR-sample `n` opponent hands
+        per row. Returns [B, n, 13] long counts summing to opp_size."""
+        H = self.forward_full(tokens)
+        B = tokens.shape[0]
+        idx = hist_idx.view(B, 1, 1).expand(B, 1, self.d_model)
+        e = H.gather(1, idx).squeeze(1)  # [B, d_model]
+        oo = F.mish(self.layer_a(oppmax))
+        oo = F.mish(self.layer_b_hands(oo))
+        oo = F.mish(self.layer_c_opp(oo))  # [B, 96]
+        belief = torch.cat([e, oo], dim=-1)  # [B, belief_dim]
+        belief = belief.repeat_interleave(n, dim=0)
+        th = thermo13.repeat_interleave(n, dim=0)
+        osz = opp_size.repeat_interleave(n, dim=0)
+        hands = self.ar.sample_n(belief, th, osz)  # [B*n, 13] long
+        return hands.view(B, n, 13)
 
     @torch.jit.ignore
     def readout_train(self, h, hand, oppmax, osz, usz, otm, mpts, opts,

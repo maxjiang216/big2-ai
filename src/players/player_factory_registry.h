@@ -26,6 +26,7 @@
 // torch-free.
 #ifdef BIG2_WITH_TORCH
 #include "az_ii/az_ii_player_factory.h"
+#include "az_pimc/pimc_player_factory.h"
 #include "az_search/az_search_player_factory.h"
 #endif
 
@@ -124,6 +125,13 @@ inline std::shared_ptr<PlayerFactory> make_player_factory(const std::string &nam
     // Policy-greedy imperfect-info distillation net. Loads models/az_ii.ts.pt
     // (scripted Big2NetII) on CPU; no search yet.
     return std::make_shared<az_ii::AzIiPlayerFactory>();
+  }
+  if (name == "az_pimc") {
+    // Determinization probe: AR-belief opp-hand sampling + PI-champion value,
+    // Max-of-Average over worlds, root-only (no tree). param = N samples
+    // (default 16). Loads models/az_ii_belief.ts.pt + models/az_pi_series.pt.
+    int n = (param <= 0.0) ? 16 : static_cast<int>(std::round(param));
+    return std::make_shared<az_pimc::AzPimcPlayerFactory>(n, /*gamma=*/0.1f, seed);
   }
 #endif
 

@@ -51,7 +51,7 @@ def _gather_h(H, local, hist):
     return H[local, hist]
 
 
-def _step(model, C, batch, lam_outcome=1.0, lam_bomb=1.0, lam_ar=1.0):
+def _step(model, C, batch, lam_outcome=1.0, lam_bomb=1.0, lam_ar=1.0, lam_play=1.0):
     H = model.forward_full(batch["tokens"])
     hp = _gather_h(H, batch["p_local"], batch["p_hist"])
     ho = _gather_h(H, batch["o_local"], batch["o_hist"])
@@ -111,7 +111,7 @@ def _step(model, C, batch, lam_outcome=1.0, lam_bomb=1.0, lam_ar=1.0):
     loss_ar = _wmean(ar_nll, waux)
 
     loss = (
-        loss_v + loss_p + loss_b + loss_q
+        lam_play * (loss_v + loss_p + loss_b + loss_q)
         + lam_outcome * loss_o + lam_bomb * loss_bomb + lam_ar * loss_ar
     )
     return (
@@ -182,11 +182,16 @@ def train(cfg) -> None:
     sched, per_batch = _make_sched(opt, cfg, cfg.epochs * len(tl))
     best = math.inf
     n_ranks = len(AR_ORDER)
+    # Belief-only: zero the play heads + outcome aux so the trunk specialises on
+    # opp-hand prediction (the only thing the determinization sampler uses).
+    lam_play = 0.0 if cfg.belief_only else 1.0
+    lam_outcome = 0.0 if cfg.belief_only else cfg.lam_outcome
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
         for batch in tl:
-            loss, _, _ = _step(model, C, batch, cfg.lam_outcome, cfg.lam_bomb, cfg.lam_ar)
+            loss, _, _ = _step(model, C, batch, lam_outcome, cfg.lam_bomb,
+                               cfg.lam_ar, lam_play)
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -200,7 +205,7 @@ def train(cfg) -> None:
         with torch.no_grad():
             for batch in vl:
                 _, parts, (n_p, n_o) = _step(
-                    model, C, batch, cfg.lam_outcome, cfg.lam_bomb, cfg.lam_ar
+                    model, C, batch, lam_outcome, cfg.lam_bomb, cfg.lam_ar, lam_play
                 )
                 lv, lp, lb, lq, lo, lbomb, lar = (float(x) for x in parts)
                 n_all = n_p + n_o
@@ -219,7 +224,10 @@ def train(cfg) -> None:
         vo, vbomb, var = sums[4] / n_all, sums[5] / n_all, sums[6] / n_all
         ar_ppx = math.exp(var / n_ranks)  # geo-mean per-rank perplexity
         blended = vv + vp + vb + vq
-        mon = vp + vb if cfg.ckpt_metric == "head" else blended
+        if cfg.belief_only:
+            mon = var  # checkpoint on AR NLL — the belief is all that matters
+        else:
+            mon = vp + vb if cfg.ckpt_metric == "head" else blended
         if not per_batch:
             sched.step(mon)
         print(
@@ -266,6 +274,10 @@ def main() -> None:
     p.add_argument("--lam-outcome", type=float, default=1.0)
     p.add_argument("--lam-bomb", type=float, default=1.0)
     p.add_argument("--lam-ar", type=float, default=1.0)
+    p.add_argument("--belief-only", action="store_true",
+                   help="train ONLY the belief trunk + AR/bomb heads (zero the "
+                   "value/policy/behavior/qa + outcome play losses); checkpoint "
+                   "by AR NLL. For the determinization belief model.")
     p.add_argument("--weight-decay", type=float, default=1e-5)
     p.add_argument("--grad-clip", type=float, default=0.5)
     p.add_argument("--seed", type=int, default=0)
