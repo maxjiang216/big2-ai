@@ -13,6 +13,9 @@ dependencies = [
     "matplotlib>=3.7",
     "tqdm>=4.65",
     "torch>=2.0",
+    "onnx>=1.22.0",
+    "onnxruntime>=1.24.3",
+    "onnxscript>=0.7.0",
 ]
 
 [project.optional-dependencies]
