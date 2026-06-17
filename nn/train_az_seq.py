@@ -108,7 +108,9 @@ def _step(model, C, batch, no_memory=False, lam_margin=1.0, lam_ohand=1.0):
     loss_b = _wmean(F.nll_loss(logb, tgt, reduction="none"), wo)
     q = qa[n_p:].gather(1, tgt.unsqueeze(1)).squeeze(1)
     loss_q = _wmean(
-        F.binary_cross_entropy(q.clamp(EPS, 1 - EPS), batch["o_value"], reduction="none"),
+        F.binary_cross_entropy(
+            q.clamp(EPS, 1 - EPS), batch["o_value"], reduction="none"
+        ),
         wo,
     )
 
@@ -120,7 +122,9 @@ def _step(model, C, batch, no_memory=False, lam_margin=1.0, lam_ohand=1.0):
     waux = torch.cat([wp * batch["p_haux"], wo * batch["o_haux"]])
     loss_m = _wmean((margin - mtgt) ** 2, waux)
     loss_oh = _wmean(
-        F.binary_cross_entropy_with_logits(opp_hand, otgt_hand, reduction="none").mean(-1),
+        F.binary_cross_entropy_with_logits(opp_hand, otgt_hand, reduction="none").mean(
+            -1
+        ),
         waux,
     )
 
@@ -172,7 +176,9 @@ def train(cfg) -> None:
         # New aux heads (margin/opp_hand) are absent from a pre-aux champion —
         # they stay randomly initialised. Only fail if a CORE (non-aux) tensor
         # didn't transfer, which would mean a real architecture mismatch.
-        core_missing = [k for k in missing if "margin_head" not in k and "opp_hand_head" not in k]
+        core_missing = [
+            k for k in missing if "margin_head" not in k and "opp_hand_head" not in k
+        ]
         if core_missing:
             raise SystemExit(
                 f"--init core shape/key mismatch ({copied}/{len(msd)}): {core_missing[:5]}"
@@ -191,7 +197,9 @@ def train(cfg) -> None:
     for epoch in range(1, cfg.epochs + 1):
         model.train()
         for batch in tl:
-            loss, _, _ = _step(model, C, batch, cfg.no_memory, cfg.lam_margin, cfg.lam_ohand)
+            loss, _, _ = _step(
+                model, C, batch, cfg.no_memory, cfg.lam_margin, cfg.lam_ohand
+            )
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)

@@ -121,8 +121,13 @@ def net_values(df: pd.DataFrame, model_path: str, device: str) -> np.ndarray:
         s0 = torch.tensor(df["opp_size"].to_numpy(), dtype=torch.float32) / 16.0
         s1 = torch.tensor(df["our_size"].to_numpy(), dtype=torch.float32) / 16.0
     with torch.no_grad():
-        v, _ = m(hand.to(device), opp.to(device), trick.to(device),
-                 s0.to(device), s1.to(device))
+        v, _ = m(
+            hand.to(device),
+            opp.to(device),
+            trick.to(device),
+            s0.to(device),
+            s1.to(device),
+        )
     return v.cpu().numpy().reshape(-1)
 
 
@@ -159,25 +164,37 @@ def render_game(gdf: pd.DataFrame, net_v: np.ndarray | None) -> str:
             if n_moves == 1:
                 played = html.escape(match_move(hands[k], timeline[m][j]))
             else:
-                played = html.escape(match_move(hands[k], timeline[m][j])) + \
-                    f' <span class="vn">(+{n_moves - 1} forced)</span>'
+                played = (
+                    html.escape(match_move(hands[k], timeline[m][j]))
+                    + f' <span class="vn">(+{n_moves - 1} forced)</span>'
+                )
         elif m == winner:
             # Last recorded decision of the winner: the remaining cards go out
             # over this + subsequent FORCED moves (not one combined move).
             rest = html.escape(match_move(hands[k], [0] * 13))
-            played = (f"<span class='vn'>sheds rest:</span> {rest} "
-                      f"<span class='play'>wins (forced finish)</span>")
-        trick_s = hand_chips(tricks[k]) if any(tricks[k]) else '<span class="vn">lead</span>'
+            played = (
+                f"<span class='vn'>sheds rest:</span> {rest} "
+                f"<span class='play'>wins (forced finish)</span>"
+            )
+        trick_s = (
+            hand_chips(tricks[k]) if any(tricks[k]) else '<span class="vn">lead</span>'
+        )
 
         def val_html(v: float, proven: bool = False) -> str:
             tag = ' <span class="play">proven</span>' if proven else ""
-            return (f'<span class="val"><span class="valbar">'
-                    f'<span class="valfill" style="width:{v*100:.0f}%"></span></span>'
-                    f'{v:.2f}{tag}</span>')
+            return (
+                f'<span class="val"><span class="valbar">'
+                f'<span class="valfill" style="width:{v*100:.0f}%"></span></span>'
+                f"{v:.2f}{tag}</span>"
+            )
 
         val_s = val_html(float(net_v[r["_row"]])) if net_v is not None else ""
         sv_s = ""
-        if "root_value" in r and r["root_value"] is not None and not pd.isna(r["root_value"]):
+        if (
+            "root_value" in r
+            and r["root_value"] is not None
+            and not pd.isna(r["root_value"])
+        ):
             sv = float(r["root_value"])
             sv_s = val_html(sv, proven=sv in (0.0, 1.0))
         rows.append(
@@ -198,13 +215,19 @@ def render_game(gdf: pd.DataFrame, net_v: np.ndarray | None) -> str:
         a, b = recs[0]["my_pts"], recs[0]["opp_pts"]
         s0, s1 = (a, b) if m0 == 0 else (b, a)
         score = f" &mdash; series score {s0}&ndash;{s1}"
-    head = (f'Game {gid} &mdash; <span class="w{winner}">P{winner} wins</span> '
-            f'({len(recs)} recorded decisions){score}')
-    cols = ("<tr><th>ply</th><th>mover</th><th>mover hand</th><th>opp hand</th>"
-            "<th>trick</th><th>played</th><th>search visits</th><th>net value</th>"
-            "<th>search value</th></tr>")
-    return (f"<details{' open' if gid == 0 else ''}><summary>{head}</summary>"
-            f"<table>{cols}{''.join(rows)}</table></details>")
+    head = (
+        f'Game {gid} &mdash; <span class="w{winner}">P{winner} wins</span> '
+        f"({len(recs)} recorded decisions){score}"
+    )
+    cols = (
+        "<tr><th>ply</th><th>mover</th><th>mover hand</th><th>opp hand</th>"
+        "<th>trick</th><th>played</th><th>search visits</th><th>net value</th>"
+        "<th>search value</th></tr>"
+    )
+    return (
+        f"<details{' open' if gid == 0 else ''}><summary>{head}</summary>"
+        f"<table>{cols}{''.join(rows)}</table></details>"
+    )
 
 
 def main() -> None:
@@ -224,12 +247,14 @@ def main() -> None:
 
     body = "".join(render_game(df[df["game_id"] == g], net_v) for g in gids)
     title = f"az_pi sample games &mdash; {Path(args.parquet).name}"
-    page = (f"<!doctype html><html><head><meta charset='utf-8'>"
-            f"<title>{title}</title><style>{CSS}</style></head><body>"
-            f"<h1>{title}</h1>"
-            f"<div class='meta'>{len(gids)} games &middot; perfect information "
-            f"&middot; visit bars = MCTS thinking at each recorded decision "
-            f"(forced moves are not recorded)</div>{body}</body></html>")
+    page = (
+        f"<!doctype html><html><head><meta charset='utf-8'>"
+        f"<title>{title}</title><style>{CSS}</style></head><body>"
+        f"<h1>{title}</h1>"
+        f"<div class='meta'>{len(gids)} games &middot; perfect information "
+        f"&middot; visit bars = MCTS thinking at each recorded decision "
+        f"(forced moves are not recorded)</div>{body}</body></html>"
+    )
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(page)

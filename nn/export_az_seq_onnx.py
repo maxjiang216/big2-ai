@@ -38,8 +38,8 @@ class OnnxWrapper(torch.nn.Module):
         self.m = model
 
     def forward(self, tokens, hand, oppmax, sides):
-        h = self.m.forward_full(tokens)          # [1, T+1, d]
-        hidden = h[:, -1, :]                      # decision at index T (last row)
+        h = self.m.forward_full(tokens)  # [1, T+1, d]
+        hidden = h[:, -1, :]  # decision at index T (last row)
         osz = sides[:, 0]
         usz = sides[:, 1]
         otm = sides[:, 2]
@@ -61,15 +61,20 @@ def main() -> None:
     sd = scripted.state_dict()
     d_ff = sd["blocks.0.ff1.weight"].shape[0]
     model = Big2NetSeqAZ(
-        load_token_feats(), d_model=d_model, n_layers=n_layers,
-        n_heads=n_heads, d_ff=d_ff, seq_cap=seq_cap,
+        load_token_feats(),
+        d_model=d_model,
+        n_layers=n_layers,
+        n_heads=n_heads,
+        d_ff=d_ff,
+        seq_cap=seq_cap,
     )
     # Scripted surface drops training-only heads (margin / opp_hand); the
     # exported graph only uses value/policy/behavior/qa, so strict=False is safe.
     missing, unexpected = model.load_state_dict(sd, strict=False)
     assert not unexpected, f"unexpected keys: {unexpected}"
-    assert all("margin_head" in k or "opp_hand_head" in k for k in missing), \
-        f"unexpected missing keys: {missing}"
+    assert all(
+        "margin_head" in k or "opp_hand_head" in k for k in missing
+    ), f"unexpected missing keys: {missing}"
     model.eval()
     wrapper = OnnxWrapper(model).eval()
 
@@ -84,7 +89,9 @@ def main() -> None:
         ref = wrapper(*args)
 
     torch.onnx.export(
-        wrapper, args, cfg.out,
+        wrapper,
+        args,
+        cfg.out,
         input_names=["tokens", "hand", "oppmax", "sides"],
         output_names=["value", "policy", "behavior", "qa"],
         dynamic_axes={"tokens": {1: "T"}},
@@ -122,7 +129,10 @@ def main() -> None:
     T2 = 15
     ok2 = check(
         torch.randint(0, 100, (1, T2), dtype=torch.int64),
-        torch.randn(1, 48), torch.randn(1, 48), torch.rand(1, 5), f"T={T2}"
+        torch.randn(1, 48),
+        torch.randn(1, 48),
+        torch.rand(1, 5),
+        f"T={T2}",
     )
     print("PARITY PASS" if (ok1 and ok2) else "PARITY FAIL")
 
