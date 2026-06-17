@@ -83,6 +83,18 @@ export class Search {
       return;
     }
 
+    // Opp-has-1-card endgame: pin the series-optimal shed (a 1-card opponent
+    // can't beat any multi-card combo). Mirrors C++ expand_player opp1 fix.
+    if (n.st.lastMove === kPASS && n.st.oppSize === 1 &&
+        !tbl.handHasStraightLead(n.st.ourHand)) {
+      const mv = tbl.opp1SeriesMove(n.st.ourHand);
+      if (mv !== kPASS) {
+        n.edges.push({ moveId: mv, prior: 1.0, child: null, fusedPass: false, moveValue: 0.5 });
+        this.buildGroups(n);
+        return;
+      }
+    }
+
     // Factored composed-logit masked softmax over the legal concrete moves.
     let maxl = -1e30;
     for (const m of legal) maxl = Math.max(maxl, tbl.composedLogit(m, policy138));

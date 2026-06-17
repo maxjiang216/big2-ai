@@ -23,6 +23,13 @@ export class MoveTable {
     this.moves = json.moves;                  // [{id,combo,rank,aux,total,oppHead,family,subKey,cards,path,beating}]
     // Encoding offset table: ENCODING_DIM=48 = sum(maxDeck).
     this.encDim = this.maxDeck.reduce((a, b) => a + b, 0);
+    // (combo,rank,aux) -> move id, for constructing specific moves (opp1 shed).
+    this.byCRA = new Map();
+    for (const m of this.moves) this.byCRA.set(`${m.combo},${m.rank},${m.aux}`, m.id);
+  }
+
+  moveIdFor(combo, rank, aux) {
+    return this.byCRA.get(`${combo},${rank},${aux}`);
   }
 
   m(id) { return this.moves[id]; }
@@ -130,6 +137,38 @@ export class MoveTable {
     let s = 0;
     for (let i = 0; i < p.length; ++i) s += policy138[p[i]];
     return s;
+  }
+
+  // True iff our hand has any straight lead (combo >= kStraight5 == 6). opp1
+  // shed is only valid when this is false (a straight beats the 1-card analysis).
+  handHasStraightLead(hand) {
+    for (const id of this.computeLegalMoves(hand, kPASS))
+      if (this.moves[id].combo >= 6) return true;
+    return false;
+  }
+
+  // Series-optimal lead when WE lead and the opponent holds exactly 1 card and
+  // our hand has no straight lead (port of opp1_series_move). Sheds multi-card
+  // combos (a 1-card opp can't beat them), smallest loose single as bomb aux,
+  // then singles highest-first. Returns a move id (kPASS only if hand empty).
+  opp1SeriesMove(hand) {
+    // combo ints: kSingle=1 kDouble=2 kTriple=3 kBomb=5. rank/aux use the engine
+    // single-rank convention (r+3: idx 11=A->14, idx 12=deuce->15).
+    let auxRank = 0;
+    for (let r = 0; r < 13; ++r) if (hand[r] === 1) { auxRank = r + 3; break; }
+    for (let r = 0; r <= 10; ++r) if (hand[r] === 4) {       // four-of-a-kind bomb
+      const bombRank = r + 3;
+      const aux = (auxRank !== 0 && auxRank !== bombRank) ? auxRank : 0;
+      return this.moveIdFor(5, bombRank, aux);
+    }
+    if (hand[11] === 3) {                                     // ace bomb (rank 14)
+      const aux = (auxRank !== 0 && auxRank !== 14) ? auxRank : 0;
+      return this.moveIdFor(5, 14, aux);
+    }
+    for (let r = 0; r <= 10; ++r) if (hand[r] === 3) return this.moveIdFor(3, r + 3, 0);
+    for (let r = 0; r < 13; ++r) if (hand[r] === 2) return this.moveIdFor(2, r + 3, 0);
+    for (let r = 12; r >= 0; --r) if (hand[r] === 1) return this.moveIdFor(1, r + 3, 0);
+    return kPASS;
   }
 }
 
