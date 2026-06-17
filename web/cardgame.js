@@ -19,6 +19,11 @@ const state = {
   discard: new Array(13).fill(0),
   /** @type {{ who: 'player'|'cpu'|'system', text: string }[]} */
   history: [],
+  /** Public move-id sequence this hand (both players, incl. passes) — the
+   *  history-transformer's input. Resets each new hand. */
+  moveHistory: [],
+  /** Move id of the current trick's last play (kPASS/0 = lead position). */
+  lastMoveId: 0,
 };
 
 // ─── Engine rank mapping ────────────────────────────────────────────────────
@@ -231,6 +236,7 @@ function playType(lst) {
 // Returns true if the play described by `type` is legal given the current trick.
 function validPlay(type) {
   if (type[0] === -1) return false;
+  if (type[0] === 0) return false;   // empty selection is not a play (use Pass)
   const ct = state.currType;
   if (ct[0] === 0) return true;                                                        // fresh trick
   if (ct[0] === type[0] && ct[1] === type[1] && trumps(type[2], ct[2])) return true;  // same type+len, higher rank
@@ -349,6 +355,11 @@ function playCurrent(isPlayer) {
   state.current  = played;
   state.currType = playType(played);
 
+  // Track the move-id sequence for the NN (this play becomes the new trick).
+  const moveId = Big2.moveIdForCards(countsFromCards(played));
+  state.moveHistory.push(moveId);
+  state.lastMoveId = moveId;
+
   const label = isPlayer ? 'You' : 'CPU';
   pushHistory(isPlayer ? 'player' : 'cpu',
     `${label} played ${typeName(state.currType)} — ${cardsShortString(played)}`);
@@ -383,21 +394,21 @@ function selectCpuCards(cards) {
   return ok;
 }
 
-// Asks the WASM engine for the CPU's move and applies it (play or pass).
-function cpuChoose() {
-  const hand    = countsFromCards(state.cpu);
-  const discard = state.discard.slice();
-  const oppCount = state.player.length;
-  const fresh   = state.currType[0] === 0;
-  const trick   = fresh ? new Array(13).fill(0) : countsFromCards(state.current);
+// Asks the AZ worker (ONNX + MCTS) for the CPU's move and applies it.
+async function cpuChoose() {
+  const moveId = await Big2.selectMove({
+    hand: countsFromCards(state.cpu),
+    discard: state.discard.slice(),
+    oppCount: state.player.length,
+    lastMove: state.lastMoveId,
+    history: state.moveHistory.slice(),
+  });
 
-  const { moveId, cards } = Big2.selectMove(hand, discard, oppCount, trick);
-  const total = cards.reduce((a, b) => a + b, 0);
-
-  if (moveId === 0 || total === 0 || !selectCpuCards(cards)) {
-    // Pass (only legal when responding to a trick; on a fresh trick the engine
-    // always returns a real move, so this branch means "pass").
+  if (moveId === Big2.kPASS || !selectCpuCards(Big2.cardsForMove(moveId))) {
+    // Pass: trick ends, the player (who led last) leads next.
     state.cpu.forEach(c => { c.selected = false; });
+    state.moveHistory.push(Big2.kPASS);
+    state.lastMoveId = Big2.kPASS;
     pushHistory('cpu', 'CPU passed');
     state.current  = [];
     state.currType = [0, 0, 0];
@@ -494,7 +505,7 @@ function renderBoard() {
   let mustPass = false;
   if (yourTurn && state.currType[0] !== 0 && Big2.isReady()) {
     mustPass = Big2.legalMoveCount(countsFromCards(state.player),
-                                   countsFromCards(state.current)) === 0;
+                                   state.lastMoveId) === 0;
   }
 
   // Turn indicator
@@ -752,6 +763,8 @@ function startGame() {
   state.showRules   = false;
   state.invalidMove = false;
   state.history     = [];
+  state.moveHistory = [];
+  state.lastMoveId  = 0;
   pushHistory('system', state.turn ? 'New hand — your lead.' : 'New hand — CPU leads.');
   renderAll();
   if (!state.turn) {
@@ -770,10 +783,10 @@ function newSeries() {
   renderAll();
 }
 
-function runCpuTurn() {
+async function runCpuTurn() {
   // Guard: only run when it's actually the CPU's turn during active play
   if (state.gamePhase !== 'play' || state.turn) return;
-  cpuChoose();
+  await cpuChoose();
   renderAll();
 }
 
@@ -801,6 +814,8 @@ document.getElementById('play-btn').addEventListener('click', () => {
 
 document.getElementById('pass-btn').addEventListener('click', () => {
   if (!state.turn || state.currType[0] === 0 || state.gamePhase !== 'play') return;
+  state.moveHistory.push(Big2.kPASS);
+  state.lastMoveId = Big2.kPASS;
   pushHistory('player', 'You passed');
   state.current  = [];
   state.currType = [0, 0, 0];
