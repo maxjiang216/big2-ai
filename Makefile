@@ -29,7 +29,7 @@ TEST_CPP    := $(wildcard test/*.cpp)
 RESEARCH_BIN_NAMES := best_hand multi_comb play_probs count_turn_states
 RESEARCH_BINS      := $(addprefix $(BUILD_DIR)/research/,$(RESEARCH_BIN_NAMES))
 
-.PHONY: all clean dirs test_core coordinator generate_data generate_nn_data eval_match eval_nn_match eval_nn_vs_classic play_games pass_greedy_datagen move_agreement benchmark tablebase_opp1_gen move_audit az_compose_gen az_vs_teacher_agree az_nn_check az_search_smoke az_play_check az_selfplay eval_az_match research help
+.PHONY: all clean dirs test_core coordinator generate_data generate_nn_data eval_match eval_nn_match eval_nn_vs_classic play_games pass_greedy_datagen move_agreement benchmark tablebase_opp1_gen move_audit az_compose_gen az_moves_gen az_vs_teacher_agree az_nn_check az_search_smoke az_play_check az_selfplay eval_az_match az_pi_selfplay eval_az_pi_match research help
 
 all: help
 
@@ -101,7 +101,7 @@ $(BUILD_DIR)/src/players/typed_search/%.o: src/players/typed_search/%.cpp | dirs
 # here (before TEST_OBJS) because TEST_OBJS expands AZ_SEARCH_CORE_OBJS immediately.
 # Torch-dependent az_search sources (LibTorch / NN). Everything else under
 # az_search/ is the torch-free core that links into test_core.
-AZ_SEARCH_NN_CPP    := src/players/az_search/nn_eval.cpp src/players/az_search/az_search_player.cpp
+AZ_SEARCH_NN_CPP    := src/players/az_search/nn_eval.cpp src/players/az_search/legacy_nn_eval.cpp src/players/az_search/az_search_player.cpp
 AZ_SEARCH_CORE_CPP  := $(filter-out $(AZ_SEARCH_NN_CPP),$(wildcard src/players/az_search/*.cpp))
 AZ_SEARCH_CORE_OBJS := $(patsubst src/players/az_search/%.cpp,$(BUILD_DIR)/src/players/az_search/%.o,$(AZ_SEARCH_CORE_CPP))
 AZ_SEARCH_NN_OBJS   := $(patsubst src/players/az_search/%.cpp,$(BUILD_DIR)/src/players/az_search/%.o,$(AZ_SEARCH_NN_CPP))
@@ -112,10 +112,40 @@ $(BUILD_DIR)/src/players/az_search/%.o: src/players/az_search/%.cpp | dirs
 	@mkdir -p $(BUILD_DIR)/src/players/az_search
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
+# az_pi module: perfect-information AlphaZero. Same torch-free-core / torch-NN
+# split as az_search. pi_nn_eval.cpp is the only torch-dependent source.
+AZ_PI_NN_CPP    := src/players/az_pi/pi_nn_eval.cpp
+AZ_PI_CORE_CPP  := $(filter-out $(AZ_PI_NN_CPP),$(wildcard src/players/az_pi/*.cpp))
+AZ_PI_CORE_OBJS := $(patsubst src/players/az_pi/%.cpp,$(BUILD_DIR)/src/players/az_pi/%.o,$(AZ_PI_CORE_CPP))
+AZ_PI_NN_OBJS   := $(patsubst src/players/az_pi/%.cpp,$(BUILD_DIR)/src/players/az_pi/%.o,$(AZ_PI_NN_CPP))
+AZ_PI_OBJS      := $(AZ_PI_CORE_OBJS) $(AZ_PI_NN_OBJS)
+
+$(BUILD_DIR)/src/players/az_pi/%.o: src/players/az_pi/%.cpp | dirs
+	@mkdir -p $(BUILD_DIR)/src/players/az_pi
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+$(AZ_PI_NN_OBJS): $(BUILD_DIR)/src/players/az_pi/%.o: src/players/az_pi/%.cpp | dirs
+	@mkdir -p $(BUILD_DIR)/src/players/az_pi
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
+
 # Static pattern rule (overrides the pattern above for the listed targets):
 # torch-dependent az_search objects get TORCH_INCLUDES + -DBIG2_WITH_TORCH.
 $(AZ_SEARCH_NN_OBJS): $(BUILD_DIR)/src/players/az_search/%.o: src/players/az_search/%.cpp | dirs
 	@mkdir -p $(BUILD_DIR)/src/players/az_search
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
+
+# az_ii module: imperfect-info distillation player (torch-dependent only; the
+# registry references AzIiPlayerFactory in every torch binary that includes it).
+AZ_II_OBJS := $(BUILD_DIR)/src/players/az_ii/az_ii_player.o
+$(BUILD_DIR)/src/players/az_ii/%.o: src/players/az_ii/%.cpp | dirs
+	@mkdir -p $(BUILD_DIR)/src/players/az_ii
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
+
+# az_pimc module: determinization probe (AR belief sampler + PI-champion value).
+# Torch-dependent; the factory pulls in PiNNEvaluator (link with AZ_PI_OBJS).
+AZ_PIMC_OBJS := $(BUILD_DIR)/src/players/az_pimc/pimc_player.o
+$(BUILD_DIR)/src/players/az_pimc/%.o: src/players/az_pimc/%.cpp | dirs
+	@mkdir -p $(BUILD_DIR)/src/players/az_pimc
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
 
 $(BUILD_DIR)/test/%.o: test/%.cpp | dirs
@@ -135,6 +165,7 @@ TEST_OBJS := $(CORE_OBJS) \
              $(BUILD_DIR)/src/simulation/game_simulator.o \
              $(TYPED_SEARCH_OBJS) \
              $(AZ_SEARCH_CORE_OBJS) \
+             $(AZ_PI_CORE_OBJS) \
              $(patsubst test/%.cpp,$(BUILD_DIR)/test/%.o,$(TEST_CPP))
 
 # ============================================================================
@@ -406,6 +437,7 @@ AZ_SELFPLAY_OBJS := $(CORE_OBJS) \
                     $(BUILD_DIR)/src/simulation/game_simulator.o \
                     $(TYPED_SEARCH_OBJS) \
                     $(AZ_SEARCH_OBJS) \
+                    $(AZ_II_OBJS) \
                     $(BUILD_DIR)/src/datagen/az_selfplay.o
 
 $(BIN_DIR)/az_selfplay: $(AZ_SELFPLAY_OBJS)
@@ -425,6 +457,9 @@ EVAL_AZ_MATCH_OBJS := $(CORE_OBJS) \
                       $(BUILD_DIR)/src/simulation/game_simulator.o \
                       $(TYPED_SEARCH_OBJS) \
                       $(AZ_SEARCH_OBJS) \
+                      $(AZ_II_OBJS) \
+                      $(AZ_PIMC_OBJS) \
+                      $(AZ_PI_OBJS) \
                       $(BUILD_DIR)/src/datagen/eval_az_match.o
 
 $(BIN_DIR)/eval_az_match: $(EVAL_AZ_MATCH_OBJS)
@@ -432,6 +467,86 @@ $(BIN_DIR)/eval_az_match: $(EVAL_AZ_MATCH_OBJS)
 	@echo "✓ $(BIN_DIR)/eval_az_match"
 
 eval_az_match: dirs $(BIN_DIR)/eval_az_match
+
+# ============================================================================
+# bin/az_pi_selfplay — perfect-information AZ self-play (needs LibTorch+Arrow)
+# ============================================================================
+
+$(BUILD_DIR)/src/datagen/az_pi_selfplay.o: src/datagen/az_pi_selfplay.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
+
+AZ_PI_SELFPLAY_OBJS := $(CORE_OBJS) \
+                       $(AZ_PI_OBJS) \
+                       $(TYPED_SEARCH_OBJS) \
+                       $(AZ_SEARCH_CORE_OBJS) \
+                       $(BUILD_DIR)/src/datagen/az_pi_selfplay.o
+
+$(BIN_DIR)/az_pi_selfplay: $(AZ_PI_SELFPLAY_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS_TORCH)
+	@echo "✓ $(BIN_DIR)/az_pi_selfplay"
+
+az_pi_selfplay: dirs $(BIN_DIR)/az_pi_selfplay
+
+# ============================================================================
+# bin/eval_az_pi_match — paired-deal perfect-info AZ eval (needs LibTorch+Arrow)
+# ============================================================================
+
+$(BUILD_DIR)/src/datagen/eval_az_pi_match.o: src/datagen/eval_az_pi_match.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
+
+EVAL_AZ_PI_MATCH_OBJS := $(CORE_OBJS) \
+                         $(BUILD_DIR)/src/simulation/game_simulator.o \
+                         $(TYPED_SEARCH_OBJS) \
+                         $(AZ_SEARCH_OBJS) \
+                         $(AZ_PI_OBJS) \
+                         $(BUILD_DIR)/src/datagen/eval_az_pi_match.o
+
+$(BIN_DIR)/eval_az_pi_match: $(EVAL_AZ_PI_MATCH_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS_TORCH)
+	@echo "✓ $(BIN_DIR)/eval_az_pi_match"
+
+eval_az_pi_match: dirs $(BIN_DIR)/eval_az_pi_match
+
+# ============================================================================
+# bin/eval_az_series — full-series az_search evaluation (needs LibTorch+Arrow)
+# ============================================================================
+
+$(BUILD_DIR)/src/datagen/eval_az_series.o: src/datagen/eval_az_series.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
+
+EVAL_AZ_SERIES_OBJS := $(CORE_OBJS) \
+                       $(BUILD_DIR)/src/simulation/game_simulator.o \
+                       $(TYPED_SEARCH_OBJS) \
+                       $(AZ_SEARCH_OBJS) \
+                       $(AZ_II_OBJS) \
+                       $(AZ_PIMC_OBJS) \
+                       $(AZ_PI_OBJS) \
+                       $(BUILD_DIR)/src/datagen/eval_az_series.o
+
+$(BIN_DIR)/eval_az_series: $(EVAL_AZ_SERIES_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS_TORCH)
+	@echo "✓ $(BIN_DIR)/eval_az_series"
+
+eval_az_series: dirs $(BIN_DIR)/eval_az_series
+
+# ============================================================================
+# bin/az_regret — policy-improvement regret probe (needs LibTorch+Arrow)
+# ============================================================================
+
+$(BUILD_DIR)/src/datagen/az_regret.o: src/datagen/az_regret.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) $(TORCH_INCLUDES) -DBIG2_WITH_TORCH -c $< -o $@
+
+AZ_REGRET_OBJS := $(CORE_OBJS) \
+                  $(BUILD_DIR)/src/simulation/game_simulator.o \
+                  $(TYPED_SEARCH_OBJS) \
+                  $(AZ_SEARCH_OBJS) \
+                  $(BUILD_DIR)/src/datagen/az_regret.o
+
+$(BIN_DIR)/az_regret: $(AZ_REGRET_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS_TORCH)
+	@echo "✓ $(BIN_DIR)/az_regret"
+
+az_regret: dirs $(BIN_DIR)/az_regret
 
 # ============================================================================
 # bin/az_nn_check — cross-check C++ NN inference vs Python (needs LibTorch)
@@ -519,6 +634,38 @@ $(BIN_DIR)/az_compose_gen: $(AZ_COMPOSE_GEN_OBJS)
 	@echo "✓ $(BIN_DIR)/az_compose_gen"
 
 az_compose_gen: dirs $(BIN_DIR)/az_compose_gen
+
+# ============================================================================
+# bin/az_moves_gen — dump the full per-move static table (web/az_moves.json)
+# ============================================================================
+
+$(BUILD_DIR)/research/az_moves_gen.o: research/az_moves_gen.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+AZ_MOVES_GEN_OBJS := $(CORE_OBJS) \
+                     $(BUILD_DIR)/research/az_moves_gen.o
+
+$(BIN_DIR)/az_moves_gen: $(AZ_MOVES_GEN_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ $(BIN_DIR)/az_moves_gen"
+
+az_moves_gen: dirs $(BIN_DIR)/az_moves_gen
+
+# ============================================================================
+# bin/az_tokens_gen — dump per-move card counts (nn/az_token_cards.json)
+# ============================================================================
+
+$(BUILD_DIR)/research/az_tokens_gen.o: research/az_tokens_gen.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+AZ_TOKENS_GEN_OBJS := $(CORE_OBJS) \
+                      $(BUILD_DIR)/research/az_tokens_gen.o
+
+$(BIN_DIR)/az_tokens_gen: $(AZ_TOKENS_GEN_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ $(BIN_DIR)/az_tokens_gen"
+
+az_tokens_gen: dirs $(BIN_DIR)/az_tokens_gen
 
 # ============================================================================
 # bin/az_vs_teacher_agree — az(net+search) vs typed_search move-disagreement dump

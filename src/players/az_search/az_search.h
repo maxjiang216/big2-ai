@@ -1,9 +1,16 @@
 #ifndef AZ_SEARCH_AZ_SEARCH_H
 #define AZ_SEARCH_AZ_SEARCH_H
 
-// AlphaZero-style expectimax search over a transposition DAG, from the root
-// player's imperfect-information point of view. Torch-free: leaf evaluation is
-// delegated to an abstract Evaluator (NN-backed in production, a stub in tests).
+// AlphaZero-style expectimax search over a PLAIN TREE, from the root player's
+// imperfect-information point of view. Torch-free: leaf evaluation is delegated
+// to an abstract Evaluator (NN-backed in production, a stub in tests).
+//
+// HISTORY-AWARE: the net conditions on the full move history, so each leaf
+// request carries the move-id path from the search root to the leaf (the
+// evaluator owns the game-history prefix + KV cache). Because evals depend on
+// the history, transposition sharing is INCORRECT here — the former memo DAG
+// is gone; edges own their children and re-rooting frees everything outside
+// the kept subtree.
 //
 // Value convention: every node value is P(the ROOT player / searcher wins).
 // Player (our-turn) nodes back up the MAX over expanded children; opponent-turn
@@ -11,14 +18,16 @@
 // at trick boundaries — crossing a pass just flips the side to move.
 //
 // Driver split (supports both single-game and batched self-play):
-//   select_leaf()  descends root->leaf, auto-handling terminals/transpositions;
-//                  returns a LeafRequest (needs_eval + features) for a brand-new
-//                  node, else needs_eval=false (already backed up).
-//   apply_eval()   expands the pending leaf with an NN result and backs it up.
+//   select_leaf()  descends root->leaf, auto-handling terminals;
+//                  returns a LeafRequest (needs_eval + features incl. path
+//                  tokens) for a brand-new node, else needs_eval=false.
+//   apply_eval()   expands the pending leaf with the unified NN result
+//                  (player or opp heads chosen by the leaf's side) + backs up.
 //   run()          synchronous convenience loop over a supplied Evaluator.
 
 #include "evaluator.h"
 #include "move.h"
+#include "series.h"
 #include "util.h"
 
 #include <array>
@@ -26,7 +35,6 @@
 #include <deque>
 #include <optional>
 #include <random>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -41,6 +49,8 @@ struct SearchState {
   std::array<int, 13> discard;   // cards played so far (fixed on first visit)
   int last_move;                 // trick to beat; kPASS == lead position
   int side;                      // who moves at this node
+  int my_pts = 0;                // root player's series points (constant/game)
+  int opp_pts = 0;               // opponent's series points
 };
 
 struct SearchConfig {
@@ -51,6 +61,9 @@ struct SearchConfig {
   // it weighted-random (exploration); evaluation/play takes the max-probability
   // member (deterministic, strongest line).
   bool training = true;
+  // Series win-probability table. When set, terminal / forced-win / insta-win
+  // values become V(resulting series state) instead of 1/0. Null => legacy 1/0.
+  const SeriesTable *series = nullptr;
 };
 
 struct Node;
@@ -58,7 +71,11 @@ struct Node;
 struct Edge {
   int move_id;
   float prior;
-  Node *child = nullptr;   // resolved lazily (transposition-aware)
+  Node *child = nullptr;    // owned by this edge (plain tree)
+  bool fused_pass = false;  // transition fused a forced kPASS: the edge's token
+                            // suffix is {move_id, kPASS} (at most one fuse —
+                            // after a fused pass the side to move holds the
+                            // lead, where passing is never forced)
   float move_value = 0.5f;  // opp-parent edges: NN per-move value q_a baseline
 };
 
@@ -81,25 +98,24 @@ struct Node {
   float nn_value = 0.5f;     // leaf estimate, P(root wins)
   float value = 0.5f;        // backed-up expectimax value
   long N = 0;                // visit count
-  int in_edges = 0;          // reference count for GC (resolved in-edges + root)
   std::vector<Edge> edges;
   std::vector<EdgeGroup> groups;  // hierarchical selection over `edges`
 };
 
 struct LeafRequest {
   bool needs_eval = false;
-  bool is_player = false;
-  PlayerFeatures pfeat{};
-  OppFeatures ofeat{};
+  EvalFeatures feat{};  // owner_to_move says which heads the search will read
 };
 
 class Search {
 public:
-  Search(const SearchState &root_state, const SearchConfig &cfg);
+  // `history` = move ids from the GAME START to (and excluding) the root
+  // position — the evaluator's prefix. The search only ever appends to it.
+  Search(const SearchState &root_state, std::vector<int> history,
+         const SearchConfig &cfg);
 
   LeafRequest select_leaf();
-  void apply_eval(const PlayerEval &e);  // expands a player leaf + backs up
-  void apply_eval(const OppEval &e);     // expands an opp leaf + backs up
+  void apply_eval(const NetEval &e);  // expands the pending leaf + backs up
   void run(Evaluator &ev);
   // Post-search forced extensions. Always runs the (eval-free) forced-WIN proof.
   // When an evaluator is supplied (play/eval path), also runs the NN-valued
@@ -109,9 +125,13 @@ public:
   // play passes none (win proof only), keeping its visit-based policy targets.
   void finalize(Evaluator *ev = nullptr);
 
-  // Subtree reuse: re-root onto the node for `true_next` (rebuilt from the real
-  // game state, not the compressed key), reusing any prior search via the memo.
-  void advance_root(const SearchState &true_next);
+  // Subtree reuse: walk the real-game move suffix (new_history minus our
+  // recorded prefix) down the tree; on a full match the played-out child
+  // becomes the root (its subtree + visits survive) and everything else is
+  // freed. Any divergence (unresolved edge, opponent representative mismatch)
+  // discards the whole tree and starts fresh at `true_next`.
+  void advance_root(const SearchState &true_next,
+                    const std::vector<int> &new_history);
 
   // Results.
   int best_move() const;                                 // max-visit (or forced win)
@@ -125,13 +145,21 @@ public:
   bool root_terminal() const { return root_->terminal; }
 
   // Introspection (tests).
-  std::size_t num_nodes() const { return memo_.size(); }
+  std::size_t num_nodes() const { return live_nodes_; }
   std::size_t free_count() const { return free_list_.size(); }
   long root_n() const { return root_->N; }
   const Node *root_node() const { return root_; }
+  const std::vector<int> &history() const { return history_; }
 
 private:
   Node *alloc_node(const SearchState &s);
+  // Value (P root wins) of a state in which the root player has just won the
+  // game (opponent is the loser holding st.opp_size cards). Series-aware when
+  // cfg_.series is set; else 1.0 (legacy single-game objective).
+  float win_value(const SearchState &s) const;
+  // Value (P root wins) when the opponent has just won (root player is the
+  // loser holding hand_size(s.our_hand) cards). 0.0 in the legacy objective.
+  float loss_value(const SearchState &s) const;
   void finalize_terminal(Node *n);
   void expand_player(Node *n, const float *logits);
   void expand_opp(Node *n, const float *move_value, const float *logits);
@@ -142,22 +170,23 @@ private:
   Node *resolve_child(Node *parent, Edge &e);
   void recompute_value(Node *n);
   void backup();
-  void release(Node *n);  // eager-cascade free of an unreachable subtree (GC)
+  void release(Node *n);  // frees n and its whole (detached) subtree
 
   SearchConfig cfg_;
   std::mt19937 rng_;                             // opponent representative sampling
   std::deque<Node> arena_;                       // stable-address node pool
   std::vector<Node *> free_list_;                // freed slots, reused by alloc_node
-  std::unordered_map<uint64_t, Node *> memo_;    // transposition table
+  std::size_t live_nodes_ = 0;
   Node *root_ = nullptr;
   Node *pending_ = nullptr;                      // leaf awaiting apply_eval
   std::vector<Node *> path_;                     // root..leaf for current sim
+  std::vector<int> history_;                     // game start -> root (prefix)
+  std::vector<int> path_tokens_;                 // root -> current leaf tokens
 };
 
-// State transition + key (exposed for unit tests).
+// State transition + forced-pass fusion (exposed for unit tests).
 SearchState az_transition(const SearchState &s, int move_id);
 void normalize_forced_pass(SearchState &s);
-uint64_t state_key(const SearchState &s);
 int hand_size(const std::array<int, 13> &h);
 
 // Tablebase / forced-win oracle from the root player's POV. Returns a move when

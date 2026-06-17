@@ -4,7 +4,7 @@
 // persistent per-turn tree, and that games complete with a winner.
 //
 //   make az_play_check
-//   ./bin/az_play_check models/az_player.pt models/az_opp.pt [games] [sims]
+//   ./bin/az_play_check models/az_seq.pt [games] [sims]
 
 #include "az_search/az_search_player_factory.h"
 #include "game_record.h"
@@ -17,14 +17,14 @@
 #include <random>
 
 int main(int argc, char **argv) {
-  if (argc < 3) {
-    std::fprintf(stderr, "usage: %s player.pt opp.pt [games] [sims]\n", argv[0]);
+  if (argc < 2) {
+    std::fprintf(stderr, "usage: %s az_seq.pt [games] [sims]\n", argv[0]);
     return 2;
   }
-  const int games = (argc > 3) ? std::atoi(argv[3]) : 20;
-  const int sims = (argc > 4) ? std::atoi(argv[4]) : 100;
+  const int games = (argc > 2) ? std::atoi(argv[2]) : 20;
+  const int sims = (argc > 3) ? std::atoi(argv[3]) : 100;
 
-  az_search::AzSearchPlayerFactory az(sims, /*seed=*/123, argv[1], argv[2],
+  az_search::AzSearchPlayerFactory az(sims, /*seed=*/123, argv[1],
                                       /*training=*/false);
   auto greedy = make_player_factory("greedy", 0.0, 7);
 

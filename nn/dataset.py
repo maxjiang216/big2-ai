@@ -475,6 +475,25 @@ class _AZDataset(Dataset):
             t.column("value").chunk(0).to_numpy().astype(np.float32)[keep]
         )
 
+        # Series-aware PI files carry per-row series scores. When present they
+        # REPLACE the size scalars in tuple slots 3/4 (my_pts/50, opp_pts/50 —
+        # the net's score-conditioning inputs), so every downstream loader and
+        # collate stays unchanged. Raw ints + loser_cards are kept for the
+        # load-time series relabeling of `value` (see nn/train_az_pi.py).
+        self.series = "my_pts" in set(t.schema.names)
+        if self.series:
+            self.my_pts_raw = torch.from_numpy(
+                t.column("my_pts").chunk(0).to_numpy().astype(np.int64)[keep]
+            )
+            self.opp_pts_raw = torch.from_numpy(
+                t.column("opp_pts").chunk(0).to_numpy().astype(np.int64)[keep]
+            )
+            self.loser_cards = torch.from_numpy(
+                t.column("loser_cards").chunk(0).to_numpy().astype(np.int64)[keep]
+            )
+            self.opp_size = self.my_pts_raw.float() / 50.0
+            self.our_size = self.opp_pts_raw.float() / 50.0
+
         lflat, loff = _ragged(t.column("legal").chunk(0))
         lflat, loff = _subselect_ragged(lflat.numpy(), loff.numpy(), keep)
         self.legal_flat = torch.from_numpy(lflat)

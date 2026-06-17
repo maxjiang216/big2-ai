@@ -1,0 +1,73 @@
+digraph Big2NetSeqAZ {
+  rankdir=TB;
+  graph [fontname="Helvetica", fontsize=11, splines=true, nodesep=0.35, ranksep=0.5, bgcolor=white];
+  node  [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", color="#444444"];
+  edge  [fontname="Helvetica", fontsize=9, color="#666666", arrowsize=0.7];
+
+  // ---------------- inputs ----------------
+  subgraph cluster_in {
+    label="inputs (C++ sends int move-ids only)";
+    style="rounded,dashed"; color="#999999"; fontsize=10;
+    tokens [label="history move-ids\n[B,T] int64\n(BOS prepended)", fillcolor="#dbe9ff"];
+    hand   [label="hand\n[B,48] exact", fillcolor="#dbe9ff"];
+    oppmax [label="opp_max\n[B,48] thermo", fillcolor="#dbe9ff"];
+    sizes  [label="osz, usz, otm\n[B,3]", fillcolor="#dbe9ff"];
+  }
+
+  // ---------------- transformer trunk ----------------
+  subgraph cluster_tf {
+    label="causal transformer trunk  (d_model=128, 3 layers, 4 heads, FFN 256, GELU, pre-LN)";
+    style="rounded,filled"; color="#cfe8cf"; fillcolor="#f1faf1"; fontsize=10;
+    tokfeat [label="token_feats lookup\n[468,48] (from C++ dump)\npass = zeros", fillcolor="#e7f6e7"];
+    tokproj [label="tok_proj 48->128\n+ learned pos_emb\n+ learned BOS", fillcolor="#e7f6e7"];
+    blocks  [label="3x _SeqBlock\nLN-> qkv -> SDPA(causal)\n-> attn_out  +  LN-> FFN", fillcolor="#cfe8cf"];
+    lnf     [label="ln_f", fillcolor="#e7f6e7"];
+    hpick   [label="gather hidden @ hist_idx\nh  [B,128]", fillcolor="#bcdcbc", style="rounded,filled,bold"];
+  }
+
+  // ---------------- side-input readout (old-net pathway) ----------------
+  subgraph cluster_lit {
+    label="card-literacy stack (preserved from old Big2Net)";
+    style="rounded,filled"; color="#f0d9b5"; fillcolor="#fdf6ec"; fontsize=10;
+    la  [label="layer_a 48->64  (SHARED)", fillcolor="#f7e4c4"];
+    lbh [label="layer_b_hands 64->64 (SHARED)", fillcolor="#f7e4c4"];
+    lcp [label="layer_c_player 64->128", fillcolor="#f7e4c4"];
+    lco [label="layer_c_opp 64->96", fillcolor="#f7e4c4"];
+    sz  [label="size_embed 3->16", fillcolor="#f7e4c4"];
+  }
+
+  // ---------------- junction + heads ----------------
+  subgraph cluster_out {
+    label="junction + heads";
+    style="rounded,filled"; color="#d9c3e8"; fillcolor="#f7f1fb"; fontsize=10;
+    junc  [label="concat [128 + 128 + 96 + 16] = 368\n-> junction 256 (SELU+LN)\n-> 2x ResBlock(256)", fillcolor="#e6d6f2"];
+    vh    [label="value\n[B] sigmoid\n(owner rows)", fillcolor="#ffd9d9"];
+    ph    [label="policy\n[B,138] factored\n(owner rows)", fillcolor="#ffd9d9"];
+    bh    [label="behavior\n[B,458] logits\n(opp rows) <- main win", fillcolor="#ffe0b3", style="rounded,filled,bold"];
+    qh    [label="qa\n[B,458] sigmoid\n(opp rows)", fillcolor="#ffd9d9"];
+  }
+
+  // edges
+  tokens -> tokfeat -> tokproj -> blocks -> lnf -> hpick;
+  hand   -> la;
+  oppmax -> la;
+  la -> lbh;
+  lbh -> lcp;
+  lbh -> lco;
+  sizes -> sz;
+
+  hpick -> junc;
+  lcp   -> junc;
+  lco   -> junc;
+  sz    -> junc;
+
+  junc -> vh;
+  junc -> ph;
+  junc -> bh;
+  junc -> qh;
+
+  // note on head selection
+  note [shape=note, fillcolor="#fffbcc", color="#bbaa55",
+        label="search reads:\n owner_to_move=1 -> (policy, value)\n owner_to_move=0 -> (behavior, qa)\nall heads share trunk; otm also fed into size_embed"];
+  junc -> note [style=invis];
+}
