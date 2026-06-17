@@ -1,90 +1,82 @@
 'use strict';
-
-// Loads the typed-search WASM engine and the strongest (v5) table set, then
-// exposes a small synchronous move-selection API to the game UI.
+// AZ neural-net CPU brain for the web game. Replaces the old typed_search WASM
+// path: spawns worker.js (ONNX Runtime Web + plain-tree MCTS) and exposes a
+// small async move API to cardgame.js via window.Big2.
 //
-// Rank indexing matches the C++ engine: index 0='3' … 10='K', 11='A', 12='2'.
+// Rank index convention (matches the engine): 0='3' … 10='K', 11='A', 12='2'.
+import { MoveTable, kPASS } from './engine.js';
+
 const Big2 = (() => {
-  const FILES = ['eval_extended', 'eval_main', 'eval_fallback',
-                 'mp_disc', 'mp_main', 'mp_fallback'];
-  // Sum of the v5 table file sizes (bytes) — used for the load progress bar.
-  const TOTAL_BYTES = 2734676 + 919580 + 55520 + 43215020 + 8656352 + 195772;
-
-  let Module = null;
+  let tbl = null;          // MoveTable (main-thread: legality + cards→id map)
+  let cardsToId = null;    // "c0,c1,…,c12" -> move id (unique for non-pass)
+  let worker = null;
   let ready = false;
+  let seq = 0;
+  const pending = new Map();  // request id -> {resolve, reject}
 
-  async function fetchToMemfs(url, baseLoaded, onProgress) {
-    const resp = await fetch(url);
-    if (!resp.ok) throw new Error('failed to fetch ' + url + ': ' + resp.status);
-    const reader = resp.body.getReader();
-    const chunks = [];
-    let received = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      received += value.length;
-      if (onProgress) onProgress(baseLoaded + received);
-    }
-    const buf = new Uint8Array(received);
-    let off = 0;
-    for (const c of chunks) { buf.set(c, off); off += c.length; }
-    return buf;
-  }
-
-  // onProgress(fraction in [0,1]); resolves to true on success.
   async function init(onProgress) {
-    Module = await Big2AI();
-    try { Module.FS.mkdir('/tables'); } catch (e) { /* exists */ }
+    if (onProgress) onProgress(0.1);
+    const moves = await (await fetch('./az_moves.json')).json();
+    tbl = new MoveTable(moves);
+    cardsToId = new Map();
+    for (const m of tbl.moves) if (m.id !== kPASS) cardsToId.set(m.cards.join(','), m.id);
+    if (onProgress) onProgress(0.4);
 
-    let loaded = 0;
-    for (const f of FILES) {
-      const buf = await fetchToMemfs('tables/' + f + '.bin', loaded,
-        (b) => onProgress && onProgress(Math.min(b / TOTAL_BYTES, 0.999)));
-      loaded += buf.length;
-      Module.FS.writeFile('/tables/' + f + '.bin', buf);
-    }
-
-    const n = Module.ccall('ts_load_tables', 'number', [], []);
-    // Reclaim the ~54MB of staged file bytes; tables now live in C++ maps.
-    for (const f of FILES) { try { Module.FS.unlink('/tables/' + f + '.bin'); } catch (e) {} }
-    ready = n > 0;
-    if (onProgress) onProgress(1);
-    return ready;
-  }
-
-  // hand, discard, trick: 13-element rank-count arrays. trick is the cards on
-  // the table to beat (all zeros = we lead). Returns { moveId, cards } where
-  // cards is the chosen move's 13-element rank-count vector (all zeros = pass).
-  function selectMove(hand, discard, oppCount, trick) {
-    const toHeap = (arr) => {
-      const p = Module._malloc(13 * 4);
-      Module.HEAP32.set(Int32Array.from(arr), p >> 2);
-      return p;
+    worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+    worker.onmessage = (ev) => {
+      const msg = ev.data;
+      if (msg.type === 'ready') { ready = true; if (onProgress) onProgress(1); return; }
+      if (msg.type === 'move' && msg.reqId != null) {
+        const p = pending.get(msg.reqId);
+        if (p) { pending.delete(msg.reqId); p.resolve(msg.moveId); }
+        return;
+      }
+      if (msg.type === 'error') {
+        console.error('worker error:', msg.error);
+        for (const [, p] of pending) p.reject(new Error(msg.error));
+        pending.clear();
+      }
     };
-    const hp = toHeap(hand), dp = toHeap(discard), tp = toHeap(trick);
-    const op = Module._malloc(13 * 4);
-    const moveId = Module.ccall('ts_select_move', 'number',
-      ['number', 'number', 'number', 'number', 'number'],
-      [hp, dp, oppCount, tp, op]);
-    const cards = Array.from(Module.HEAP32.subarray(op >> 2, (op >> 2) + 13));
-    [hp, dp, tp, op].forEach((p) => Module._free(p));
-    return { moveId, cards };
+    // Wait for the worker (model + tables loaded) to report ready.
+    await new Promise((res) => {
+      const t = setInterval(() => { if (ready) { clearInterval(t); res(); } }, 50);
+    });
+    return true;
   }
 
-  // Number of legal non-pass moves `hand` has against `trick`. 0 = must pass.
-  function legalMoveCount(hand, trick) {
-    const toHeap = (arr) => {
-      const p = Module._malloc(13 * 4);
-      Module.HEAP32.set(Int32Array.from(arr), p >> 2);
-      return p;
-    };
-    const hp = toHeap(hand), tp = toHeap(trick);
-    const n = Module.ccall('ts_legal_move_count', 'number',
-      ['number', 'number'], [hp, tp]);
-    [hp, tp].forEach((p) => Module._free(p));
-    return n;
+  // The move id for a 13-count vector of cards (0 / unknown => kPASS).
+  function moveIdForCards(counts) {
+    return cardsToId.get(counts.join(',')) ?? kPASS;
   }
 
-  return { init, selectMove, legalMoveCount, isReady: () => ready };
+  // The 13-count card vector a move id plays (all zeros for pass).
+  function cardsForMove(id) { return tbl.moves[id].cards; }
+
+  // Number of legal non-pass plays our hand has against lastMoveId.
+  function legalMoveCount(handCounts, lastMoveId) {
+    return tbl.computeLegalMoves(handCounts, lastMoveId).filter((m) => m !== kPASS).length;
+  }
+
+  // Ask the worker for the CPU's move. Resolves to a move id (kPASS => pass).
+  //   req = { hand:[13], discard:[13], oppCount, lastMove, history:[ids] }
+  function selectMove(req) {
+    const reqId = ++seq;
+    return new Promise((resolve, reject) => {
+      pending.set(reqId, { resolve, reject });
+      worker.postMessage({ type: 'move', reqId, ...req });
+    });
+  }
+
+  return {
+    init,
+    isReady: () => ready,
+    moveIdForCards,
+    cardsForMove,
+    legalMoveCount,
+    selectMove,
+    kPASS,
+  };
 })();
+
+window.Big2 = Big2;
+export default Big2;
