@@ -1,9 +1,12 @@
 # Big 2 — play the AI (web)
 
-A static browser game where you play a 50-point series of Big 2 against the
-**typed-search AI** (the v5 search + table player, ~60% vs PIMC-20). The C++
-engine is compiled to WebAssembly and runs entirely in the browser — no
-backend.
+A static browser game where you play Big 2 against the **AlphaZero neural-net
+player** (the `az_seq` history-transformer + MCTS). Inference runs entirely in
+your browser via **ONNX Runtime Web** inside a **Web Worker** — no backend.
+
+The net beats the previous web AI (`typed_search` v5 tables) ~57% head-to-head
+and the greedy baseline ~0.74 (paired), validated end-to-end in Node
+(`test_play.mjs`).
 
 ## Layout
 
@@ -11,23 +14,27 @@ backend.
 web/
   index.html        # markup + loading screen
   style.css
-  cardgame.js       # game UI / rules (pure JS); calls the WASM AI for CPU moves
-  ai.js             # loads the WASM module + tables, exposes Big2.selectMove()
-  wasm/big2ai.{js,wasm}   # compiled engine (built by scripts/build_wasm.sh)
-  tables/*.bin            # v5 trained tables (~54 MB, downloaded on first load)
+  cardgame.js       # game UI / rules (module); tracks the move-id history, calls the worker
+  ai.js             # module: spawns worker.js, exposes window.Big2 (async selectMove)
+  engine.js         # data-driven Big2 engine (legality, encoding, composition, grouping)
+  mcts.js           # plain-tree MCTS — port of src/players/az_search/az_search.cpp
+  worker.js         # Web Worker: ONNX Runtime Web (WASM) + MCTS, runs the net per leaf
+  model.onnx        # az_seq champion exported to ONNX (nn/export_az_seq_onnx.py)
+  az_moves.json     # per-move static table (bin/az_moves_gen) — C++ single source of truth
+  test_play.mjs     # Node strength harness (onnxruntime-node): MCTS vs greedy/random
 ```
 
-## Build the WASM AI
+`model.onnx`, `engine.js`, `mcts.js` and `az_moves.json` are all derived from
+the C++ engine, so the browser player cannot drift from `az_search`.
 
-From the repo root (requires Emscripten at `$EMSDK`, default `~/emsdk`):
+## Regenerating the model + tables
+
+From the repo root:
 
 ```bash
-scripts/build_wasm.sh                 # uses data/typed_search_v5 by default
-scripts/build_wasm.sh data/typed_search_v5
+uv run python -m nn.export_az_seq_onnx --model models/az_seq.pt --out web/model.onnx
+make az_moves_gen && ./bin/az_moves_gen > web/az_moves.json
 ```
-
-This regenerates `web/wasm/big2ai.{js,wasm}` and copies the table set into
-`web/tables/`. Commit the regenerated artifacts.
 
 ## Run locally
 
@@ -35,11 +42,23 @@ This regenerates `web/wasm/big2ai.{js,wasm}` and copies the table set into
 npx serve web        # or: python3 -m http.server -d web 8000
 ```
 
-Open the printed URL. (A static file server is required — `fetch()` of the
-`.wasm` and `.bin` files won't work from `file://`.)
+Open the printed URL. (A static file server is required — `fetch()` of
+`model.onnx` / `az_moves.json` and the worker module won't work from `file://`.)
+
+## Strength harness (Node)
+
+```bash
+cd web && npm install        # one-time: pulls onnxruntime-node (dev only)
+node test_play.mjs 40 100 greedy   # 40 paired games, 100 sims/move, vs greedy
+```
 
 ## Deploy on Vercel
 
-Import the GitHub repo, then set **Root Directory = `web`**, framework
-**Other**, no build command. `web/vercel.json` adds long-lived cache headers
-for the WASM and table files so repeat visits load instantly.
+Import the GitHub repo, set **Root Directory = `web`**, framework **Other**, no
+build command. `web/vercel.json` adds long-lived cache headers for the model +
+move table. ONNX Runtime Web's WASM binaries load from the jsDelivr CDN.
+
+## Obsolete
+
+The old `wasm/big2ai.{js,wasm}` + `tables/*.bin` (typed_search v5) are no longer
+used and can be deleted to slim the deploy.

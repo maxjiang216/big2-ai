@@ -1,0 +1,9 @@
+{
+  "name": "big2-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "onnxruntime-node": "^1.26.0"
+  }
+}
