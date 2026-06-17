@@ -21,6 +21,10 @@ public:
 
   int current_player() const;
 
+  // Override which seat leads (used to apply the series opening rule; default
+  // after shuffle_deal is seat 0).
+  void set_first_player(int player);
+
   bool is_over() const;
 
   void apply_move(const Move &move);

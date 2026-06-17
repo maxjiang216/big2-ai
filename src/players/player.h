@@ -42,10 +42,12 @@ public:
     auto tb = tablebase_move();
     if (tb) {
       game_.apply_move(*tb);
+      on_self_move(*tb);  // tablebase skips still enter the move history
       return *tb;
     }
     Move chosen = select_move_impl();
     game_.apply_move(chosen);
+    on_self_move(chosen);
     return chosen;
   }
 
@@ -67,6 +69,10 @@ protected:
 
   // Called after accept_opponent_move updates game_. Override if needed.
   virtual void on_opponent_move(const Move & /*move*/) {}
+
+  // Called after select_move applies OUR chosen move (search-selected OR
+  // tablebase root-skip), so history-tracking players see every applied move.
+  virtual void on_self_move(const Move & /*move*/) {}
 
   // Subclasses implement their move-selection logic here.
   // Must return a legal move. Must NOT call game_.apply_move() — the base does it.

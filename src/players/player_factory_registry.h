@@ -25,6 +25,8 @@
 // non-torch binaries (test_core, eval_match, ...) that include this header stay
 // torch-free.
 #ifdef BIG2_WITH_TORCH
+#include "az_ii/az_ii_player_factory.h"
+#include "az_pimc/pimc_player_factory.h"
 #include "az_search/az_search_player_factory.h"
 #endif
 
@@ -114,10 +116,22 @@ inline std::shared_ptr<PlayerFactory> make_player_factory(const std::string &nam
   }
 #ifdef BIG2_WITH_TORCH
   if (name == "az_search") {
-    // param = simulations per turn (default 200). Loads models/az_player.pt and
-    // models/az_opp.pt; play mode (deterministic opponent representative).
+    // param = simulations per turn (default 200). Loads models/az_seq.pt;
+    // play mode (deterministic opponent representative).
     int sims = (param <= 0.0) ? 200 : static_cast<int>(std::round(param));
     return std::make_shared<az_search::AzSearchPlayerFactory>(sims, seed);
+  }
+  if (name == "az_ii") {
+    // Policy-greedy imperfect-info distillation net. Loads models/az_ii.ts.pt
+    // (scripted Big2NetII) on CPU; no search yet.
+    return std::make_shared<az_ii::AzIiPlayerFactory>();
+  }
+  if (name == "az_pimc") {
+    // Determinization probe: AR-belief opp-hand sampling + PI-champion value,
+    // Max-of-Average over worlds, root-only (no tree). param = N samples
+    // (default 16). Loads models/az_ii_belief.ts.pt + models/az_pi_series.pt.
+    int n = (param <= 0.0) ? 16 : static_cast<int>(std::round(param));
+    return std::make_shared<az_pimc::AzPimcPlayerFactory>(n, /*gamma=*/0.1f, seed);
   }
 #endif
 
