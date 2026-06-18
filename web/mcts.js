@@ -21,6 +21,7 @@
 
 import {
   kUs, kPASS, handSize, azTransition, normalizeForcedPass, groupOppMoves,
+  seriesValueAfterWin,
 } from './engine.js';
 
 const COMBO_BOMB = 5, COMBO_FH = 4;
@@ -48,6 +49,10 @@ export class Search {
     this.cPuct = cfg.cPuct ?? 1.5;
     this.sims = cfg.sims ?? 100;
     this.training = cfg.training ?? false;
+    // Series win-prob table v[a][b] (50x50) or null. When set, terminal/forced
+    // values become V(resulting series state) instead of 1/0 (port of C++
+    // cfg_.series). Root player's points come from rootState.myPts/oppPts.
+    this.seriesTable = cfg.seriesTable ?? null;
     this.history = history.slice();   // game move ids up to (excl.) the root
     this.path = [];
     this.pathTokens = [];
@@ -56,13 +61,24 @@ export class Search {
     this.finalizeTerminal(this.root);
   }
 
-  // series=null => win=1, loss=0.
-  winValue() { return 1.0; }
-  lossValue() { return 0.0; }
+  // No series table => legacy single-game objective (win=1, loss=0).
+  // With a table, value = P(root player wins the series) after this game ends.
+  winValue(s) {
+    if (!this.seriesTable) return 1.0;
+    // Root player wins; opponent is the loser holding s.oppSize cards.
+    return seriesValueAfterWin(this.seriesTable, s.myPts, s.oppPts, s.oppSize);
+  }
+
+  lossValue(s) {
+    if (!this.seriesTable) return 0.0;
+    // Opponent wins; root player is the loser holding hand_size(ourHand) cards.
+    return 1.0 - seriesValueAfterWin(this.seriesTable, s.oppPts, s.myPts,
+                                     handSize(s.ourHand));
+  }
 
   finalizeTerminal(n) {
-    if (handSize(n.st.ourHand) === 0) { n.terminal = true; n.expanded = true; n.nnValue = n.value = this.winValue(); }
-    else if (n.st.oppSize === 0) { n.terminal = true; n.expanded = true; n.nnValue = n.value = this.lossValue(); }
+    if (handSize(n.st.ourHand) === 0) { n.terminal = true; n.expanded = true; n.nnValue = n.value = this.winValue(n.st); }
+    else if (n.st.oppSize === 0) { n.terminal = true; n.expanded = true; n.nnValue = n.value = this.lossValue(n.st); }
   }
 
   expandPlayer(n, policy138) {
@@ -79,7 +95,8 @@ export class Search {
     }
     if (win !== -1) {
       n.terminal = true; n.forcedWinMove = win;
-      n.nnValue = n.value = this.winValue();
+      // All hand-emptying moves leave opp at the same size => identical value.
+      n.nnValue = n.value = this.winValue(n.st);
       return;
     }
 
@@ -262,6 +279,8 @@ export class Search {
             oppSize: st.oppSize,
             ourSize: handSize(st.ourHand),
             ownerToMove: st.side === kUs,
+            myPts: st.myPts | 0,   // root player's series points (constant/game)
+            oppPts: st.oppPts | 0,
             tokens: this.history.concat(this.pathTokens), // full move-id sequence
           },
         };
@@ -345,7 +364,7 @@ export class Search {
     if (n.terminal) return;
     if (n.st.lastMove !== kPASS) return;        // need the initiative (lead)
     const seq = this.findForcedWin(n.st.ourHand, n.st.discard, n.st.oppSize);
-    if (seq) { n.forcedWinMove = seq[0]; n.value = this.winValue(); }
+    if (seq) { n.forcedWinMove = seq[0]; n.value = this.winValue(n.st); }
   }
 
   finalize() { this.applyRootForcedWin(); }
