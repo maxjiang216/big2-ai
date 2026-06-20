@@ -35,6 +35,8 @@ struct Stats {
     long long any1card = 0;   // a player reaches exactly 1 card at some point
     long long trigger = 0;    // (lead && opp-to-move has 1 card), either seat
     long long seat0 = 0;      // ... but only counting player 0 in that seat
+    long long trig_states = 0;            // count of trigger STATES (turn-level)
+    std::array<long long, 17> our_size{}; // our hand size at each trigger state
 
     void record_game(const GameRecord &rec) {
         ++games;
@@ -50,6 +52,9 @@ struct Stats {
             if (g.get_player_hand_size(opp) == 1) {
                 trig = true;
                 if (cur == 0) s0 = true;
+                ++trig_states;
+                int us = g.get_player_hand_size(cur);
+                if (us >= 0 && us <= 16) ++our_size[us];
             }
         }
         any1card += a1;
@@ -60,6 +65,8 @@ struct Stats {
     void merge(const Stats &o) {
         games += o.games; any1card += o.any1card;
         trigger += o.trigger; seat0 += o.seat0;
+        trig_states += o.trig_states;
+        for (int i = 0; i <= 16; ++i) our_size[i] += o.our_size[i];
     }
 };
 
@@ -129,5 +136,18 @@ int main(int argc, char **argv) {
     pct("player ever at exactly 1 card", global.any1card, global.games);
     pct("opp-1 strategy reachable (either seat)", global.trigger, global.games);
     pct("... for a fixed seat (per-player)", global.seat0, global.games);
+
+    std::cout << "\nOur hand size at trigger states (n=" << global.trig_states
+              << "):\n  size   states    rate    cumul\n";
+    long long cum = 0;
+    for (int s = 1; s <= 16; ++s) {
+        long long v = global.our_size[s];
+        if (v == 0) continue;
+        cum += v;
+        std::cout << std::setw(6) << s << std::setw(9) << v << "   "
+                  << std::fixed << std::setprecision(2) << std::setw(5)
+                  << 100.0 * v / global.trig_states << "%  " << std::setw(6)
+                  << 100.0 * cum / global.trig_states << "%\n";
+    }
     return 0;
 }
