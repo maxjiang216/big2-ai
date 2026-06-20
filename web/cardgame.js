@@ -402,6 +402,8 @@ async function cpuChoose() {
     oppCount: state.player.length,
     lastMove: state.lastMoveId,
     history: state.moveHistory.slice(),
+    myPts: state.cpuScore,      // series-aware net: CPU's own points
+    oppPts: state.playerScore,  // human opponent's points
   });
 
   if (moveId === Big2.kPASS || !selectCpuCards(Big2.cardsForMove(moveId))) {
