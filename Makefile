@@ -427,6 +427,21 @@ $(BIN_DIR)/opp1_study: $(OPP1_STUDY_OBJS)
 opp1_study: dirs $(BIN_DIR)/opp1_study
 
 # ============================================================================
+# bin/opp1_compare — proven-optimal solver vs straight-blind heuristic
+# ============================================================================
+
+$(BUILD_DIR)/research/opp1_compare.o: research/opp1_compare.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+OPP1_COMPARE_OBJS := $(CORE_OBJS) $(BUILD_DIR)/research/opp1_compare.o
+
+$(BIN_DIR)/opp1_compare: $(OPP1_COMPARE_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ $(BIN_DIR)/opp1_compare"
+
+opp1_compare: dirs $(BIN_DIR)/opp1_compare
+
+# ============================================================================
 # bin/legal_move_dist — empirical legal-move-count distribution (no Arrow)
 # ============================================================================
 
