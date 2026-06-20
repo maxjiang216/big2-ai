@@ -19,14 +19,21 @@ ort.env.wasm.numThreads = 1;
 
 const MODEL_URL = new URL('./model.onnx', import.meta.url).href;
 const MOVES_URL = new URL('./az_moves.json', import.meta.url).href;
+const SERIES_URL = new URL('./series_v_gen5.json', import.meta.url).href;
 const DEFAULT_SIMS = 100;
+const PTS_NORM = 50.0;   // kPtsNorm / kSeriesTarget (matches the training pipeline)
 
 let tbl = null;
 let session = null;
+let seriesTable = null;   // 50x50 win-prob v[a][b], leader-perspective
 
 async function init() {
-  const movesJson = await (await fetch(MOVES_URL)).json();
+  const [movesJson, seriesJson] = await Promise.all([
+    (await fetch(MOVES_URL)).json(),
+    (await fetch(SERIES_URL)).json(),
+  ]);
   tbl = new MoveTable(movesJson);
+  seriesTable = seriesJson;
   session = await ort.InferenceSession.create(MODEL_URL, { executionProviders: ['wasm'] });
 }
 const ready = init();
@@ -40,7 +47,8 @@ async function evalLeaf(feat) {
   tbl.encodeExact(feat.ourHand, hand, 0);
   tbl.encodeThermo(feat.oppMax, oppmax, 0);
   const sides = Float32Array.from([
-    feat.oppSize / 16, feat.ourSize / 16, feat.ownerToMove ? 1 : 0, 0, 0,
+    feat.oppSize / 16, feat.ourSize / 16, feat.ownerToMove ? 1 : 0,
+    (feat.myPts | 0) / PTS_NORM, (feat.oppPts | 0) / PTS_NORM,
   ]);
   const feeds = {
     tokens: new ort.Tensor('int64', tokens, [1, T]),
@@ -64,9 +72,11 @@ async function chooseMove(msg) {
     oppSize: msg.oppCount,
     lastMove: msg.lastMove,
     side: kUs,
+    myPts: msg.myPts | 0,    // CPU (root player) series points
+    oppPts: msg.oppPts | 0,  // human opponent series points
   };
   const search = new Search(tbl, root, msg.history || [], {
-    sims: msg.sims || DEFAULT_SIMS, training: false,
+    sims: msg.sims || DEFAULT_SIMS, training: false, seriesTable,
   });
   const sims = msg.sims || DEFAULT_SIMS;
   for (let i = 0; i < sims; ++i) {

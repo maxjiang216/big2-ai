@@ -18,11 +18,27 @@ web/
   ai.js             # module: spawns worker.js, exposes window.Big2 (async selectMove)
   engine.js         # data-driven Big2 engine (legality, encoding, composition, grouping)
   mcts.js           # plain-tree MCTS — port of src/players/az_search/az_search.cpp
+  opp1.js           # exact opp-1-card endgame solver — port of src/core/opp1_solver
   worker.js         # Web Worker: ONNX Runtime Web (WASM) + MCTS, runs the net per leaf
   model.onnx        # az_seq champion exported to ONNX (nn/export_az_seq_onnx.py)
   az_moves.json     # per-move static table (bin/az_moves_gen) — C++ single source of truth
+  series_v_gen5.json # 50x50 series win-prob table v[a][b] (from data/series_v_gen5.csv)
   test_play.mjs     # Node strength harness (onnxruntime-node): MCTS vs greedy/random
+  test_opp1.mjs     # Node test: opp1.js solver vs brute-force optimum (node web/test_opp1.mjs)
 ```
+
+When the opponent holds exactly 1 card, the MCTS pins an **exact** endgame line
+from `opp1.js` instead of searching: it brute-forces which single straights to
+play, buries low loose singles in bomb auxiliaries, and plays a k-dominating
+line wherever one exists (belief-free, optimal in every series state), falling
+back to max expected series value otherwise. Handles both leading and responding
+(when opp's last move just left them at 1 card). Validated against a brute-force
+game-tree optimum (`web/test_opp1.mjs`, `test/test_opp1_solver.cpp`).
+
+The web game is a series (first to 50 pts), so the net runs **series-aware**: the
+CPU's / human's running points feed the net's `sides[3]/[4]` (`mpts`/`opts`, ÷50)
+and the MCTS win/loss backup values become `series_value_after_win(...)` from
+`series_v_gen5.json` instead of a flat 1/0 (port of `az_search` `cfg_.series`).
 
 `model.onnx`, `engine.js`, `mcts.js` and `az_moves.json` are all derived from
 the C++ engine, so the browser player cannot drift from `az_search`.
@@ -34,6 +50,8 @@ From the repo root:
 ```bash
 uv run python -m nn.export_az_seq_onnx --model models/az_seq.pt --out web/model.onnx
 make az_moves_gen && ./bin/az_moves_gen > web/az_moves.json
+# series win-prob table (50x50 v[a][b]) -> compact JSON:
+python3 -c "import csv,json; v=[[0.0]*50 for _ in range(50)]; [v.__getitem__(int(r[0])).__setitem__(int(r[1]),round(float(r[2]),6)) for r in csv.reader(open('data/series_v_gen5.csv')) if r and r[0][:1].isdigit()]; json.dump(v,open('web/series_v_gen5.json','w'),separators=(',',':'))"
 ```
 
 ## Run locally

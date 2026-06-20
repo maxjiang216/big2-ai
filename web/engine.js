@@ -178,8 +178,29 @@ export function handSize(hand) {
   return s;
 }
 
-// SearchState: { ourHand:[13], discard:[13], oppSize:int, lastMove:int, side:0|1 }
-// (series points dropped — web play is single games: win_value=1, loss_value=0.)
+// SearchState: { ourHand:[13], discard:[13], oppSize:int, lastMove:int, side:0|1,
+//                myPts:int, oppPts:int }
+// myPts/oppPts are the ROOT player's (CPU = "us") series points; constant per
+// game (the net value head is always read from the root player's perspective).
+export const kSeriesTarget = 50;
+
+// Points the game winner scores given the loser's remaining card count.
+// 1..12 -> identity; 13 -> 20; 14 -> 30; 15 -> 40; 16 -> 50 (port of series.cpp).
+export function pointsForCards(cardsRemaining) {
+  if (cardsRemaining <= 0) return 0;
+  if (cardsRemaining <= 12) return cardsRemaining;
+  return 10 * (cardsRemaining - 11);
+}
+
+// P(the game's winner ultimately wins the series), from a 50x50 leader-perspective
+// win-prob table v[a][b]. Returns 1.0 if the win ends the series. table===null =>
+// legacy single-game objective (caller substitutes 1/0). Port of series.cpp.
+export function seriesValueAfterWin(table, winnerPts, loserPts, loserCardsRemaining) {
+  const next = winnerPts + pointsForCards(loserCardsRemaining);
+  if (next >= kSeriesTarget) return 1.0;
+  return table[next][loserPts];
+}
+
 export function azTransition(tbl, s, moveId) {
   const ns = {
     ourHand: s.ourHand.slice(),
@@ -187,6 +208,8 @@ export function azTransition(tbl, s, moveId) {
     oppSize: s.oppSize,
     lastMove: s.lastMove,
     side: s.side,
+    myPts: s.myPts | 0,
+    oppPts: s.oppPts | 0,
   };
   const mover = s.side;
   if (moveId === kPASS) {
