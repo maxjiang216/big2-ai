@@ -175,7 +175,9 @@ class SeqData:
         if "margin" in df.columns:
             d["margin"] = df["margin"].to_numpy()[keep].astype(np.float32)
             d["opp_hand"] = (
-                df[[f"opp_hand_{r}" for r in range(13)]].to_numpy()[keep].astype(np.int8)
+                df[[f"opp_hand_{r}" for r in range(13)]]
+                .to_numpy()[keep]
+                .astype(np.int8)
             )
             d["has_aux"] = np.ones(int(keep.sum()), dtype=np.float32)
         else:
@@ -347,8 +349,8 @@ class SeqLoader:
         self.shuffle = shuffle
         self.tokens = data.tokens.to(device)
         self.glen = data.glen.to(device)
-        self.pts = data.pts.to(device)          # [G, 2] seat-indexed series points
-        self.game_w = data.game_w.to(device)    # [G] importance weight per game
+        self.pts = data.pts.to(device)  # [G, 2] seat-indexed series points
+        self.game_w = data.game_w.to(device)  # [G] importance weight per game
         self.p = {k: _to_dev(v, device) for k, v in data.p.items()}
         self.o = {k: _to_dev(v, device) for k, v in data.o.items()}
         self.n_p = self._count(self.p)  # sample rows in THIS split's games

@@ -28,8 +28,10 @@ def main() -> None:
     arch = ck["arch"]
     model = Big2NetII(
         load_token_feats(),
-        d_model=arch["d_model"], n_layers=arch["n_layers"],
-        n_heads=arch["n_heads"], d_ff=arch["d_ff"],
+        d_model=arch["d_model"],
+        n_layers=arch["n_layers"],
+        n_heads=arch["n_heads"],
+        d_ff=arch["d_ff"],
     )
     model.load_state_dict(ck["state_dict"])
     model.eval()
