@@ -23,6 +23,7 @@ import {
   kUs, kPASS, handSize, azTransition, normalizeForcedPass, groupOppMoves,
   seriesValueAfterWin,
 } from './engine.js';
+import { solveLead, solveResponse, opp1Belief } from './opp1.js';
 
 const COMBO_BOMB = 5, COMBO_FH = 4;
 
@@ -100,11 +101,17 @@ export class Search {
       return;
     }
 
-    // Opp-has-1-card endgame: pin the series-optimal shed (a 1-card opponent
-    // can't beat any multi-card combo). Mirrors C++ expand_player opp1 fix.
-    if (n.st.lastMove === kPASS && n.st.oppSize === 1 &&
-        !tbl.handHasStraightLead(n.st.ourHand)) {
-      const mv = tbl.opp1SeriesMove(n.st.ourHand);
+    // Opp-has-1-card endgame: pin the exact, series-aware solver line. A 1-card
+    // opponent can't beat any multi-card combo; the solver also handles straights
+    // (brute-force over straight packings) and the response position (point 7),
+    // and is belief-free wherever a k-dominating line exists. See web/opp1.js
+    // (port of src/core/opp1_solver). Replaces the straight-blind opp1SeriesMove.
+    if (n.st.oppSize === 1) {
+      const belief = opp1Belief(tbl, n.st.ourHand, n.st.discard);
+      const sol = (n.st.lastMove === kPASS)
+        ? solveLead(tbl, n.st.ourHand, belief, this.seriesTable, n.st.myPts, n.st.oppPts)
+        : solveResponse(tbl, n.st.ourHand, n.st.lastMove, belief, this.seriesTable, n.st.myPts, n.st.oppPts);
+      const mv = sol.moves.length ? sol.moves[0] : kPASS;
       if (mv !== kPASS) {
         n.edges.push({ moveId: mv, prior: 1.0, child: null, fusedPass: false, moveValue: 0.5 });
         this.buildGroups(n);
