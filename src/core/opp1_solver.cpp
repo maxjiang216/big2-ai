@@ -213,4 +213,78 @@ Solution solve_lead(const std::array<int, 13> &hand, const Belief &b,
   return sol;
 }
 
+namespace {
+
+double win_val(const SeriesTable &t, int my_pts, int opp_pts) {
+  // We empty; opp keeps its 1 card -> we score points_for_cards(1) = 1.
+  return t.loaded ? series_value_after_win(t, my_pts, opp_pts, 1) : 1.0;
+}
+double loss_val(const SeriesTable &t, int my_pts, int opp_pts, int our_cards) {
+  return t.loaded ? 1.0 - series_value_after_win(t, opp_pts, my_pts, our_cards)
+                  : 0.0;
+}
+
+// Exposed singles of an already-chosen line (the kSingle moves), from `hand`.
+std::vector<int> exposed_of(const std::array<int, 13> &hand,
+                            const std::vector<int> &moves) {
+  std::vector<int> ex;
+  for (int mid : moves)
+    if (all_moves()[mid].combination == C::kSingle)
+      ex.push_back(all_moves()[mid].rank);
+  std::sort(ex.begin(), ex.end());
+  (void)hand;
+  return ex;
+}
+
+}  // namespace
+
+Solution solve_response(const std::array<int, 13> &hand, int last_move_id,
+                        const Belief &b, const SeriesTable &t, int my_pts,
+                        int opp_pts) {
+  Solution sol;
+  int our_size = 0;
+  for (int r = 0; r < 13; ++r) our_size += hand[r];
+
+  std::vector<int> legal = compute_legal_moves(hand, Move(last_move_id));
+  double best_ev = -1.0;
+  for (int r : legal) {
+    if (r == kPASS) continue;
+    const auto &c = footprint(r);
+    std::array<int, 13> rem = hand;
+    int rem_total = our_size;
+    for (int i = 0; i < 13; ++i) rem[i] -= c[i];
+    rem_total -= c[13];
+
+    double ev_r;
+    if (rem_total == 0) {
+      ev_r = win_val(t, my_pts, opp_pts);  // our response empties our hand -> win
+    } else {
+      // Optimal continuation after we (likely) regain the lead.
+      Solution cont = solve_lead(rem, b, t, my_pts, opp_pts);
+      Plan cp;
+      cp.exposed = exposed_of(rem, cont.moves);
+      Move m(r);
+      bool is_single = (m.combination == C::kSingle);
+      ev_r = 0.0;
+      for (int xi = 0; xi < 13; ++xi) {
+        if (b[xi] <= 0.0) continue;
+        int X = xi + 3;
+        double v;
+        if (is_single && X > m.rank)
+          v = loss_val(t, my_pts, opp_pts, rem_total);  // opp beats our single
+        else
+          v = value_vs_rank(cp, X, t, my_pts, opp_pts);
+        ev_r += b[xi] * v;
+      }
+    }
+    if (ev_r > best_ev) {
+      best_ev = ev_r;
+      sol.moves.assign(1, r);
+    }
+  }
+  // No legal response -> forced pass -> opp leads its card and wins; moves empty.
+  sol.by_dominance = false;
+  return sol;
+}
+
 }  // namespace opp1

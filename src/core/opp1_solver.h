@@ -65,6 +65,16 @@ struct Solution {
 Solution solve_lead(const std::array<int, 13> &hand, const Belief &b,
                     const SeriesTable &t, int my_pts, int opp_pts);
 
+// Response position (point 7): opponent just played `last_move_id` and now holds
+// exactly 1 card; we must respond. A multi-card / bomb response regains the lead
+// (continuation = solve_lead on the remainder); a single response of rank sr is
+// beaten iff opp's card X > sr, else regains the lead. Returns the best first
+// response move (re-solve as a lead position afterwards). moves is empty iff we
+// have no legal response (forced pass -> we lose).
+Solution solve_response(const std::array<int, 13> &hand, int last_move_id,
+                        const Belief &b, const SeriesTable &t, int my_pts,
+                        int opp_pts);
+
 }  // namespace opp1
 
 #endif
