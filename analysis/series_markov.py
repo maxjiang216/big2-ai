@@ -93,10 +93,7 @@ def _records_from_games(path: str, mc: np.ndarray):
     p = points_for_cards(loser_cards)
     if "pts0" in cols and "pts1" in cols:
         pts = np.stack(
-            [
-                t.column("pts0").chunk(0).to_numpy(),
-                t.column("pts1").chunk(0).to_numpy(),
-            ],
+            [t.column("pts0").chunk(0).to_numpy(), t.column("pts1").chunk(0).to_numpy()],
             axis=1,
         )
         a = pts[np.arange(len(first)), first]

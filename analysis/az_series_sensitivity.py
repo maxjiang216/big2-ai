@@ -51,13 +51,8 @@ def main():
 
     triples = list(zip(cfg.games, cfg.player, cfg.opp))
     tl, _ = make_seq_split(
-        triples,
-        cfg.batch_games,
-        dev,
-        val_frac=0.0,
-        seed=0,
-        validate=False,
-        series_v=None,
+        triples, cfg.batch_games, dev, val_frac=0.0, seed=0,
+        validate=False, series_v=None,
     )
     batch = next(iter(tl))
 
@@ -87,19 +82,8 @@ def main():
 
         v0, lp0, lb0, q0 = run(0, 0)
         print(f"probed {n_p} player rows, {n_o} opp rows from {cfg.model}\n")
-        grid = [
-            (0, 0),
-            (10, 0),
-            (25, 0),
-            (40, 0),
-            (49, 0),
-            (0, 40),
-            (40, 40),
-            (45, 5),
-            (5, 45),
-            (49, 1),
-            (1, 49),
-        ]
+        grid = [(0, 0), (10, 0), (25, 0), (40, 0), (49, 0),
+                (0, 40), (40, 40), (45, 5), (5, 45), (49, 1), (1, 49)]
         hdr = f"{'(a,b)':>9}  {'|Δvalue|':>9}  {'policyKL':>9}  {'behavKL':>9}  {'|Δqa|':>9}  {'meanV':>7}"
         print(hdr)
         print("-" * len(hdr))
@@ -109,15 +93,11 @@ def main():
             pkl = _kl_rows(lp, lp0).mean().item()
             bkl = _kl_rows(lb, lb0).mean().item()
             dq = (q - q0).abs().mean().item()
-            print(
-                f"{f'({a},{b})':>9}  {dv:9.5f}  {pkl:9.5f}  {bkl:9.5f}  {dq:9.5f}  {v.mean().item():7.4f}"
-            )
+            print(f"{f'({a},{b})':>9}  {dv:9.5f}  {pkl:9.5f}  {bkl:9.5f}  {dq:9.5f}  {v.mean().item():7.4f}")
         # full-range value swing as a ceiling reference
         vlo = run(0, 49)[0].mean().item()
         vhi = run(49, 0)[0].mean().item()
-        print(
-            f"\nmean value (0,49) -> (49,0): {vlo:.4f} -> {vhi:.4f}  (swing {vhi-vlo:+.4f})"
-        )
+        print(f"\nmean value (0,49) -> (49,0): {vlo:.4f} -> {vhi:.4f}  (swing {vhi-vlo:+.4f})")
 
 
 if __name__ == "__main__":

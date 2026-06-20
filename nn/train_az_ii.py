@@ -95,9 +95,7 @@ def _step(model, C, batch, lam_outcome=1.0, lam_bomb=1.0, lam_ar=1.0, lam_play=1
     # for the MCTS, vs the series outcome from the observer's POV.
     q = qa[n_p:].gather(1, tgt.unsqueeze(1)).squeeze(1)
     loss_q = _wmean(
-        F.binary_cross_entropy(
-            q.clamp(EPS, 1 - EPS), batch["o_value"], reduction="none"
-        ),
+        F.binary_cross_entropy(q.clamp(EPS, 1 - EPS), batch["o_value"], reduction="none"),
         wo,
     )
 
@@ -114,9 +112,7 @@ def _step(model, C, batch, lam_outcome=1.0, lam_bomb=1.0, lam_ar=1.0, lam_play=1
 
     loss = (
         lam_play * (loss_v + loss_p + loss_b + loss_q)
-        + lam_outcome * loss_o
-        + lam_bomb * loss_bomb
-        + lam_ar * loss_ar
+        + lam_outcome * loss_o + lam_bomb * loss_bomb + lam_ar * loss_ar
     )
     return (
         loss,
@@ -147,18 +143,11 @@ def train(cfg) -> None:
     print(f"Device: {device}")
     torch.manual_seed(cfg.seed)
 
-    triples = [
-        (f"{p}_games.parquet", f"{p}_player.parquet", f"{p}_opp.parquet")
-        for p in cfg.data
-    ]
+    triples = [(f"{p}_games.parquet", f"{p}_player.parquet", f"{p}_opp.parquet")
+               for p in cfg.data]
     tl, vl = make_seq_split(
-        triples,
-        cfg.batch_games,
-        device,
-        val_frac=cfg.val_frac,
-        seed=cfg.seed,
-        mix_decay=cfg.mix_decay,
-        validate=not cfg.no_validate,
+        triples, cfg.batch_games, device, val_frac=cfg.val_frac, seed=cfg.seed,
+        mix_decay=cfg.mix_decay, validate=not cfg.no_validate,
         series_v=cfg.series_v or None,
     )
     print(
@@ -167,11 +156,8 @@ def train(cfg) -> None:
     )
 
     model = Big2NetII(
-        load_token_feats(),
-        d_model=cfg.d_model,
-        n_layers=cfg.layers,
-        n_heads=cfg.heads,
-        d_ff=cfg.d_ff,
+        load_token_feats(), d_model=cfg.d_model, n_layers=cfg.layers,
+        n_heads=cfg.heads, d_ff=cfg.d_ff,
     ).to(device)
     if cfg.init:
         # Warm-start from a prior checkpoint so training REFINES it. Accepts a
@@ -204,9 +190,8 @@ def train(cfg) -> None:
     for epoch in range(1, cfg.epochs + 1):
         model.train()
         for batch in tl:
-            loss, _, _ = _step(
-                model, C, batch, lam_outcome, cfg.lam_bomb, cfg.lam_ar, lam_play
-            )
+            loss, _, _ = _step(model, C, batch, lam_outcome, cfg.lam_bomb,
+                               cfg.lam_ar, lam_play)
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -263,12 +248,8 @@ def train(cfg) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Train the az_ii PI-distillation net")
-    p.add_argument(
-        "--data",
-        nargs="+",
-        required=True,
-        help="triple PREFIX(es): PREFIX_{games,player,opp}.parquet",
-    )
+    p.add_argument("--data", nargs="+", required=True,
+                   help="triple PREFIX(es): PREFIX_{games,player,opp}.parquet")
     p.add_argument("--out", default="models/az_ii.pt")
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--batch-games", type=int, default=256)
@@ -286,26 +267,17 @@ def main() -> None:
     p.add_argument("--plateau-patience", type=int, default=2)
     p.add_argument("--lr-floor", type=float, default=1e-6)
     p.add_argument("--mix-decay", type=float, default=1.0)
-    p.add_argument(
-        "--series-v",
-        default="",
-        help="series V/natural-freq CSV; enables natural-freq weights",
-    )
-    p.add_argument(
-        "--init",
-        default="",
-        help="warm-start from this az_ii checkpoint (previous gen)",
-    )
+    p.add_argument("--series-v", default="",
+                   help="series V/natural-freq CSV; enables natural-freq weights")
+    p.add_argument("--init", default="",
+                   help="warm-start from this az_ii checkpoint (previous gen)")
     p.add_argument("--lam-outcome", type=float, default=1.0)
     p.add_argument("--lam-bomb", type=float, default=1.0)
     p.add_argument("--lam-ar", type=float, default=1.0)
-    p.add_argument(
-        "--belief-only",
-        action="store_true",
-        help="train ONLY the belief trunk + AR/bomb heads (zero the "
-        "value/policy/behavior/qa + outcome play losses); checkpoint "
-        "by AR NLL. For the determinization belief model.",
-    )
+    p.add_argument("--belief-only", action="store_true",
+                   help="train ONLY the belief trunk + AR/bomb heads (zero the "
+                   "value/policy/behavior/qa + outcome play losses); checkpoint "
+                   "by AR NLL. For the determinization belief model.")
     p.add_argument("--weight-decay", type=float, default=1e-5)
     p.add_argument("--grad-clip", type=float, default=0.5)
     p.add_argument("--seed", type=int, default=0)

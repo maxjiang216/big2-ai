@@ -11,6 +11,7 @@ void run_typed_search_tests();
 void run_az_search_tests();
 void run_az_pi_tests();
 void run_series_tests();
+void run_opp1_solver_tests();
 
 int main() {
   std::cout << "[ move        ] ";
@@ -55,6 +56,10 @@ int main() {
 
   std::cout << "[ series      ] ";
   run_series_tests();
+  std::cout << "PASS\n";
+
+  std::cout << "[ opp1_solver ] ";
+  run_opp1_solver_tests();
   std::cout << "PASS\n";
 
   std::cout << "All tests passed.\n";

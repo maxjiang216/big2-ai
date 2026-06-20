@@ -71,7 +71,9 @@ def relabel_series(ds, V: torch.Tensor) -> None:
         wpts = torch.where(win, a, b)
         lpts = torch.where(win, b, a)
         nxt = wpts + p
-        tw = torch.where(nxt >= 50, torch.ones(1), V[nxt.clamp(max=49), lpts]).float()
+        tw = torch.where(
+            nxt >= 50, torch.ones(1), V[nxt.clamp(max=49), lpts]
+        ).float()
         part.value = torch.where(win, tw, 1.0 - tw).float()
 
 

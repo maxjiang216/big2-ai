@@ -58,7 +58,8 @@ const Big2 = (() => {
   }
 
   // Ask the worker for the CPU's move. Resolves to a move id (kPASS => pass).
-  //   req = { hand:[13], discard:[13], oppCount, lastMove, history:[ids] }
+  //   req = { hand:[13], discard:[13], oppCount, lastMove, history:[ids],
+  //           myPts, oppPts }   (myPts/oppPts = CPU/human series points)
   function selectMove(req) {
     const reqId = ++seq;
     return new Promise((resolve, reject) => {
