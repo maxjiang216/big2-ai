@@ -394,6 +394,24 @@ $(BIN_DIR)/game_stats: $(GAME_STATS_OBJS)
 game_stats: dirs $(BIN_DIR)/game_stats
 
 # ============================================================================
+# bin/opp1_freq — how often the opp-1-card endgame strategy is reachable
+# ============================================================================
+
+$(BUILD_DIR)/research/opp1_freq.o: research/opp1_freq.cpp | dirs
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+OPP1_FREQ_OBJS := $(CORE_OBJS) \
+                  $(BUILD_DIR)/src/simulation/game_simulator.o \
+                  $(TYPED_SEARCH_OBJS) \
+                  $(BUILD_DIR)/research/opp1_freq.o
+
+$(BIN_DIR)/opp1_freq: $(OPP1_FREQ_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "✓ $(BIN_DIR)/opp1_freq"
+
+opp1_freq: dirs $(BIN_DIR)/opp1_freq
+
+# ============================================================================
 # bin/legal_move_dist — empirical legal-move-count distribution (no Arrow)
 # ============================================================================
 
