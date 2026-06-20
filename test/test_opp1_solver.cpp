@@ -1,9 +1,13 @@
 #include "../src/core/move.h"
 #include "../src/core/opp1_solver.h"
 #include "../src/core/series.h"
+#include "../src/core/util.h"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
+#include <map>
+#include <random>
 
 namespace {
 
@@ -96,9 +100,70 @@ void test_empty_hand() {
   assert(sol.moves.empty());
 }
 
+// Independent ground truth: exhaustive search over OUR play sequences when opp
+// holds a single of rank X (opp's responses are forced — opp beats any single
+// it can, emptying to win). Returns our remaining cards on optimal loss, or -1
+// if we can win. Memoised on the hand.
+int brute_best(const Arr &hand, int X, std::map<Arr, int> &memo) {
+  int total = 0;
+  for (int r = 0; r < 13; ++r) total += hand[r];
+  if (total == 0) return -1;  // already empty = won
+  auto it = memo.find(hand);
+  if (it != memo.end()) return it->second;
+  int best = total;  // fallback (shouldn't bind: we always have a legal lead)
+  for (int id : compute_legal_moves(hand, Move(C::kPass))) {
+    if (id == 0) continue;
+    Move m(id);
+    const auto &c = MOVE_TO_CARDS[id];
+    int rem_total = total - c[13];
+    if (rem_total == 0) { best = -1; break; }  // empties -> win
+    int cand;
+    if (m.combination == C::kSingle && m.rank < X) {
+      cand = rem_total;  // opp beats this single -> we lose with rem_total cards
+    } else {
+      Arr rem = hand;
+      for (int r = 0; r < 13; ++r) rem[r] -= c[r];
+      cand = brute_best(rem, X, memo);  // safe; continue leading
+    }
+    if (cand == -1) { best = -1; break; }
+    best = std::min(best, cand);
+  }
+  memo[hand] = best;
+  return best;
+}
+
+void test_solver_matches_bruteforce() {
+  static const std::array<int, 13> cap = {4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 1};
+  std::mt19937 rng(12345);
+  for (int trial = 0; trial < 3000; ++trial) {
+    int n = 2 + (int)(rng() % 8);  // hands of size 2..9
+    std::vector<int> pool;
+    for (int r = 0; r < 13; ++r)
+      for (int k = 0; k < cap[r]; ++k) pool.push_back(r);
+    std::shuffle(pool.begin(), pool.end(), rng);
+    Arr h{};
+    for (int i = 0; i < n; ++i) h[pool[i]]++;
+
+    auto plans = opp1::enumerate_plans(h);
+    for (int X = 3; X <= 15; ++X) {
+      // best achievable margin among our enumerated plans (-1 = win).
+      int solver_best = 1 << 30;
+      for (auto &p : plans) {
+        int k = opp1::k_below(p, X);
+        int v = (k <= 1) ? -1 : (k - 1);
+        solver_best = std::min(solver_best, v);
+      }
+      std::map<Arr, int> memo;
+      int bf = brute_best(h, X, memo);
+      assert(solver_best == bf);  // theory is complete + outcome model exact
+    }
+  }
+}
+
 }  // namespace
 
 void run_opp1_solver_tests() {
+  test_solver_matches_bruteforce();
   test_outcome_model();
   test_bomb_aux_second_lowest();
   test_straight_dominates();
