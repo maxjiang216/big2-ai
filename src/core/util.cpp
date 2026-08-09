@@ -259,8 +259,10 @@ std::vector<int> compute_legal_moves(const HandBits &hand,
       }
   }
 
-  // Bombs: any bomb beats a non-bomb; higher-rank bomb beats lower-rank bomb
-  const int bomb_rank_min = (lc == bc) ? lr : -1;
+  // Bombs: any bomb beats a non-bomb; higher-rank bomb beats lower-rank bomb.
+  // `b` below is a rank *index*, so the incoming face rank must be converted
+  // (as every branch above does) before it can be used as a floor.
+  const int bomb_rank_min = (lc == bc) ? rank_to_idx(lr) : -1;
   for (int b = 0; b < 13; ++b) {
       if (b <= bomb_rank_min) continue;
       const auto &bg = tbl.bombs[b];
