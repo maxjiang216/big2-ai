@@ -98,8 +98,115 @@ static void enumerate_hands_kpass_test(int rank, int rem, std::array<int, 13> &h
   }
 }
 
+// Move id of the bare (auxiliary-free) bomb of a given face rank, or -1.
+static int bare_bomb_id(int face_rank) {
+  const auto &mvs = all_moves();
+  for (int i = 0; i < LEGAL_MOVES_SIZE; ++i)
+    if (mvs[i].combination == Move::Combination::kBomb &&
+        mvs[i].auxiliary == 0 && mvs[i].rank == face_rank)
+      return i;
+  return -1;
+}
+
+static bool affordable(const std::array<int, 13> &hand, int mid) {
+  const auto &cost = MOVE_TO_CARDS[mid];
+  for (int r = 0; r < 13; ++r)
+    if (hand[r] < cost[r])
+      return false;
+  return true;
+}
+
 void run_legal_moves_tests() {
   std::mt19937 rng(42);
+
+  // ---- Bomb responses beat lower bombs (regression: util.cpp compared a face
+  // rank against a rank *index*, so bombs of Q and K read as unbeatable and
+  // every bomb wrongly blocked the three ranks above it). ----
+  {
+    // Bare bombs of 5, 9, K and the ace bomb (three aces; one ace is removed
+    // from the deck, so rank 14 is a triple -- see RULES.md:90).
+    std::array<int, 13> hand{};
+    hand[2] = 4;   // 5s
+    hand[6] = 4;   // 9s
+    hand[10] = 4;  // Ks
+    hand[11] = 3;  // ace bomb
+
+    struct Case {
+      int last_rank;               // face rank of the bomb just played
+      std::vector<int> expect;     // face ranks of our legal bomb responses
+    };
+    // There is no bomb of 2s: RULES.md:9 removes three of the four 2s.
+    const std::vector<Case> cases = {
+        {4, {5, 9, 13, 14}},  // low bomb: everything higher answers it
+        {5, {9, 13, 14}},     // equal rank does not beat
+        {12, {13, 14}},       // the Q case that read as unbeatable
+        {13, {14}},           // the K case that read as unbeatable
+        {14, {}},             // ace bomb genuinely is unbeatable
+    };
+
+    for (const Case &c : cases) {
+      const int last_id = bare_bomb_id(c.last_rank);
+      if (last_id < 0) {
+        std::cerr << "no bare bomb for rank " << c.last_rank << "\n";
+        std::abort();
+      }
+      std::vector<int> got;
+      for (int mid : compute_legal_moves(hand, last_id)) {
+        const Move &m = all_moves()[mid];
+        if (m.combination == Move::Combination::kBomb && m.auxiliary == 0)
+          got.push_back(m.rank);
+      }
+      std::sort(got.begin(), got.end());
+      std::vector<int> want = c.expect;
+      std::sort(want.begin(), want.end());
+      if (got != want) {
+        std::cerr << "bomb response mismatch after bomb of rank "
+                  << c.last_rank << ": got {";
+        for (int r : got)
+          std::cerr << r << ",";
+        std::cerr << "} want {";
+        for (int r : want)
+          std::cerr << r << ",";
+        std::cerr << "}\n";
+        std::abort();
+      }
+    }
+  }
+
+  // ---- compute_legal_moves agrees with the get_beating_moves relation.
+  // These are two independent encodings of "what beats what" (the browser
+  // consumes the latter via az_moves.json, the search the former); nothing
+  // else cross-checks them. ----
+  for (int it = 0; it < 20'000; ++it) {
+    std::array<int, 13> hand{};
+    int lid = 0;
+    int cp = 0;
+    random_position(rng, &hand, &lid, &cp);
+    (void)cp;
+    if (lid == kPASS)
+      continue;  // lead positions are not a beat relation
+
+    std::vector<int> got;
+    for (int mid : compute_legal_moves(hand, lid))
+      if (mid != kPASS)
+        got.push_back(mid);
+    std::vector<int> want;
+    for (int mid : get_beating_moves()[lid])
+      if (affordable(hand, mid))
+        want.push_back(mid);
+    std::sort(got.begin(), got.end());
+    std::sort(want.begin(), want.end());
+    if (got != want) {
+      std::cerr << "compute_legal_moves vs get_beating_moves mismatch, last="
+                << lid << " (" << all_moves()[lid] << ")\n";
+      std::vector<int> diff;
+      std::set_symmetric_difference(got.begin(), got.end(), want.begin(),
+                                    want.end(), std::back_inserter(diff));
+      for (int mid : diff)
+        std::cerr << "  differs: " << mid << " (" << all_moves()[mid] << ")\n";
+      std::abort();
+    }
+  }
 
   // kPASS straight enumeration: circular window path vs 143-loop reference
   for (int it = 0; it < 50'000; ++it) {
