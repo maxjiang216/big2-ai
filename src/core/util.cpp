@@ -3,6 +3,10 @@
 #include <algorithm>
 #include <cassert>
 #include <iostream>
+#include <limits>
+#if defined(__AVX512F__)
+#include <immintrin.h>
+#endif
 #include <optional>
 
 // ---------------------------------------------------------------------------
@@ -445,7 +449,7 @@ find_forced_win(const std::array<int, 13> &hand,
   return find_forced_win_inner(hand, ctx);
 }
 
-std::vector<int> compute_possible_moves(const std::array<int, 13> &player_hand,
+std::vector<int> compute_possible_moves_reference(const std::array<int, 13> &player_hand,
                                         const std::array<int, 13> &discard_pile,
                                         int opponent_card_count,
                                         const Move &last_move,
@@ -487,4 +491,126 @@ std::vector<int> compute_possible_moves(const std::array<int, 13> &player_hand,
       possible_moves.push_back(move_id);
   }
   return possible_moves;
+}
+
+namespace {
+
+// Thermometer encoding packed into one 64-bit word: bits [16n, 16n+13) hold
+// "rank r has >= n+1 cards". For counts c, t ⊆ T(u) iff c[r] <= u[r] ∀r, so a
+// 13-rank compare loop collapses into one AND per move.
+inline uint64_t thermo64(const HandBits &h) {
+  return uint64_t(h.at1) | (uint64_t(h.at2) << 16) | (uint64_t(h.at3) << 32) |
+         (uint64_t(h.at4) << 48);
+}
+
+constexpr int kNumCombos = 26;
+static_assert(static_cast<int>(Move::Combination::kTripleStraight5) == kNumCombos - 1,
+              "kNumCombos must cover every Move::Combination");
+
+struct PossibleMoveTables {
+  // Structure-of-arrays over move ids, 64-bit lanes so the AVX-512 path can
+  // load 8 moves per vector. Padded so a full vector never reads past the end.
+  static constexpr int kPadded = LEGAL_MOVES_SIZE + 8;
+  alignas(64) uint64_t need[kPadded];
+  alignas(64) int64_t count[kPadded];
+  alignas(64) int64_t rank[kPadded];
+  int8_t combo[LEGAL_MOVES_SIZE];
+  // Move ids are grouped by combination: combo c occupies [range_lo, range_hi).
+  int range_lo[kNumCombos];
+  int range_hi[kNumCombos];
+};
+
+const PossibleMoveTables &possible_move_tables() {
+  static const PossibleMoveTables t = [] {
+    PossibleMoveTables pt{};
+    const auto &moves = all_moves();
+    for (int mid = 0; mid < LEGAL_MOVES_SIZE; ++mid) {
+      std::array<int, 13> c{};
+      for (int r = 0; r < 13; ++r) c[r] = MOVE_TO_CARDS[mid][r];
+      pt.need[mid] = thermo64(hand_bits_from_counts(c));
+      pt.count[mid] = MOVE_TO_CARDS[mid][13];
+      pt.combo[mid] = static_cast<int8_t>(moves[mid].combination);
+      pt.rank[mid] = moves[mid].rank;
+    }
+    for (int c = 0; c < kNumCombos; ++c) pt.range_lo[c] = pt.range_hi[c] = 0;
+    for (int mid = LEGAL_MOVES_SIZE - 1; mid >= 0; --mid) {
+      const int c = pt.combo[mid];
+      if (pt.range_hi[c] == 0) pt.range_hi[c] = mid + 1;
+      pt.range_lo[c] = mid;
+    }
+    for (int mid = 0; mid < LEGAL_MOVES_SIZE; ++mid)  // contiguity check
+      assert(mid >= pt.range_lo[pt.combo[mid]] && mid < pt.range_hi[pt.combo[mid]]);
+    return pt;
+  }();
+  return t;
+}
+
+}  // namespace
+
+std::vector<int> compute_possible_moves(const std::array<int, 13> &player_hand,
+                                        const std::array<int, 13> &discard_pile,
+                                        int opponent_card_count,
+                                        const Move &last_move,
+                                        bool exclude_bombs) {
+  const auto &pt = possible_move_tables();
+  std::array<int, 13> unseen{};
+  for (int r = 0; r < 13; ++r) {
+    const int u = max_cards_in_deck_for_rank(r) - player_hand[r] - discard_pile[r];
+    if (u < 0) return compute_possible_moves_reference(  // corrupt state
+        player_hand, discard_pile, opponent_card_count, last_move, exclude_bombs);
+    unseen[r] = u;
+  }
+  const uint64_t missing = ~thermo64(hand_bits_from_counts(unseen));
+
+  const int bomb = static_cast<int>(Move::Combination::kBomb);
+  const int lc = static_cast<int>(last_move.combination);
+  const int lr = last_move.rank;
+
+  int buf[PossibleMoveTables::kPadded + 1];
+  int n = 0;
+  // Appends ids in [lo, hi) the opponent could hold; `beat_rank` filters to
+  // strictly higher ranks (INT_MIN disables it).
+  auto scan = [&](int lo, int hi, int beat_rank) {
+    int mid = lo;
+#if defined(__AVX512F__) && defined(__AVX512VL__)
+    const __m512i vmissing = _mm512_set1_epi64(static_cast<long long>(missing));
+    const __m512i vopp = _mm512_set1_epi64(opponent_card_count);
+    const __m512i vbeat = _mm512_set1_epi64(beat_rank);
+    const __m256i lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    for (; mid < hi; mid += 8) {
+      __mmask8 k = _mm512_testn_epi64_mask(_mm512_loadu_si512(pt.need + mid), vmissing);
+      k &= _mm512_cmple_epi64_mask(_mm512_loadu_si512(pt.count + mid), vopp);
+      k &= _mm512_cmpgt_epi64_mask(_mm512_loadu_si512(pt.rank + mid), vbeat);
+      if (hi - mid < 8) k &= static_cast<__mmask8>((1u << (hi - mid)) - 1);
+      _mm256_mask_compressstoreu_epi32(buf + n, k,
+                                       _mm256_add_epi32(lane, _mm256_set1_epi32(mid)));
+      n += __builtin_popcount(k);
+    }
+#endif
+    for (; mid < hi; ++mid)
+      if ((pt.need[mid] & missing) == 0 &&
+          pt.count[mid] <= opponent_card_count && pt.rank[mid] > beat_rank)
+        buf[n++] = mid;
+  };
+  auto result = [&] { return std::vector<int>(buf, buf + n); };
+  constexpr int kAny = std::numeric_limits<int>::min();
+  const int bomb_lo = pt.range_lo[bomb], bomb_hi = pt.range_hi[bomb];
+
+  if (lc == static_cast<int>(Move::Combination::kPass)) {
+    // Ids are grouped by combination, so skipping the bomb block keeps order.
+    scan(kSINGLE_START, bomb_lo, kAny);
+    if (!exclude_bombs) scan(bomb_lo, bomb_hi, kAny);
+    scan(bomb_hi, LEGAL_MOVES_SIZE, kAny);
+    return result();
+  }
+  buf[n++] = kPASS;
+  if (lc == bomb) {
+    if (!exclude_bombs) scan(bomb_lo, bomb_hi, lr);
+    return result();
+  }
+  const bool combo_first = pt.range_lo[lc] < bomb_lo;
+  if (combo_first) scan(pt.range_lo[lc], pt.range_hi[lc], lr);
+  if (!exclude_bombs) scan(bomb_lo, bomb_hi, kAny);
+  if (!combo_first) scan(pt.range_lo[lc], pt.range_hi[lc], lr);
+  return result();
 }

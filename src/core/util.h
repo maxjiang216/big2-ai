@@ -133,6 +133,12 @@ std::vector<int> compute_possible_moves(const std::array<int, 13> &player_hand,
                                         const Move &last_move,
                                         bool exclude_bombs);
 
+// Original scalar implementation, kept as a cross-check oracle for tests.
+std::vector<int> compute_possible_moves_reference(
+    const std::array<int, 13> &player_hand,
+    const std::array<int, 13> &discard_pile, int opponent_card_count,
+    const Move &last_move, bool exclude_bombs);
+
 // For each non-pass move_id, the list of move_ids that can beat it
 // (same combination type with higher rank, or any bomb).
 // Computed once on first call; O(LEGAL_MOVES_SIZE^2) pre-processing.

@@ -104,7 +104,32 @@ static void test_possible_moves_not_bomb_has_no_bombs() {
   }
 }
 
+// Fast compute_possible_moves must match the scalar reference exactly, on
+// states reached in random play, against every possible last move.
+static void test_possible_moves_matches_reference() {
+  std::mt19937 rng(2026);
+  for (int game = 0; game < 200; ++game) {
+    Game g;
+    g.shuffle_deal(rng);
+    while (!g.is_over()) {
+      const auto hand = g.player_hand(g.current_player());
+      const auto discard = g.discard_pile();
+      const int opp = g.get_player_hand_size(1 - g.current_player());
+      for (int last = 0; last < LEGAL_MOVES_SIZE; ++last) {
+        for (bool nb : {false, true}) {
+          assert(compute_possible_moves(hand, discard, opp, Move(last), nb) ==
+                 compute_possible_moves_reference(hand, discard, opp,
+                                                  Move(last), nb));
+        }
+      }
+      auto legal = g.get_legal_moves();
+      g.apply_move(legal[rng() % legal.size()]);
+    }
+  }
+}
+
 void run_partial_game_tests() {
+  test_possible_moves_matches_reference();
   test_construction_from_game();
   test_partial_legal_subset_of_game_legal();
   test_apply_move_flips_turn();
